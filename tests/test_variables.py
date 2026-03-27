@@ -1,0 +1,219 @@
+"""Tests for atomic vs derived variable normalization."""
+
+from __future__ import annotations
+
+import pandas as pd
+from microplex.core import EntityType
+
+from microplex_us.variables import (
+    DonorMatchStrategy,
+    ProjectionAggregation,
+    add_dividend_composition_features,
+    donor_imputation_block_specs,
+    donor_imputation_blocks,
+    is_condition_var_compatible_with_entity,
+    is_condition_var_compatible_with_targets,
+    is_projected_condition_var_compatible,
+    normalize_dividend_columns,
+    prune_redundant_variables,
+    resolve_condition_entities_for_targets,
+    resolve_variable_semantic_capabilities,
+    restore_dividend_components_from_composition,
+)
+
+
+def test_normalize_dividend_columns_prefers_atomic_components_over_totals():
+    frame = pd.DataFrame(
+        {
+            "qualified_dividend_income": [30.0],
+            "non_qualified_dividend_income": [12.0],
+            "ordinary_dividend_income": [80.0],
+            "dividend_income": [5.0],
+        }
+    )
+
+    normalized = normalize_dividend_columns(frame)
+
+    assert normalized["qualified_dividend_income"].tolist() == [30.0]
+    assert normalized["non_qualified_dividend_income"].tolist() == [12.0]
+    assert normalized["ordinary_dividend_income"].tolist() == [42.0]
+    assert normalized["dividend_income"].tolist() == [42.0]
+
+
+def test_prune_redundant_variables_drops_dividend_totals_when_basis_present():
+    variables = {
+        "income",
+        "qualified_dividend_income",
+        "non_qualified_dividend_income",
+        "dividend_income",
+        "ordinary_dividend_income",
+    }
+
+    assert prune_redundant_variables(variables) == {
+        "income",
+        "qualified_dividend_income",
+        "non_qualified_dividend_income",
+    }
+
+
+def test_dividend_composition_features_derive_total_and_share():
+    frame = pd.DataFrame(
+        {
+            "qualified_dividend_income": [30.0, 0.0],
+            "non_qualified_dividend_income": [12.0, 0.0],
+        }
+    )
+
+    enriched = add_dividend_composition_features(frame)
+
+    assert enriched["dividend_income"].tolist() == [42.0, 0.0]
+    assert enriched["ordinary_dividend_income"].tolist() == [42.0, 0.0]
+    assert enriched["qualified_dividend_share"].tolist() == [30.0 / 42.0, 0.0]
+
+
+def test_restore_dividend_components_from_composition_reconstructs_atomic_basis():
+    frame = pd.DataFrame(
+        {
+            "dividend_income": [42.0, 10.0],
+            "qualified_dividend_share": [30.0 / 42.0, 0.25],
+        }
+    )
+
+    restored = restore_dividend_components_from_composition(frame)
+
+    assert restored["qualified_dividend_income"].round(6).tolist() == [30.0, 2.5]
+    assert restored["non_qualified_dividend_income"].round(6).tolist() == [12.0, 7.5]
+    assert restored["ordinary_dividend_income"].round(6).tolist() == [42.0, 10.0]
+    assert restored["dividend_income"].round(6).tolist() == [42.0, 10.0]
+
+
+def test_donor_imputation_blocks_keep_dividends_in_one_composition_block():
+    blocks = donor_imputation_blocks(
+        {
+            "qualified_dividend_income",
+            "non_qualified_dividend_income",
+            "partnership_s_corp_income",
+            "taxable_interest_income",
+        }
+    )
+
+    assert blocks == (
+        ("dividend_income", "qualified_dividend_share"),
+        ("partnership_s_corp_income",),
+        ("taxable_interest_income",),
+    )
+
+
+def test_donor_imputation_block_specs_include_match_strategies_and_restored_variables():
+    specs = donor_imputation_block_specs(
+        {
+            "qualified_dividend_income",
+            "non_qualified_dividend_income",
+            "taxable_interest_income",
+        }
+    )
+
+    assert specs[0].model_variables == ("dividend_income", "qualified_dividend_share")
+    assert specs[0].restored_variables == (
+        "qualified_dividend_income",
+        "non_qualified_dividend_income",
+    )
+    assert (
+        specs[0].strategy_for("dividend_income")
+        is DonorMatchStrategy.ZERO_INFLATED_POSITIVE
+    )
+    assert specs[0].native_entity is EntityType.TAX_UNIT
+    assert specs[0].condition_entities == (EntityType.HOUSEHOLD, EntityType.TAX_UNIT)
+    assert specs[0].strategy_for("qualified_dividend_share") is DonorMatchStrategy.RANK
+    assert specs[1].model_variables == ("taxable_interest_income",)
+    assert specs[1].native_entity is EntityType.TAX_UNIT
+    assert specs[1].condition_entities == (EntityType.HOUSEHOLD, EntityType.TAX_UNIT)
+    assert (
+        specs[1].strategy_for("taxable_interest_income")
+        is DonorMatchStrategy.ZERO_INFLATED_POSITIVE
+    )
+
+
+def test_condition_var_compatibility_allows_household_controls_for_tax_unit_targets():
+    assert is_condition_var_compatible_with_entity(
+        "state_fips",
+        target_entity=EntityType.TAX_UNIT,
+    )
+    assert is_condition_var_compatible_with_entity(
+        "tenure",
+        target_entity=EntityType.TAX_UNIT,
+    )
+    assert not is_condition_var_compatible_with_entity(
+        "age",
+        target_entity=EntityType.TAX_UNIT,
+    )
+
+
+def test_resolve_condition_entities_uses_variable_family_policy():
+    assert resolve_condition_entities_for_targets(("taxable_interest_income",)) == (
+        EntityType.HOUSEHOLD,
+        EntityType.TAX_UNIT,
+    )
+    assert resolve_condition_entities_for_targets(("self_employment_income",)) == (
+        EntityType.PERSON,
+        EntityType.HOUSEHOLD,
+        EntityType.TAX_UNIT,
+    )
+
+
+def test_condition_var_compatibility_with_targets_distinguishes_asset_and_labor_tax_vars():
+    assert not is_condition_var_compatible_with_targets(
+        "age",
+        target_variables=("taxable_interest_income",),
+    )
+    assert is_condition_var_compatible_with_targets(
+        "age",
+        target_variables=("self_employment_income",),
+    )
+    assert is_condition_var_compatible_with_targets(
+        "tenure",
+        target_variables=("taxable_interest_income",),
+    )
+
+
+def test_projected_condition_var_compatibility_promotes_person_features_to_group_entity():
+    assert is_projected_condition_var_compatible(
+        "age",
+        projected_entity=EntityType.TAX_UNIT,
+        allowed_condition_entities=(EntityType.HOUSEHOLD, EntityType.TAX_UNIT),
+    )
+    assert not is_projected_condition_var_compatible(
+        "age",
+        projected_entity=EntityType.HOUSEHOLD,
+        allowed_condition_entities=(EntityType.TAX_UNIT,),
+    )
+
+
+def test_resolve_variable_semantic_capabilities_marks_redundant_dividend_totals():
+    capabilities = resolve_variable_semantic_capabilities(
+        {
+            "qualified_dividend_income",
+            "non_qualified_dividend_income",
+            "ordinary_dividend_income",
+            "dividend_income",
+        }
+    )
+
+    assert not capabilities["dividend_income"].authoritative
+    assert not capabilities["dividend_income"].usable_as_condition
+    assert not capabilities["ordinary_dividend_income"].authoritative
+    assert not capabilities["ordinary_dividend_income"].usable_as_condition
+
+
+def test_variable_semantics_define_projection_aggregation_for_person_controls():
+    from microplex_us.variables import variable_semantic_spec_for
+
+    assert EntityType.RECORD not in variable_semantic_spec_for("age").allowed_condition_entities
+    assert (
+        variable_semantic_spec_for("age").projection_aggregation
+        is ProjectionAggregation.MAX
+    )
+    assert (
+        variable_semantic_spec_for("income").projection_aggregation
+        is ProjectionAggregation.SUM
+    )

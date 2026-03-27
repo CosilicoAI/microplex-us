@@ -1,0 +1,57 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "microplex-us"
+version = "0.1.0"
+description = "US-specific adapters, pipelines, and PolicyEngine integration for microplex"
+readme = "README.md"
+license = "MIT"
+authors = [
+    { name = "Cosilico", email = "hello@cosilico.ai" }
+]
+requires-python = ">=3.10"
+dependencies = [
+    "microplex",
+    "duckdb>=1.2",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "ruff>=0.1",
+]
+policyengine = [
+    "policyengine-us==1.587.0; python_version >= '3.11' and python_version < '3.15'",
+]
+
+[project.urls]
+Repository = "https://github.com/CosilicoAI/microplex-us"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/microplex_us"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+addopts = "-v --tb=short"
+
+[tool.ruff]
+line-length = 88
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "W", "UP"]
+ignore = [
+    "E501",
+    "N803",
+    "N806",
+]
+
+[tool.ruff.lint.per-file-ignores]
+"examples/**/*.py" = ["E402"]
+"tests/**/*.py" = ["E402", "N802"]
+
+[tool.uv.sources]
+microplex = { path = "../microplex", editable = true }
