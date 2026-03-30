@@ -916,3 +916,109 @@ Append-only notes for agents working in `microplex-us`.
   - weight-aware source sampling is a real but small win
   - it is not enough to close the broad-loss gap
   - the remaining bottleneck is still structural state support / state allocation plus unconverged broad calibration, not donor-variable passage
+
+## 2026-03-29 weighted-source scale checkpoint
+
+- broad PE-native result on weighted `cps+puf + qrf + bootstrap` with `sample_n=1000`, `n_synthetic=2000`:
+  - artifact: `/Users/maxghenis/CosilicoAI/microplex-us/artifacts/tmp_qrf_weighted_sample1000_pe_native_broad_20260329.json`
+  - candidate loss `0.8696287975`
+  - PE baseline `0.0202439085`
+  - delta `+0.8493848890`
+- this improves the weighted `sample_n=500` comparable run (`0.8894089161`) by about `0.01978`
+- calibration also got a little healthier:
+  - dropped constraints improved from `2387 / 3611` to `2301 / 3611`
+  - feasibility-drop share improved from `66.1%` to `63.7%`
+- family improvements are concentrated exactly where we need them:
+  - `state_age_distribution`: `-0.00579` loss-contribution delta improvement
+  - `state_agi_distribution`: `-0.00579`
+  - `national_irs_other`: `-0.00438`
+  - `national_population_by_age`: `-0.00158`
+- pre-sim support also improved materially at this scale:
+  - `sample_n=500`: state-age support recall `0.464`, nonempty cells `426`
+  - `sample_n=1000`: state-age support recall `0.598`, nonempty cells `549`
+- interpretation:
+  - scaling the source sample is a much stronger lever than the small weighted-subsampling patch alone
+  - the next main-line bet should stay on this axis: weighted-source path + larger `sample_n`
+  - state-stratified bootstrap still looks like the wrong direction at this sample size
+
+## 2026-03-29 broad-loop reversal checkpoint
+
+- weighted `cps+puf + qrf + bootstrap` with `sample_n=1000`, `n_synthetic=5000` regressed materially:
+  - artifact: `/Users/maxghenis/CosilicoAI/microplex-us/artifacts/tmp_qrf_weighted_sample1000_n5000_pe_native_broad_20260329.json`
+  - candidate loss `0.8907772820` vs the stronger `sample_n=1000`, `n_synthetic=2000` result `0.8696287975`
+  - calibration feasibility looked *broader* but fit quality got worse:
+    - dropped constraints improved to `1807 / 3611` (`50.0%`)
+    - but `weight_collapse_suspected = true`
+    - household effective sample ratio collapsed to `0.165`
+    - median household weight collapsed to `~1.37e-08`
+- family-level regression from `1000/2000` to `1000/5000` is narrow, not broad-based:
+  - `national_irs_other`: `+0.01510`
+  - `state_agi_distribution`: `+0.00899`
+  - `state_aca_spending`: `+0.00133`
+  - meanwhile `state_age_distribution` *improved* slightly (`-0.00293`)
+- exact target regressions confirm the failure mode is filer/tax/ACA structure, not generic state-age support:
+  - huge regressions in:
+    - high-AGI IRS bins (`1m+`, `500k-1m`)
+    - Head of Household bins
+    - business/capital-gains/taxable-interest cells
+    - state ACA spending cells
+    - a few extreme state high-AGI cells like `state/VT/adjusted_gross_income/amount/500000_inf`
+- interpretation:
+  - more synthetic rows from the same support base destabilize broad PE-native fit
+  - this is not a monotone “more `n_synthetic` is better” regime
+  - for broad PE-native loss, the current bottleneck is tax/filer structure stability plus calibration interaction
+
+## 2026-03-29 source-mix and donor-path checkpoint
+
+- weighted `cps+puf + qrf + bootstrap` with `sample_n=2000`, `n_synthetic=2000` was worse, not better:
+  - artifact: `/Users/maxghenis/CosilicoAI/microplex-us/artifacts/tmp_qrf_weighted_sample2000_pe_native_broad_20260329.json`
+  - candidate loss `0.9251676593`
+  - supported constraints `1280` vs `1310` on the better `1000/2000` run
+  - household calibrated weight total `6.24M` vs `10.37M` on the better `1000/2000` run
+  - mean constraint error `0.879` vs `0.795`
+- the raw weighted CPS source sample is not the obvious culprit:
+  - `sample_n=1000`: weight sum `4.37M`, `50` states
+  - `sample_n=2000`: weight sum `8.70M`, all `51` states
+- the raw PUF source is effectively national-only in this path, which is expected:
+  - `state_count = 1` on the sampled PUF household table
+- donor-condition audit for the PUF path on the current best `cps+puf` run:
+  - scaffold: `cps_asec_2023`
+  - selected donor condition vars are only:
+    - `age`
+    - `interest_income`
+    - `rental_income`
+    - `self_employment_income`
+    - `sex`
+    - `social_security`
+    - `unemployment_compensation`
+  - importantly, `state_fips` is *not* entering the PUF donor match
+- `cps-only` isolation at the same `sample_n=2000`, `n_synthetic=2000` size:
+  - artifact: `/Users/maxghenis/CosilicoAI/microplex-us/artifacts/tmp_cps_only_sample2000_pe_native_broad_20260329.json`
+  - candidate loss `0.8846092807`
+  - this is much better than `cps+puf` at the same size (`0.9251676593`)
+  - but still worse than the best current broad run (`cps+puf`, `1000/2000`, `0.8696287975`)
+- pre-sim parity at `sample_n=2000`, `n_synthetic=2000` also points the same way:
+  - `cps+puf`: state-age support recall `0.6100`, multi-person tax-unit share `0.3885`
+  - `cps-only`: state-age support recall `0.6296`, multi-person tax-unit share `0.4090`
+- interpretation:
+  - the current PUF donor path is harming the broad PE-native mission surface at `sample_n=2000`
+  - the harm is not coming from `state_fips` being used in donor matching
+  - the sharper hypothesis is that donor-imputing tax/filer surfaces like `filing_status_code` from only a weak seven-variable numeric condition set is destabilizing `national_irs_other` and related ACA/high-AGI families
+
+## 2026-03-29 diagnostics tooling checkpoint
+
+- added reusable PE-native target-delta comparison helper in `src/microplex_us/pipelines/pe_native_scores.py`
+  - purpose: compare exact target-level weighted-loss deltas between two candidate H5s without ad hoc one-off scripts
+  - exported via `src/microplex_us/pipelines/__init__.py`
+  - covered in `tests/pipelines/test_pe_native_scores.py`
+- focused verification:
+  - `pytest -q tests/pipelines/test_pe_native_scores.py` -> `4 passed`
+  - `ruff check` on the touched scorer/export/test files -> clean
+
+## In flight
+
+- direct ablation still running:
+  - `cps+puf`, weighted `qrf + bootstrap`, `sample_n=1000`, `n_synthetic=2000`
+  - but skip donor integration of `filing_status_code`
+  - output target: `/Users/maxghenis/CosilicoAI/microplex-us/artifacts/tmp_qrf_no_filing_status_pe_native_broad_20260329.json`
+- this is the cleanest immediate test of the current filer-structure hypothesis.

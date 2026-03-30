@@ -446,6 +446,123 @@ for candidate_dataset in CANDIDATE_DATASETS:
 print(json.dumps(payload, sort_keys=True))
 """.strip()
 
+_PE_NATIVE_TARGET_DELTA_SCRIPT = """
+import json
+import sys
+from pathlib import Path
+
+import numpy as np
+from policyengine_core.data import Dataset
+
+REPO_ROOT = sys.argv[1]
+if REPO_ROOT not in sys.path:
+    sys.path.insert(0, REPO_ROOT)
+
+from policyengine_us import Microsimulation
+from policyengine_us_data.utils.loss import build_loss_matrix
+
+BAD_TARGETS = tuple(json.loads(sys.argv[2]))
+PERIOD = int(sys.argv[3])
+FROM_DATASET = sys.argv[4]
+TO_DATASET = sys.argv[5]
+TOP_K = int(sys.argv[6])
+
+
+def dataset_from_path(dataset_path: str, dataset_name: str):
+    class LocalDataset(Dataset):
+        name = dataset_name
+        label = dataset_name
+        file_path = dataset_path
+        data_format = Dataset.TIME_PERIOD_ARRAYS
+        time_period = PERIOD
+
+    return LocalDataset
+
+
+def compute(dataset_path: str):
+    dataset_cls = dataset_from_path(
+        dataset_path,
+        Path(dataset_path).stem.replace("-", "_"),
+    )
+    loss_matrix, targets_array = build_loss_matrix(dataset_cls, PERIOD)
+    target_names = np.asarray(loss_matrix.columns)
+    zero_mask = np.isclose(targets_array, 0.0, atol=0.1)
+    bad_mask = np.isin(target_names, BAD_TARGETS)
+    keep_mask = ~(zero_mask | bad_mask)
+
+    filtered = loss_matrix.loc[:, keep_mask]
+    filtered_targets = np.asarray(targets_array[keep_mask], dtype=np.float64)
+    is_national = np.asarray(filtered.columns.str.startswith("nation/"), dtype=bool)
+    n_national = int(is_national.sum())
+    n_state = int((~is_national).sum())
+    if n_national == 0 or n_state == 0:
+        raise ValueError(
+            "PE-native broad loss requires both national and state targets after filtering"
+        )
+
+    normalisation_factor = np.where(
+        is_national,
+        1.0 / n_national,
+        1.0 / n_state,
+    ).astype(np.float64)
+    inv_mean_normalisation = 1.0 / float(np.mean(normalisation_factor))
+
+    sim = Microsimulation(dataset=dataset_cls)
+    sim.default_calculation_period = PERIOD
+    weights = sim.calculate(
+        "household_weight",
+        map_to="household",
+        period=PERIOD,
+    ).values.astype(np.float64)
+
+    estimate = weights @ filtered.to_numpy(dtype=np.float64)
+    rel_error = (((estimate - filtered_targets) + 1.0) / (filtered_targets + 1.0)) ** 2
+    weighted_terms = inv_mean_normalisation * rel_error * normalisation_factor
+    return {
+        "target_names": filtered.columns.tolist(),
+        "targets": filtered_targets.tolist(),
+        "estimate": estimate.tolist(),
+        "rel_error": rel_error.tolist(),
+        "weighted_terms": weighted_terms.tolist(),
+    }
+
+
+from_payload = compute(FROM_DATASET)
+to_payload = compute(TO_DATASET)
+
+if from_payload["target_names"] != to_payload["target_names"]:
+    raise ValueError("Datasets produced different target names after filtering")
+
+rows = []
+for idx, name in enumerate(from_payload["target_names"]):
+    from_term = float(from_payload["weighted_terms"][idx])
+    to_term = float(to_payload["weighted_terms"][idx])
+    rows.append(
+        {
+            "target_name": name,
+            "weighted_term_delta": to_term - from_term,
+            "from_weighted_term": from_term,
+            "to_weighted_term": to_term,
+            "target_value": float(from_payload["targets"][idx]),
+            "from_estimate": float(from_payload["estimate"][idx]),
+            "to_estimate": float(to_payload["estimate"][idx]),
+            "from_rel_error": float(from_payload["rel_error"][idx]),
+            "to_rel_error": float(to_payload["rel_error"][idx]),
+        }
+    )
+
+rows.sort(key=lambda row: row["weighted_term_delta"], reverse=True)
+payload = {
+    "metric": "enhanced_cps_native_loss_target_delta",
+    "period": PERIOD,
+    "from_dataset": FROM_DATASET,
+    "to_dataset": TO_DATASET,
+    "top_regressions": rows[:TOP_K],
+    "top_improvements": list(reversed(rows[-TOP_K:])),
+}
+print(json.dumps(payload, sort_keys=True))
+""".strip()
+
 
 @dataclass(frozen=True)
 class PolicyEngineUSEnhancedCPSNativeScores:
@@ -810,6 +927,55 @@ def compute_batch_us_pe_native_scores(
         }
         for item in payload
     ]
+
+
+def compare_us_pe_native_target_deltas(
+    *,
+    from_dataset_path: str | Path,
+    to_dataset_path: str | Path,
+    period: int = 2024,
+    top_k: int = 25,
+    policyengine_us_data_repo: str | Path | None = None,
+    policyengine_us_data_python: str | Path | None = None,
+) -> dict[str, Any]:
+    """Compare per-target PE-native weighted-loss terms between two datasets."""
+
+    resolved_repo = resolve_policyengine_us_data_repo_root(policyengine_us_data_repo)
+    env = dict(os.environ)
+    existing_pythonpath = env.get("PYTHONPATH")
+    env["PYTHONPATH"] = (
+        f"{resolved_repo}{os.pathsep}{existing_pythonpath}"
+        if existing_pythonpath
+        else str(resolved_repo)
+    )
+    if policyengine_us_data_python is not None:
+        command = [str(Path(policyengine_us_data_python).expanduser().resolve())]
+    else:
+        command = ["uv", "run", "--project", str(resolved_repo), "python"]
+    completed = subprocess.run(
+        [
+            *command,
+            "-c",
+            _PE_NATIVE_TARGET_DELTA_SCRIPT,
+            str(resolved_repo),
+            json.dumps(_ENHANCED_CPS_BAD_TARGETS),
+            str(int(period)),
+            str(Path(from_dataset_path).expanduser().resolve()),
+            str(Path(to_dataset_path).expanduser().resolve()),
+            str(int(top_k)),
+        ],
+        cwd=resolved_repo,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if completed.returncode != 0:
+        stderr = completed.stderr.strip()
+        stdout = completed.stdout.strip()
+        detail = stderr or stdout or f"exit code {completed.returncode}"
+        raise RuntimeError(f"PE-native target delta comparison failed: {detail}")
+    return json.loads(completed.stdout)
 
 
 def write_us_pe_native_scores(

@@ -7,6 +7,7 @@ from types import SimpleNamespace
 
 from microplex_us.pipelines.pe_native_scores import (
     PolicyEngineUSEnhancedCPSNativeScores,
+    compare_us_pe_native_target_deltas,
     compute_batch_us_pe_native_scores,
     compute_us_pe_native_scores,
     write_us_pe_native_scores,
@@ -213,3 +214,72 @@ def test_compute_batch_us_pe_native_scores_wraps_multiple_candidates(
     assert results[1]["broad_loss"]["enhanced_cps_native_loss_delta"] == 0.25
     assert results[0]["family_breakdown"][0]["family"] == "state_age_distribution"
     assert results[1]["broad_loss"]["family_breakdown"][0]["family"] == "state_agi_distribution"
+
+
+def test_compare_us_pe_native_target_deltas_wraps_subprocess_payload(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    before = tmp_path / "before.h5"
+    after = tmp_path / "after.h5"
+    for path in (before, after):
+        path.write_text(path.stem)
+
+    payload = {
+        "metric": "enhanced_cps_native_loss_target_delta",
+        "period": 2024,
+        "from_dataset": str(before),
+        "to_dataset": str(after),
+        "top_regressions": [
+            {
+                "target_name": "nation/irs/example",
+                "weighted_term_delta": 1.5,
+                "from_weighted_term": 0.2,
+                "to_weighted_term": 1.7,
+                "target_value": 10.0,
+                "from_estimate": 1.0,
+                "to_estimate": 0.0,
+                "from_rel_error": 0.3,
+                "to_rel_error": 1.0,
+            }
+        ],
+        "top_improvements": [
+            {
+                "target_name": "state/example",
+                "weighted_term_delta": -0.5,
+                "from_weighted_term": 0.8,
+                "to_weighted_term": 0.3,
+                "target_value": 12.0,
+                "from_estimate": 4.0,
+                "to_estimate": 8.0,
+                "from_rel_error": 0.7,
+                "to_rel_error": 0.2,
+            }
+        ],
+    }
+
+    monkeypatch.setattr(
+        "microplex_us.pipelines.pe_native_scores.subprocess.run",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            returncode=0,
+            stdout=json.dumps(payload),
+            stderr="",
+        ),
+    )
+    monkeypatch.setattr(
+        "microplex_us.pipelines.pe_native_scores.resolve_policyengine_us_data_repo_root",
+        lambda _repo=None: tmp_path,
+    )
+
+    result = compare_us_pe_native_target_deltas(
+        from_dataset_path=before,
+        to_dataset_path=after,
+        period=2024,
+        top_k=10,
+        policyengine_us_data_repo=tmp_path,
+        policyengine_us_data_python=tmp_path / "python",
+    )
+
+    assert result["metric"] == "enhanced_cps_native_loss_target_delta"
+    assert result["top_regressions"][0]["target_name"] == "nation/irs/example"
+    assert result["top_improvements"][0]["weighted_term_delta"] == -0.5

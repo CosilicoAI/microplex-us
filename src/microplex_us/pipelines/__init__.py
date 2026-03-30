@@ -34,6 +34,7 @@ from microplex_us.pipelines.local_reweighting import (
 )
 from microplex_us.pipelines.pe_native_scores import (
     PolicyEngineUSEnhancedCPSNativeScores,
+    compare_us_pe_native_target_deltas,
     compute_batch_us_pe_native_scores,
     compute_policyengine_us_enhanced_cps_native_scores,
     compute_us_pe_native_scores,
@@ -108,6 +109,7 @@ __all__ = [
     "append_us_microplex_run_registry_entry",
     "build_us_microplex_run_registry_entry",
     "PolicyEngineUSEnhancedCPSNativeScores",
+    "compare_us_pe_native_target_deltas",
     "compute_batch_us_pe_native_scores",
     "compute_policyengine_us_enhanced_cps_native_scores",
     "compute_us_pe_native_scores",
