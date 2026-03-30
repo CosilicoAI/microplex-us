@@ -22,6 +22,7 @@ from microplex.targets import (
 
 from microplex_us.pipelines.us import USMicroplexBuildConfig, USMicroplexPipeline
 from microplex_us.policyengine.us import (
+    SAFE_POLICYENGINE_US_EXPORT_VARIABLES,
     PolicyEngineUSConstraint,
     PolicyEngineUSDBTarget,
     PolicyEngineUSDBTargetProvider,
@@ -1691,7 +1692,7 @@ class TestPolicyEngineUSProjection:
         )
 
         assert export_maps["household"] == {"state_fips": "state_fips"}
-        assert export_maps["tax_unit"] == {"filing_status": "filing_status"}
+        assert export_maps["tax_unit"] == {}
         assert export_maps["spm_unit"] == {}
         assert export_maps["person"] == {
             "employment_income_before_lsr": "employment_income_before_lsr",
@@ -1778,6 +1779,26 @@ class TestPolicyEngineUSProjection:
             "ssi": "ssi",
         }
         assert export_maps["spm_unit"] == {"snap": "snap"}
+
+    def test_default_policyengine_us_export_surface_avoids_formula_aggregates(self):
+        from policyengine_us import CountryTaxBenefitSystem
+
+        allowed_formula_exceptions = {"rent"}
+        tbs = CountryTaxBenefitSystem()
+
+        overlaps = sorted(
+            name
+            for name in SAFE_POLICYENGINE_US_EXPORT_VARIABLES
+            if name in tbs.variables
+            and (
+                getattr(tbs.variables[name], "formulas", None)
+                or getattr(tbs.variables[name], "adds", None)
+                or getattr(tbs.variables[name], "subtracts", None)
+            )
+            and name not in allowed_formula_exceptions
+        )
+
+        assert overlaps == []
 
     def test_build_policyengine_us_export_variable_maps_supports_pre_sim_aliases(self):
         class FakeEntity:

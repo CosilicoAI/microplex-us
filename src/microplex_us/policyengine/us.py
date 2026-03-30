@@ -175,27 +175,22 @@ SAFE_POLICYENGINE_US_EXPORT_VARIABLES: set[str] = {
     "is_female",
     "is_hispanic",
     "is_disabled",
-    "employment_income",
     "employment_income_before_lsr",
-    "self_employment_income",
     "self_employment_income_before_lsr",
-    "pension_income",
-    "social_security",
     "social_security_retirement",
     "social_security_disability",
     "social_security_survivors",
     "social_security_dependents",
     "unemployment_compensation",
-    "interest_income",
     "taxable_interest_income",
     "tax_exempt_interest_income",
-    "dividend_income",
     "qualified_dividend_income",
     "non_qualified_dividend_income",
+    # `rent` is treated as a preserved stored input in PE-US-data even though
+    # the runtime can recalculate it on some paths.
     "rent",
     "real_estate_taxes",
     "rental_income",
-    "capital_gains",
     "short_term_capital_gains",
     "long_term_capital_gains_before_response",
     "partnership_s_corp_income",
@@ -211,7 +206,6 @@ SAFE_POLICYENGINE_US_EXPORT_VARIABLES: set[str] = {
     "student_loan_interest",
     "state_fips",
     "county_fips",
-    "filing_status",
 }
 
 POLICYENGINE_US_EXPORT_COLUMN_ALIASES: dict[str, str] = {

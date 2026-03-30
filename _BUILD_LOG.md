@@ -1149,3 +1149,28 @@ Append-only notes for agents working in `microplex-us`.
 - action:
   - restore `donor_imputer_excluded_variables=("filing_status_code",)` as the default in `USMicroplexBuildConfig`
   - keep investigating the ACA regressions, because this fix helps broad loss overall but is not yet sufficient on its own
+
+## 2026-03-30 leafified default PE export surface
+
+- tightened `SAFE_POLICYENGINE_US_EXPORT_VARIABLES` in `/Users/maxghenis/CosilicoAI/microplex-us/src/microplex_us/policyengine/us.py`
+  - dropped default export of PE computed/add variables that already have leaf inputs on our surface:
+    - `employment_income`
+    - `self_employment_income`
+    - `pension_income`
+    - `social_security`
+    - `interest_income`
+    - `dividend_income`
+    - `capital_gains`
+    - `filing_status`
+  - kept leaf replacements already present on the surface, plus `rent` as the deliberate stored-input exception
+- added a regression in `/Users/maxghenis/CosilicoAI/microplex-us/tests/policyengine/test_us.py`
+  - default export-map test no longer expects tax-unit `filing_status`
+  - new guard checks that the default export whitelist does not overlap PE formula/add/subtract variables except the explicit `rent` exception
+- focused verification:
+  - `pytest -q tests/policyengine/test_us.py -k 'export_variable_maps or avoids_formula_aggregates'` -> `5 passed`
+  - `ruff check src/microplex_us/policyengine/us.py tests/policyengine/test_us.py` -> clean
+- post-change audit against live `policyengine-us` metadata:
+  - default computed-variable overlap is now only `[('rent', True, False)]`
+- interpretation:
+  - this aligns `microplex-us` much more closely with the PE-US-data “store leaf inputs, not recomputed aggregates” rule
+  - `filing_status` remains available as an explicit direct override if we intentionally want to bypass PE, but it is no longer part of the default pre-sim export contract
