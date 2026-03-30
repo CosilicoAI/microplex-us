@@ -159,10 +159,17 @@ class _FakePipeline:
             {"backend": "policyengine_db_entropy"},
         )
 
-    def export_policyengine_dataset(self, result, path, *, period=None):
+    def export_policyengine_dataset(
+        self,
+        result,
+        path,
+        *,
+        period=None,
+        direct_override_variables=None,
+    ):
         _ = result
         _ = period
-        self._log("export_policyengine_dataset")
+        self._log(f"export_policyengine_dataset:{tuple(direct_override_variables or ())}")
         path.write_text("stub")
         return path
 
@@ -384,6 +391,30 @@ def test_run_us_microplex_performance_harness_can_evaluate_native_loss(monkeypat
     assert result.baseline_enhanced_cps_native_loss == 0.3
     assert result.enhanced_cps_native_loss_delta == -0.1
     assert "evaluate_pe_native_loss" in result.stage_timings
+
+
+def test_run_us_microplex_performance_harness_passes_export_direct_overrides(monkeypatch):
+    stage_log: list[str] = []
+    _patch_fake_harness(monkeypatch, stage_log=stage_log)
+    monkeypatch.setattr(
+        "microplex_us.pipelines.performance.compute_us_pe_native_scores",
+        lambda **kwargs: {"summary": {}, "kwargs": kwargs},
+    )
+
+    run_us_microplex_performance_harness(
+        providers=[_DummyProvider("cps")],
+        config=USMicroplexPerformanceHarnessConfig(
+            evaluate_parity=False,
+            evaluate_pe_native_loss=True,
+            baseline_dataset="/tmp/enhanced_cps.h5",
+            policyengine_us_data_repo="/tmp/policyengine-us-data",
+            build_config=USMicroplexBuildConfig(
+                policyengine_direct_override_variables=("filing_status", "snap")
+            ),
+        ),
+    )
+
+    assert "export_policyengine_dataset:('filing_status', 'snap')" in stage_log
 
 
 def test_warm_us_microplex_parity_cache_preloads_baseline(monkeypatch):

@@ -1219,3 +1219,36 @@ Append-only notes for agents working in `microplex-us`.
 - direct candidate-only broad rescoring remains the trustworthy numeric checkpoint for the leafified export:
   - candidate artifact `/Users/maxghenis/CosilicoAI/microplex-us/artifacts/tmp_qrf_leafified_export_pe_native_broad_20260330.h5`
   - candidate loss `0.8892950182`
+
+## 2026-03-30 joint-return A/B + export direct-override path
+
+- ruled out a tempting but wrong IRS fix on the live broad path
+  - artifact: `/Users/maxghenis/CosilicoAI/microplex-us/artifacts/tmp_joint_allocation_head_preserving_ab_20260330.json`
+  - config: `cps_asec_2023 + irs_soi_puf_2024`, `sample_n=1000`, `n_synthetic=2000`, `bootstrap + qrf + entropy`, `donor_imputer_excluded_variables=('filing_status_code',)`
+  - result:
+    - current split baseline: candidate loss `0.8659920427`
+    - head-preserving equal-share joint allocation: candidate loss `0.8784570742`
+  - interpretation:
+    - keeping the “equal-share” PUF joint-return variables entirely on the head makes broad PE-native loss worse
+    - the dominant IRS gap is not coming from that specific PUF personization rule
+- checked deeper PE role structure on the old better candidate vs the newer leafified export
+  - the leafified candidate does **not** lose overall tax-unit dependents or HOH-eligible mass relative to the older better candidate
+  - the regressions are therefore about AGI mass allocation within filing statuses, not a simple collapse of dependent/HOH structure
+- added first-class direct-export override plumbing for PE-native experiments
+  - `/Users/maxghenis/CosilicoAI/microplex-us/src/microplex_us/pipelines/us.py`
+    - `USMicroplexBuildConfig` now includes `policyengine_direct_override_variables`
+    - `export_policyengine_dataset(...)` accepts explicit `direct_override_variables` and defaults to the build config value
+  - `/Users/maxghenis/CosilicoAI/microplex-us/src/microplex_us/pipelines/performance.py`
+    - PE-native scoring path now forwards `build_config.policyengine_direct_override_variables` into export
+  - focused verification:
+    - `pytest -q tests/pipelines/test_performance.py -k 'native_loss or export_direct_overrides'` -> passed
+    - `pytest -q tests/pipelines/test_us.py -k 'export_policyengine_dataset'` -> passed
+    - `ruff check src/microplex_us/pipelines/us.py src/microplex_us/pipelines/performance.py tests/pipelines/test_us.py tests/pipelines/test_performance.py` -> clean
+- current pending high-signal run:
+  - export-policy A/B on the same built candidate tables:
+    - default leafified export
+    - leafified export + explicit direct override `('filing_status',)`
+  - exported datasets already written:
+    - `/Users/maxghenis/CosilicoAI/microplex-us/artifacts/tmp_leaf_default_export_ab_20260330.h5`
+    - `/Users/maxghenis/CosilicoAI/microplex-us/artifacts/tmp_leaf_filing_override_export_ab_20260330.h5`
+  - broad PE-native scores are still running; this is the cleanest test of whether `filing_status` should remain a temporary deliberate exception while deeper tax-unit structure is fixed

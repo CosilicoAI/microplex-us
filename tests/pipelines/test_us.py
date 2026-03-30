@@ -33,6 +33,7 @@ from microplex_us.pipelines.us import (
 )
 from microplex_us.policyengine.us import (
     PolicyEngineUSConstraint,
+    build_policyengine_us_export_variable_maps,
     compute_policyengine_us_definition_hash,
 )
 
@@ -1522,6 +1523,41 @@ class TestUSMicroplexPipeline:
         output_path = pipeline.export_policyengine_dataset(result, tmp_path / "us_microplex.h5")
 
         assert output_path.exists()
+
+    def test_export_policyengine_dataset_passes_direct_overrides(
+        self,
+        persons,
+        households,
+        tmp_path,
+        monkeypatch,
+    ):
+        captured: list[tuple[str, ...]] = []
+
+        original_build_maps = build_policyengine_us_export_variable_maps
+
+        def _capture_build_maps(*args, **kwargs):
+            captured.append(tuple(kwargs.get("direct_override_variables", ())))
+            return original_build_maps(*args, **kwargs)
+
+        monkeypatch.setattr(
+            "microplex_us.pipelines.us.build_policyengine_us_export_variable_maps",
+            _capture_build_maps,
+        )
+
+        config = USMicroplexBuildConfig(
+            n_synthetic=8,
+            synthesis_backend="bootstrap",
+            calibration_backend="entropy",
+            policyengine_dataset_year=2024,
+            policyengine_direct_override_variables=("filing_status",),
+        )
+        result = build_us_microplex(persons, households, config)
+        pipeline = USMicroplexPipeline(config)
+
+        output_path = pipeline.export_policyengine_dataset(result, tmp_path / "us_microplex.h5")
+
+        assert output_path.exists()
+        assert captured == [("filing_status",)]
 
     def test_calibrate_policyengine_tables_from_db(self, persons, households, tmp_path):
         db_path = tmp_path / "policyengine_targets.db"

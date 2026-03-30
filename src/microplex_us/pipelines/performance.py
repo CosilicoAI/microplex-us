@@ -782,6 +782,7 @@ def run_us_microplex_performance_harness(
             candidate_dataset_path = pipeline.export_policyengine_dataset(
                 build_result,
                 Path(temp_dir) / "candidate_policyengine_us.h5",
+                direct_override_variables=build_config.policyengine_direct_override_variables,
             )
             pe_native_scores = compute_us_pe_native_scores(
                 candidate_dataset_path=candidate_dataset_path,

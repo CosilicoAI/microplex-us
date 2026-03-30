@@ -492,6 +492,7 @@ class USMicroplexBuildConfig:
     policyengine_dataset: str | None = None
     policyengine_baseline_dataset: str | None = None
     policyengine_dataset_year: int | None = None
+    policyengine_direct_override_variables: tuple[str, ...] = ()
     policyengine_quantity_targets: tuple[PolicyEngineUSQuantityTarget, ...] = ()
     policyengine_targets_db: str | None = None
     policyengine_target_period: int | None = None
@@ -1557,6 +1558,7 @@ class USMicroplexPipeline:
         path: str | Path,
         *,
         period: int | None = None,
+        direct_override_variables: tuple[str, ...] | None = None,
     ) -> Path:
         """Export a build result as a PolicyEngine-readable HDF5 dataset."""
         export_period = (
@@ -1565,6 +1567,14 @@ class USMicroplexPipeline:
             or result.config.policyengine_dataset_year
             or 2024
         )
+        export_direct_override_variables = (
+            direct_override_variables
+            if direct_override_variables is not None
+            else (
+                self.config.policyengine_direct_override_variables
+                or result.config.policyengine_direct_override_variables
+            )
+        )
         tables = result.policyengine_tables or self.build_policyengine_entity_tables(
             result.calibrated_data
         )
@@ -1572,6 +1582,7 @@ class USMicroplexPipeline:
         export_maps = build_policyengine_us_export_variable_maps(
             tables,
             tax_benefit_system=tax_benefit_system,
+            direct_override_variables=export_direct_override_variables,
         )
         excluded_variables = detect_policyengine_pseudo_inputs(
             tax_benefit_system,
