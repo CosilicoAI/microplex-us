@@ -153,6 +153,13 @@ PERSON_CACHE_REQUIRED_COLUMNS = (
     "is_disabled",
     "has_esi",
     "has_marketplace_health_coverage",
+    "alimony_income",
+    "child_support_received",
+    "disability_benefits",
+    "health_insurance_premiums_without_medicare_part_b",
+    "other_medical_expenses",
+    "over_the_counter_health_expenses",
+    "medicare_part_b_premiums",
 )
 
 PERSON_CPS_DISABILITY_COLUMNS = (

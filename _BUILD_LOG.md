@@ -1321,3 +1321,47 @@ Append-only notes for agents working in `microplex-us`.
 - current pending mission rerun:
   - `/Users/maxghenis/CosilicoAI/microplex-us/artifacts/tmp_parity_inputs_broad_pe_native_20260330.json`
   - this is the first broad PE-native rerun on a deterministic `cps+puf + qrf + bootstrap + entropy` path after the parity-input patch
+
+## 2026-03-30 parity-input broad blow-up + stale CPS cache diagnosis
+
+- the first deterministic broad rerun after the parity-input patch landed at:
+  - `/Users/maxghenis/CosilicoAI/microplex-us/artifacts/tmp_parity_inputs_broad_pe_native_20260330.json`
+  - candidate broad PE-native loss `7.433075015991533`
+  - PE baseline `0.020243908529428433`
+  - delta `+7.412831107462105`
+- family breakdown showed the blow-up was overwhelmingly concentrated in `national_census_other`
+  - contribution delta `+6.582284784720224`
+  - other major regressions remained `national_irs_other`, `state_agi_distribution`, and `state_age_distribution`
+- direct H5/input inspection showed the parity-input runtime was still not actually carrying all of the new CPS-derived inputs:
+  - exported candidate H5 had `child_support_received = 0` everywhere and no `disability_benefits`
+  - stage audit confirmed the problem was upstream of export on the live cache-backed path:
+    - `seed_data` and `synthetic_data` were missing `child_support_received` and `disability_benefits`
+- root cause:
+  - `/Users/maxghenis/.cache/microplex/cps_asec_2023_processed.parquet` was stale relative to the new CPS loader contract
+  - `load_cps_asec()` cache validation only required the older geography / coverage columns, so it silently reused a processed cache that predated the new PE-native derived inputs
+- fix now in place:
+  - `/Users/maxghenis/CosilicoAI/microplex-us/src/microplex_us/data_sources/cps.py`
+    - extended `PERSON_CACHE_REQUIRED_COLUMNS` to require:
+      - `alimony_income`
+      - `child_support_received`
+      - `disability_benefits`
+      - `health_insurance_premiums_without_medicare_part_b`
+      - `other_medical_expenses`
+      - `over_the_counter_health_expenses`
+      - `medicare_part_b_premiums`
+  - `/Users/maxghenis/CosilicoAI/microplex-us/tests/test_cps_source_provider.py`
+    - updated stale-cache and deterministic-cache fixtures to match the stricter processed-cache contract
+    - focused verification:
+      - `pytest -q tests/test_cps_source_provider.py -k 'deterministic or stale_processed_cache_without_pe_presim_inputs or derives_policyengine_value_inputs'` -> passed
+      - `ruff check src/microplex_us/data_sources/cps.py tests/test_cps_source_provider.py` -> clean
+- live-path verification after rebuilding the actual cached CPS parquet:
+  - `load_cps_asec(year=2023)` now rebuilds the stale cache and returns all new derived inputs
+  - on the broad runtime path:
+    - `child_support_received` is now present in `seed_data`, `synthetic_data`, and `calibrated_data`
+    - `disability_benefits` is now present in `seed_data`, `synthetic_data`, and `calibrated_data`
+- current pending clean rerun:
+  - `/Users/maxghenis/CosilicoAI/microplex-us/artifacts/tmp_parity_inputs_broad_pe_native_20260330_v2.json`
+  - this is the first broad PE-native rerun on:
+    - deterministic CPS sampling
+    - rebuilt live CPS processed cache
+    - actual carriage of the new CPS-derived PE inputs

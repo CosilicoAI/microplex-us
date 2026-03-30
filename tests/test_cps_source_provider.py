@@ -272,6 +272,13 @@ def test_cps_source_provider_repeat_loads_are_deterministic_for_cached_processed
             "is_disabled": [False, False, False, True, False],
             "has_esi": [True, False, True, False, False],
             "has_marketplace_health_coverage": [False, True, False, False, True],
+            "alimony_income": [0.0, 0.0, 0.0, 0.0, 0.0],
+            "child_support_received": [0.0, 0.0, 0.0, 0.0, 0.0],
+            "disability_benefits": [0.0, 0.0, 0.0, 0.0, 0.0],
+            "health_insurance_premiums_without_medicare_part_b": [0.0] * 5,
+            "other_medical_expenses": [0.0] * 5,
+            "over_the_counter_health_expenses": [0.0] * 5,
+            "medicare_part_b_premiums": [0.0] * 5,
             "year": [2023, 2023, 2023, 2023, 2023],
         }
     )
@@ -325,6 +332,17 @@ def test_load_cps_asec_rebuilds_stale_processed_cache_without_pe_presim_inputs(t
             "PEDISREM": [0, 0, 0],
             "NOW_MRK": [1, 0, 0],
             "NOW_GRP": [0, 1, 0],
+            "OI_OFF": [20, 0, 0],
+            "OI_VAL": [1200, 0, 0],
+            "CSP_VAL": [300, 0, 0],
+            "DIS_VAL1": [500, 0, 0],
+            "DIS_SC1": [2, 0, 0],
+            "DIS_VAL2": [50, 0, 0],
+            "DIS_SC2": [3, 0, 0],
+            "PHIP_VAL": [900, 0, 0],
+            "POTC_VAL": [120, 0, 0],
+            "PMED_VAL": [450, 0, 0],
+            "PEMCPREM": [600, 0, 0],
         }
     )
     household_rows = pd.DataFrame(
@@ -348,3 +366,13 @@ def test_load_cps_asec_rebuilds_stale_processed_cache_without_pe_presim_inputs(t
     assert dataset.persons["is_disabled"].to_list() == [False, True, False]
     assert dataset.persons["has_marketplace_health_coverage"].to_list() == [True, False, False]
     assert dataset.persons["has_esi"].to_list() == [False, True, False]
+    assert dataset.persons["alimony_income"].to_list() == [1200, 0, 0]
+    assert dataset.persons["child_support_received"].to_list() == [300, 0, 0]
+    assert dataset.persons["disability_benefits"].to_list() == [550, 0, 0]
+    assert (
+        dataset.persons["health_insurance_premiums_without_medicare_part_b"].to_list()
+        == [900, 0, 0]
+    )
+    assert dataset.persons["other_medical_expenses"].to_list() == [450, 0, 0]
+    assert dataset.persons["over_the_counter_health_expenses"].to_list() == [120, 0, 0]
+    assert dataset.persons["medicare_part_b_premiums"].to_list() == [600, 0, 0]
