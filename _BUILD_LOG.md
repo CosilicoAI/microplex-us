@@ -1200,3 +1200,22 @@ Append-only notes for agents working in `microplex-us`.
 - additional seam confirmed from the live build:
   - `rent` and `real_estate_taxes` are absent from `seed_data`, `synthetic_data`, and `calibrated_data` on the current `cps+puf` path
   - the exported H5 now includes those arrays, but they are all-zero placeholders rather than populated pre-sim inputs
+
+## 2026-03-30 PE-native helper root-cause fix
+
+- the remaining scorer-helper failure under nested `uv run` was not mainly a `PYTHONPATH` problem
+- root cause:
+  - `/Users/maxghenis/CosilicoAI/microplex-us/src/microplex_us/pipelines/pe_native_scores.py` was calling `.resolve()` on `/Users/maxghenis/PolicyEngine/policyengine-us-data/.venv/bin/python`
+  - that followed the venv symlink to the underlying Homebrew/system Python binary and silently stripped the venv context
+  - effect: the helper subprocess imported global `policyengine_us`, then failed deep inside local `microimpute` with missing `statsmodels`
+- fixes now in place:
+  - preserve the `.venv/bin/python` path instead of resolving the symlink target
+  - build a minimal subprocess env rather than inheriting the full outer process env
+  - still include sibling local `microimpute` on `PYTHONPATH`
+- regression coverage:
+  - `tests/pipelines/test_pe_native_scores.py` now checks both:
+    - sibling `microimpute` inclusion on `PYTHONPATH`
+    - preservation of the `.venv/bin/python` symlink path
+- direct candidate-only broad rescoring remains the trustworthy numeric checkpoint for the leafified export:
+  - candidate artifact `/Users/maxghenis/CosilicoAI/microplex-us/artifacts/tmp_qrf_leafified_export_pe_native_broad_20260330.h5`
+  - candidate loss `0.8892950182`

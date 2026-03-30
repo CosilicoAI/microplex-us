@@ -9,9 +9,11 @@ from types import SimpleNamespace
 from microplex_us.pipelines.pe_native_scores import (
     PolicyEngineUSEnhancedCPSNativeScores,
     build_policyengine_us_data_pythonpath,
+    build_policyengine_us_data_subprocess_env,
     compare_us_pe_native_target_deltas,
     compute_batch_us_pe_native_scores,
     compute_us_pe_native_scores,
+    resolve_policyengine_us_data_python,
     write_us_pe_native_scores,
 )
 
@@ -237,6 +239,55 @@ def test_build_policyengine_us_data_pythonpath_includes_sibling_microimpute(
         "/tmp/existing-one",
         "/tmp/existing-two",
     ]
+
+
+def test_build_policyengine_us_data_subprocess_env_strips_outer_uv_markers(
+    tmp_path,
+) -> None:
+    repo = tmp_path / "policyengine-us-data"
+    (repo / "policyengine_us_data").mkdir(parents=True)
+    microimpute = tmp_path / "microimpute"
+    (microimpute / "microimpute").mkdir(parents=True)
+
+    env = build_policyengine_us_data_subprocess_env(
+        repo,
+        base_env={
+            "HOME": "/tmp/home",
+            "PATH": "/usr/bin:/bin",
+            "VIRTUAL_ENV": "/tmp/outer-venv",
+            "UV_RUN_RECURSION_DEPTH": "1",
+            "PYTHONPATH": "/tmp/existing",
+            "KEEP_ME": "yes",
+        },
+    )
+
+    assert env["HOME"] == "/tmp/home"
+    assert env["PATH"] == "/usr/bin:/bin"
+    assert "KEEP_ME" not in env
+    assert "VIRTUAL_ENV" not in env
+    assert "UV_RUN_RECURSION_DEPTH" not in env
+    assert env["PYTHONPATH"].split(os.pathsep) == [
+        str(repo),
+        str(microimpute),
+        "/tmp/existing",
+    ]
+
+
+def test_resolve_policyengine_us_data_python_preserves_venv_symlink_path(
+    tmp_path,
+) -> None:
+    repo = tmp_path / "policyengine-us-data"
+    (repo / "policyengine_us_data").mkdir(parents=True)
+    real_python = tmp_path / "real-python"
+    real_python.write_text("#!/bin/sh\nexit 0\n")
+    real_python.chmod(0o755)
+    venv_python = repo / ".venv" / "bin" / "python"
+    venv_python.parent.mkdir(parents=True)
+    venv_python.symlink_to(real_python)
+
+    resolved = resolve_policyengine_us_data_python(repo_root=repo)
+
+    assert resolved == venv_python
 
 
 def test_compare_us_pe_native_target_deltas_wraps_subprocess_payload(

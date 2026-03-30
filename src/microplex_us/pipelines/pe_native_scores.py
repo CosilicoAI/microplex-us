@@ -14,6 +14,14 @@ from typing import Any
 _DEFAULT_PE_US_DATA_REPO = Path.home() / "PolicyEngine" / "policyengine-us-data"
 _PE_US_DATA_PYTHON_ENV = "MICROPLEX_US_POLICYENGINE_US_DATA_PYTHON"
 _PE_US_DATA_REPO_ENV = "MICROPLEX_US_POLICYENGINE_US_DATA_REPO"
+_PE_NATIVE_SCORE_BASE_ENV_VARS: tuple[str, ...] = (
+    "HOME",
+    "PATH",
+    "TMPDIR",
+    "LANG",
+    "LC_ALL",
+    "TZ",
+)
 
 _ENHANCED_CPS_BAD_TARGETS: tuple[str, ...] = (
     "nation/irs/adjusted gross income/total/AGI in 10k-15k/taxable/Head of Household",
@@ -695,9 +703,9 @@ def resolve_policyengine_us_data_python(
     )
 
     for candidate in candidates:
-        resolved = candidate.expanduser().resolve()
-        if resolved.exists() and os.access(resolved, os.X_OK):
-            return resolved
+        expanded = candidate.expanduser()
+        if expanded.exists() and os.access(expanded, os.X_OK):
+            return expanded
     searched = ", ".join(str(path.expanduser()) for path in candidates)
     raise FileNotFoundError(
         "Could not resolve a usable policyengine-us-data Python executable. "
@@ -726,6 +734,26 @@ def build_policyengine_us_data_pythonpath(
     return os.pathsep.join(path_entries)
 
 
+def build_policyengine_us_data_subprocess_env(
+    repo_root: str | Path | None = None,
+    *,
+    base_env: dict[str, str] | None = None,
+) -> dict[str, str]:
+    """Build a clean subprocess env for PE-native scoring helpers."""
+
+    source_env = dict(os.environ if base_env is None else base_env)
+    env = {
+        key: source_env[key]
+        for key in _PE_NATIVE_SCORE_BASE_ENV_VARS
+        if key in source_env and source_env[key]
+    }
+    env["PYTHONPATH"] = build_policyengine_us_data_pythonpath(
+        repo_root,
+        existing_pythonpath=source_env.get("PYTHONPATH"),
+    )
+    return env
+
+
 def compute_policyengine_us_enhanced_cps_native_scores(
     candidate_dataset: str | Path,
     baseline_dataset: str | Path,
@@ -736,13 +764,9 @@ def compute_policyengine_us_enhanced_cps_native_scores(
 ) -> PolicyEngineUSEnhancedCPSNativeScores:
     """Score one candidate and baseline under the exact enhanced-CPS loss."""
     resolved_repo = resolve_policyengine_us_data_repo_root(policyengine_us_data_repo)
-    env = dict(os.environ)
-    env["PYTHONPATH"] = build_policyengine_us_data_pythonpath(
-        resolved_repo,
-        existing_pythonpath=env.get("PYTHONPATH"),
-    )
+    env = build_policyengine_us_data_subprocess_env(resolved_repo)
     if policyengine_us_data_python is not None:
-        command = [str(Path(policyengine_us_data_python).expanduser().resolve())]
+        command = [str(Path(policyengine_us_data_python).expanduser())]
     else:
         command = ["uv", "run", "--project", str(resolved_repo), "python"]
     completed = subprocess.run(
@@ -846,13 +870,9 @@ def compute_batch_us_pe_native_scores(
     if not candidate_dataset_paths:
         return []
     resolved_repo = resolve_policyengine_us_data_repo_root(policyengine_us_data_repo)
-    env = dict(os.environ)
-    env["PYTHONPATH"] = build_policyengine_us_data_pythonpath(
-        resolved_repo,
-        existing_pythonpath=env.get("PYTHONPATH"),
-    )
+    env = build_policyengine_us_data_subprocess_env(resolved_repo)
     if policyengine_us_data_python is not None:
-        command = [str(Path(policyengine_us_data_python).expanduser().resolve())]
+        command = [str(Path(policyengine_us_data_python).expanduser())]
     else:
         command = ["uv", "run", "--project", str(resolved_repo), "python"]
     completed = subprocess.run(
@@ -958,13 +978,9 @@ def compare_us_pe_native_target_deltas(
     """Compare per-target PE-native weighted-loss terms between two datasets."""
 
     resolved_repo = resolve_policyengine_us_data_repo_root(policyengine_us_data_repo)
-    env = dict(os.environ)
-    env["PYTHONPATH"] = build_policyengine_us_data_pythonpath(
-        resolved_repo,
-        existing_pythonpath=env.get("PYTHONPATH"),
-    )
+    env = build_policyengine_us_data_subprocess_env(resolved_repo)
     if policyengine_us_data_python is not None:
-        command = [str(Path(policyengine_us_data_python).expanduser().resolve())]
+        command = [str(Path(policyengine_us_data_python).expanduser())]
     else:
         command = ["uv", "run", "--project", str(resolved_repo), "python"]
     completed = subprocess.run(
