@@ -70,6 +70,37 @@ def test_cps_parquet_source_provider_supports_household_sampling(tmp_path):
     assert frame.tables[EntityType.PERSON]["household_id"].nunique() == 2
 
 
+def test_cps_parquet_source_provider_sampling_respects_household_weights(tmp_path):
+    households = pd.DataFrame(
+        {
+            "household_id": [1, 2, 3],
+            "state_fips": [6, 36, 48],
+            "household_weight": [0.0, 0.0, 100.0],
+        }
+    )
+    persons = pd.DataFrame(
+        {
+            "household_id": [1, 2, 3],
+            "person_number": [1, 1, 1],
+            "age": [34, 52, 40],
+            "weight": [0.0, 0.0, 100.0],
+        }
+    )
+    households.to_parquet(tmp_path / "cps_asec_households.parquet", index=False)
+    persons.to_parquet(tmp_path / "cps_asec_persons.parquet", index=False)
+
+    provider = CPSASECParquetSourceProvider(data_dir=tmp_path, year=2024)
+    frame = provider.load_frame(
+        SourceQuery(
+            period=2024,
+            provider_filters={"sample_n": 1, "random_seed": 0},
+        )
+    )
+
+    assert frame.tables[EntityType.HOUSEHOLD]["household_id"].tolist() == [3]
+    assert frame.tables[EntityType.PERSON]["household_id"].tolist() == [3]
+
+
 def test_cps_parquet_source_provider_applies_generic_atomic_variable_semantics(tmp_path):
     households = pd.DataFrame(
         {

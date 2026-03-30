@@ -819,10 +819,100 @@ Append-only notes for agents working in `microplex-us`.
       - candidate `0.9339483631287737`
       - PE baseline `0.020243908529428433`
       - delta `+0.9137044545993452`
-  - interpretation:
+ - interpretation:
     - the PE handoff really was broken in specific ways, and the repaired handoff is more faithful now
     - but even a substantially healthier export/tax-unit structure only buys a small broad-loss improvement on the saved candidate
     - the dominant remaining gap is still upstream of export, especially:
       - missing pre-sim input surfaces
       - thin state-age support
       - weak IRS / AGI cell mass before calibration
+
+2026-03-29
+- current-code CPS-only broad PE-native drilldown:
+  - built and exported the exact current-code CPS-only candidate H5:
+    - `/Users/maxghenis/CosilicoAI/microplex-us/artifacts/tmp_cps_only_currentcode_candidate_20260329.h5`
+  - broad smoke result:
+    - `/Users/maxghenis/CosilicoAI/microplex-us/artifacts/tmp_cps_only_currentcode_pe_native_broad_20260329.json`
+    - candidate broad PE-native loss `0.9159877997083388`
+    - PE baseline `0.020243908529428433`
+    - delta `+0.8957438911789103`
+  - exact worst targets:
+    - `/Users/maxghenis/CosilicoAI/microplex-us/artifacts/tmp_pe_native_broad_worst_targets_currentcode_cps_20260329.json`
+  - pre-sim surface compare against PE's source-imputed CPS:
+    - `/Users/maxghenis/CosilicoAI/microplex-us/artifacts/tmp_pre_sim_surface_compare_currentcode_cps_20260329.json`
+  - state-mass compare:
+    - `/Users/maxghenis/CosilicoAI/microplex-us/artifacts/tmp_state_mass_compare_currentcode_cps_20260329.json`
+- main findings:
+  - `state_age_distribution` is a real large driver, not a scorer artifact:
+    - current-code candidate has only `434` nonempty `(state, 5-year-age-bin)` cells vs `911` in PE's source-imputed CPS
+    - many large exact cells are literally zero, e.g.:
+      - `state/census/age/PA/20-24`: candidate `0.0` vs target `798,935`
+      - `state/census/age/FL/40-44`: candidate `0.0000275` vs target `1,434,863`
+      - `state/census/age/TX/15-19`: candidate `0.0000626` vs target `2,198,388`
+  - `national_irs_other` is being driven by literal zeroed IRS surfaces:
+    - candidate has `0.0` on high-value exact targets where PE baseline is near-target, e.g.:
+      - `nation/irs/total pension income/total/AGI in 20k-25k/taxable/All`
+      - `nation/irs/qualified dividends/total/AGI in -inf-inf/taxable/All`
+      - `nation/irs/partnership and s corp income/total/AGI in 75k-100k/taxable/All`
+      - `nation/irs/adjusted gross income/total/AGI in 500k-1m/taxable/Single`
+      - `nation/irs/capital gains gross/total/AGI in 30k-40k/taxable/All`
+    - pre-sim IRS surface compare confirms the upstream mass problem:
+      - candidate weighted positive-share is `0.0` for `capital_gains_gross`
+      - candidate weighted positive-share is `0.0` for `partnership_and_s_corp_income`
+      - candidate weighted positive-share is `0.0` for `total_pension_income`
+      - candidate has no tax-unit mass above `$1m` AGI, while PE reference has weighted share `0.0597`
+  - `state_agi_distribution` is a mix of state-mass collapse and AGI-tail distortion:
+    - worst exact misses include:
+      - `state/MD/adjusted_gross_income/count/-inf_1`: candidate `127,417` vs target `40,530`
+      - `state/MS/adjusted_gross_income/count/500000_inf`: candidate `23,033` vs target `8,170`
+      - many state amount cells are still exactly zero, e.g.:
+        - `state/WY/adjusted_gross_income/amount/100000_200000`
+        - `state/WV/adjusted_gross_income/amount/500000_inf`
+        - `state/DC/adjusted_gross_income/amount/75000_100000`
+  - weighted state mass itself is heavily distorted before calibration:
+    - candidate state share ratios vs PE reference are effectively zero in some states:
+      - TN (`~6.1e-10`)
+      - SD (`~6.4e-10`)
+      - NV (`~9.5e-10`)
+    - large states are also badly underweighted:
+      - TX share ratio `0.0929`
+      - FL `0.3971`
+    - while some states are materially overweighted:
+      - VA `3.06`
+      - MA `2.36`
+      - GA `2.30`
+- interpretation:
+  - the dominant broad-loss problem is now clearly upstream population/state allocation and missing IRS surface mass before calibration
+  - PE-native scorer correctness looks much less suspicious than candidate structure/support
+  - the next high-leverage fixes are:
+    - restore missing IRS/tax-unit mass (`capital_gains_gross`, `partnership_and_s_corp_income`, `total_pension_income`, high-AGI filers)
+    - repair state allocation before calibration
+    - then revisit ACA/coverage surfaces, which also show extreme exact misses (`nation/irs/aca_spending/hi`, `state/irs/aca_enrollment/hi`)
+
+## 2026-03-29 weighted-source sampling checkpoint
+
+- current-code donor path diagnosis:
+  - the critical PUF IRS variables are *not* disappearing in the live `cps+puf` build anymore
+  - a direct mini-build trace shows `qualified_dividend_income`, `long_term_capital_gains`, `partnership_s_corp_income`, `total_pension_income`, `taxable_pension_income`, and `taxable_interest_income` all survive:
+    - raw PUF frame
+    - donor integration into `seed_data`
+    - bootstrap `synthetic_data`
+    - `calibrated_data`
+  - that means the old zero-surface failure was a saved-artifact issue, not the current-code seam
+- source loader fix:
+  - `CPSASEC` and `PUF` `sample_n` subsampling now use weight-aware sampling without replacement when there are enough positive-weight rows
+  - this is now covered by focused provider regressions for both CPS and PUF
+- mission-surface effect:
+  - patched `cps+puf + qrf + bootstrap` broad PE-native smoke:
+    - candidate loss `0.8894089161`
+    - PE baseline `0.0202439085`
+    - delta `+0.8691650076`
+  - prior comparable `qrf` smoke was `0.8930645879`
+  - so the weighted-source patch improved broad loss by about `0.00366`
+- remaining constraints:
+  - the same patched candidate still drops `2387 / 3611` calibration constraints (`66.1%`)
+  - a patched `cps+puf` pre-sim audit still only reaches `453 / 918` nonempty `(state, age-bin)` cells, support recall `0.493`
+- interpretation:
+  - weight-aware source sampling is a real but small win
+  - it is not enough to close the broad-loss gap
+  - the remaining bottleneck is still structural state support / state allocation plus unconverged broad calibration, not donor-variable passage

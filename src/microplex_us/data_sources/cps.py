@@ -282,10 +282,20 @@ def _sample_households_and_persons(
     """Sample households and keep all linked person records."""
     if sample_n is None or sample_n >= len(households):
         return households, persons
+    sample_weights: pd.Series | None = None
+    if "household_weight" in households.columns:
+        candidate_weights = (
+            pd.to_numeric(households["household_weight"], errors="coerce")
+            .fillna(0.0)
+            .clip(lower=0.0)
+        )
+        if candidate_weights.sum() > 0.0 and int((candidate_weights > 0.0).sum()) >= sample_n:
+            sample_weights = candidate_weights
     sampled_households = households.sample(
         n=sample_n,
         random_state=random_seed,
         replace=False,
+        weights=sample_weights,
     ).copy()
     sampled_keys = set(sampled_households["household_id"])
     sampled_persons = persons[persons["household_id"].isin(sampled_keys)].copy()

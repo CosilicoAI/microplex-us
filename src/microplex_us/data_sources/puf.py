@@ -474,10 +474,20 @@ def _sample_tax_units(
     """Sample tax units before expanding them to persons."""
     if sample_n is None or sample_n >= len(tax_units):
         return tax_units.reset_index(drop=True)
+    sample_weights: pd.Series | None = None
+    if "weight" in tax_units.columns:
+        candidate_weights = (
+            pd.to_numeric(tax_units["weight"], errors="coerce")
+            .fillna(0.0)
+            .clip(lower=0.0)
+        )
+        if candidate_weights.sum() > 0.0 and int((candidate_weights > 0.0).sum()) >= sample_n:
+            sample_weights = candidate_weights
     return tax_units.sample(
         n=sample_n,
         random_state=random_seed,
         replace=False,
+        weights=sample_weights,
     ).reset_index(drop=True)
 
 

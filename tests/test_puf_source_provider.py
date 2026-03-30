@@ -111,6 +111,37 @@ def test_puf_source_provider_loads_observation_frame_from_local_files(tmp_path):
     assert frame.source.archetype is SourceArchetype.TAX_MICRODATA
 
 
+def test_puf_source_provider_sampling_respects_tax_unit_weights(tmp_path):
+    puf = pd.DataFrame(
+        {
+            "RECID": [101, 202, 303],
+            "MARS": [1, 1, 1],
+            "XTOT": [1, 1, 1],
+            "S006": [0.0, 0.0, 100.0],
+            "E00200": [10_000.0, 20_000.0, 30_000.0],
+            "AGE_HEAD": [45, 55, 65],
+            "GENDER": [1, 2, 1],
+        }
+    )
+    puf_path = tmp_path / "puf.csv"
+    demographics_path = tmp_path / "demographics.csv"
+    puf.to_csv(puf_path, index=False)
+    pd.DataFrame({"RECID": [101, 202, 303]}).to_csv(demographics_path, index=False)
+
+    provider = PUFSourceProvider(
+        puf_path=puf_path,
+        demographics_path=demographics_path,
+        target_year=2024,
+    )
+    frame = provider.load_frame(
+        SourceQuery(period=2024, provider_filters={"sample_n": 1, "random_seed": 0})
+    )
+
+    assert frame.tables[EntityType.HOUSEHOLD]["household_id"].tolist() == ["303"]
+    assert frame.tables[EntityType.PERSON]["household_id"].nunique() == 1
+    assert frame.tables[EntityType.PERSON]["household_id"].iloc[0] == "303"
+
+
 def test_puf_source_provider_marks_placeholder_and_derived_variables_in_capabilities(
     tmp_path,
 ):
