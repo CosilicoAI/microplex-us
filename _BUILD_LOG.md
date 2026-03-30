@@ -720,3 +720,53 @@ Append-only notes for agents working in `microplex-us`.
   - also tightened processed-cache freshness so stale cached CPS parquet will rebuild if those PE-style pre-sim columns are missing
   - verified in `tests/test_cps_source_provider.py` (`6 passed`, Ruff clean)
   - this is aimed at future broad reruns; it does not retroactively change the already-saved broad artifact
+
+2026-03-29
+- Fresh current-code parity audit correction:
+  - the earlier `tmp_pre_sim_parity_reexport_20260329.h5/json` pair turned out to be stale for entity-structure conclusions
+  - rebuilt a fresh current-code export directly from the saved broad `calibrated_data.parquet`:
+    - `/Users/maxghenis/CosilicoAI/microplex-us/artifacts/tmp_tax_unit_recheck_20260329.h5`
+    - audit:
+      - `/Users/maxghenis/CosilicoAI/microplex-us/artifacts/tmp_pre_sim_parity_reexport_fresh_20260329.json`
+  - corrected fresh-audit findings:
+    - schema overlap is unchanged from the re-export check:
+      - `39 / 165` common PE pre-sim vars
+      - schema recall `0.2364`
+      - missing critical vars remain:
+        - `county_fips`
+        - `is_disabled`
+        - `net_worth`
+        - `has_esi`
+        - `has_marketplace_health_coverage`
+    - but entity structure is substantially healthier than the stale re-export audit implied:
+      - `tax_unit_rows = 2807`
+      - mean tax-unit size `1.7007`
+      - `share_multi_person_tax_units = 0.3997`
+      - `share_multi_person_households = 0.687`
+    - state-age support recall is still only `0.627`
+ - interpretation:
+    - current code no longer appears to be collapsing tax-unit membership at the PE export boundary
+    - the remaining pre-sim parity gap is now more clearly about:
+      - missing CPS-derived inputs that are not yet present upstream (`county_fips`, `is_disabled`, `has_esi`, `has_marketplace_health_coverage`)
+      - missing wealth input (`net_worth`)
+      - thin `(state, age)` support before calibration
+
+2026-03-29
+- CPS pre-sim parity smoke test on the real broad mission metric:
+  - ran a fresh CPS-only broad PE-native smoke build with the updated raw CPS loader and real PE targets DB:
+    - provider: `CPSASECSourceProvider(year=2023)`
+    - calibration DB: `/Users/maxghenis/PolicyEngine/policyengine-us-data/policyengine_us_data/storage/calibration/policy_data.db`
+    - PE baseline: `/Users/maxghenis/PolicyEngine/policyengine-us-data/policyengine_us_data/storage/enhanced_cps_2024.h5`
+    - config: `sample_n=500`, `n_synthetic=2000`, `target_profile='pe_native_broad'`, `calibration_target_profile='pe_native_broad'`, `evaluate_pe_native_loss=True`
+  - result:
+    - candidate broad PE-native loss `0.9058149122381814`
+    - PE baseline `0.020243908529428433`
+    - delta `+0.885571003708753`
+    - calibration still `converged=false`
+    - feasibility filter still dropped `2506 / 3611` constraints (`69.4%`)
+  - comparison to the earlier CPS-only broad bootstrap frontier run:
+    - earlier saved candidate loss `0.9233365911702252`
+    - improvement from restored CPS pre-sim inputs `-0.0175216789320438`
+  - interpretation:
+    - restoring PE-style CPS pre-sim inputs is directionally correct and measurably improves the real mission metric
+    - but it is not remotely sufficient on its own; the remaining broad gap is still dominated by other structural issues
