@@ -3587,6 +3587,16 @@ class TestUSMicroplexPipeline:
         assert integration["integrated_variables"] == []
         assert "taxable_interest_income" not in integration["seed_data"].columns
 
+    def test_default_build_config_excludes_filing_status_code_from_donor_imputation(self):
+        config = USMicroplexBuildConfig()
+
+        assert "filing_status_code" in config.donor_imputer_excluded_variables
+
+    def test_build_config_can_opt_back_into_filing_status_code_donor_imputation(self):
+        config = USMicroplexBuildConfig(donor_imputer_excluded_variables=())
+
+        assert "filing_status_code" not in config.donor_imputer_excluded_variables
+
     def test_integrate_donor_sources_drops_constant_donor_conditions(self, monkeypatch):
         captured: list[tuple[str, ...]] = []
 

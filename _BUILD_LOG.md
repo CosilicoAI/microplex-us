@@ -1122,3 +1122,30 @@ Append-only notes for agents working in `microplex-us`.
 - implication:
   - same-config A/Bs on the patched path are now much more trustworthy
   - do not interpret older `cps+puf` broad comparisons as fully clean unless they were built after this fix
+
+## 2026-03-30 filing-status exclusion confirmed on deterministic path
+
+- direct PE-native broad rescoring of the deterministic no-filing artifact:
+  - artifact: `/Users/maxghenis/CosilicoAI/microplex-us/artifacts/tmp_qrf_postfix_no_filing_20260329.h5`
+  - candidate loss `0.8677052580`
+  - PE baseline `0.0202439085`
+  - delta `+0.8474613495`
+- this is a real improvement over the deterministic patched baseline export:
+  - patched baseline `0.9286499637`
+  - improvement from excluding donor-imputed `filing_status_code`: `0.0609447056` (`6.56%`)
+- top remaining family deltas on the improved no-filing candidate are still:
+  - `national_irs_other` `+0.2473`
+  - `state_agi_distribution` `+0.1822`
+  - `state_age_distribution` `+0.1807`
+  - `national_population_by_age` `+0.0560`
+  - `national_census_other` `+0.0449`
+  - `state_aca_spending` `+0.0315`
+- compared with the deterministic patched baseline, excluding `filing_status_code`:
+  - strongly improves several IRS/HOH/high-income cells
+  - but also worsens some ACA spending / ACA enrollment state cells
+- pre-sim signal:
+  - `filing_status` is exported and used directly in PE-US-data SOI loss masks
+  - `exemptions_count` and `eitc_children` are **not** on the exported H5 input surface right now, so they are not the immediate next exclusion candidates
+- action:
+  - restore `donor_imputer_excluded_variables=("filing_status_code",)` as the default in `USMicroplexBuildConfig`
+  - keep investigating the ACA regressions, because this fix helps broad loss overall but is not yet sufficient on its own
