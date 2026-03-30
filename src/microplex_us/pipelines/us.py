@@ -843,6 +843,8 @@ class USMicroplexPipeline:
             hh["hh_weight"] = 1.0
         if "state_fips" not in household_coverage or "state_fips" not in hh.columns:
             hh["state_fips"] = 0
+        if "county_fips" not in household_coverage or "county_fips" not in hh.columns:
+            hh["county_fips"] = 0
         if "tenure" not in household_coverage or "tenure" not in hh.columns:
             hh["tenure"] = 0
 
@@ -858,12 +860,12 @@ class USMicroplexPipeline:
                 persons_df[column] = default
 
         seed_data = persons_df.merge(
-            hh[["household_id", "state_fips", "hh_weight", "tenure"]],
+            hh[["household_id", "state_fips", "county_fips", "hh_weight", "tenure"]],
             on="household_id",
             how="left",
             suffixes=("", "__household"),
         )
-        for column in ("state_fips", "hh_weight", "tenure"):
+        for column in ("state_fips", "county_fips", "hh_weight", "tenure"):
             household_column = f"{column}__household"
             if household_column not in seed_data.columns:
                 continue
@@ -877,6 +879,7 @@ class USMicroplexPipeline:
         seed_data["hh_weight"] = seed_data["hh_weight"].fillna(1.0).astype(float)
         seed_data["tenure"] = seed_data["tenure"].fillna(0).astype(int)
         seed_data["state_fips"] = seed_data["state_fips"].fillna(0).astype(int)
+        seed_data["county_fips"] = seed_data["county_fips"].fillna(0).astype(int)
         seed_data["income"] = pd.to_numeric(seed_data["income"], errors="coerce").fillna(0.0)
 
         seed_data["state"] = seed_data["state_fips"].map(STATE_FIPS).fillna("UNK")
@@ -2763,16 +2766,27 @@ class USMicroplexPipeline:
                 .astype(int)
             )
             unique_values = set(family_relationship.unique().tolist())
-            # CPS A_FAMREL/family_relationship codes align closely with the
-            # relationship_to_head codes TaxUnitOptimizer expects:
-            # 0=self, 1=spouse, 2=child, 3+=other household member.
             if unique_values.issubset({0, 1, 2, 3, 4}):
-                family_normalized = (
-                    family_relationship
-                    .map({0: 0, 1: 1, 2: 2, 3: 3, 4: 3})
-                    .fillna(3)
-                    .astype(int)
+                family_normalized = pd.Series(3, index=persons.index, dtype=int)
+                household_groups = (
+                    persons.groupby("household_id", sort=False).groups.values()
+                    if "household_id" in persons.columns
+                    else [persons.index]
                 )
+                for member_index in household_groups:
+                    member_index = list(member_index)
+                    household_codes = set(family_relationship.loc[member_index].tolist())
+                    if 0 in household_codes:
+                        # Some sources already use the optimizer's 0-based coding.
+                        mapped = family_relationship.loc[member_index].map(
+                            {0: 0, 1: 1, 2: 2, 3: 3, 4: 3}
+                        )
+                    else:
+                        # CPS A_FAMREL is 1-based: 1=head, 2=spouse, 3=child, 4=other.
+                        mapped = family_relationship.loc[member_index].map(
+                            {1: 0, 2: 1, 3: 2, 4: 3}
+                        )
+                    family_normalized.loc[member_index] = mapped.fillna(3).astype(int)
 
         if "relationship_to_head" not in persons.columns:
             if family_normalized is not None:
@@ -2953,6 +2967,25 @@ class USMicroplexPipeline:
         elif "sex" in result.columns:
             sex = pd.to_numeric(result["sex"], errors="coerce").fillna(0).astype(int)
             result["is_female"] = sex.eq(2)
+
+        if "cps_race" in result.columns:
+            result["cps_race"] = (
+                pd.to_numeric(result["cps_race"], errors="coerce").fillna(0).astype(int)
+            )
+        elif "race" in result.columns:
+            result["cps_race"] = (
+                pd.to_numeric(result["race"], errors="coerce").fillna(0).astype(int)
+            )
+
+        if "is_hispanic" in result.columns:
+            result["is_hispanic"] = result["is_hispanic"].fillna(False).astype(bool)
+        elif "hispanic" in result.columns:
+            hispanic = pd.to_numeric(result["hispanic"], errors="coerce")
+            observed_codes = set(hispanic.dropna().astype(int).unique().tolist())
+            if observed_codes and observed_codes <= {1, 2}:
+                result["is_hispanic"] = hispanic.fillna(0).astype(int).eq(1)
+            else:
+                result["is_hispanic"] = hispanic.fillna(0).astype(int).ne(0)
 
         if "medicaid" in result.columns:
             result["medicaid"] = (

@@ -767,6 +767,62 @@ Append-only notes for agents working in `microplex-us`.
   - comparison to the earlier CPS-only broad bootstrap frontier run:
     - earlier saved candidate loss `0.9233365911702252`
     - improvement from restored CPS pre-sim inputs `-0.0175216789320438`
-  - interpretation:
+ - interpretation:
     - restoring PE-style CPS pre-sim inputs is directionally correct and measurably improves the real mission metric
     - but it is not remotely sufficient on its own; the remaining broad gap is still dominated by other structural issues
+
+2026-03-29
+- PE export + relationship parity corrections:
+  - updated `src/microplex_us/policyengine/us.py` so the PE export whitelist now includes pre-sim inputs we already carry upstream:
+    - `cps_race`
+    - `is_hispanic`
+    - `is_disabled`
+    - `rent`
+    - `real_estate_taxes`
+    - `has_esi`
+    - `has_marketplace_health_coverage`
+    - `net_worth`
+  - added a narrow export alias only for `race -> cps_race`; dropped the lossy raw `hispanic -> is_hispanic` rename
+  - updated `src/microplex_us/pipelines/us.py` so PE-oriented person-input augmentation now derives exact PE-native columns before export:
+    - `cps_race` from `race`
+    - `is_hispanic` from CPS-coded `hispanic`
+  - fixed `family_relationship` normalization to handle the common CPS 1-based coding per household:
+    - `1=head`, `2=spouse`, `3=child`, `4=other`
+    - this was the real reason rebuilt tax units had been collapsing toward singletons on many CPS-shaped households
+  - fixed `prepare_seed_data_from_source()` to preserve household `county_fips` instead of dropping it during the household-person merge
+  - focused verification:
+    - `tests/test_cps_source_provider.py`: `6 passed`
+    - `tests/pipelines/test_pre_sim_parity.py`: `1 passed`
+    - `tests/pipelines/test_us.py -k 'prepare_seed_data or build_policyengine_entity_tables or derives_tax_input_columns'`: `10 passed`
+    - `tests/policyengine/test_us.py -k 'export_variable_maps or projects_frame'`: `5 passed`
+    - Ruff clean on touched CPS / pipeline / PE-export files
+- fresh current-code re-export from the saved broad candidate:
+  - candidate H5:
+    - `/Users/maxghenis/CosilicoAI/microplex-us/artifacts/tmp_pre_sim_parity_export_fix_candidate_20260329.h5`
+  - parity audit:
+    - `/Users/maxghenis/CosilicoAI/microplex-us/artifacts/tmp_pre_sim_parity_export_fix_audit_20260329.json`
+  - native score:
+    - `/Users/maxghenis/CosilicoAI/microplex-us/artifacts/tmp_pre_sim_parity_export_fix_native_score_20260329.json`
+  - key results:
+    - schema recall remains `0.2364` (`39 / 165`)
+    - missing critical vars are now:
+      - `county_fips`
+      - `is_disabled`
+      - `net_worth`
+      - `has_esi`
+      - `has_marketplace_health_coverage`
+    - candidate tax-unit structure is now materially healthier under current code:
+      - `tax_unit_rows = 2807`
+      - mean tax-unit size `1.7007`
+      - `share_multi_person_tax_units = 0.3997`
+    - broad PE-native loss on the repaired re-export is:
+      - candidate `0.9339483631287737`
+      - PE baseline `0.020243908529428433`
+      - delta `+0.9137044545993452`
+  - interpretation:
+    - the PE handoff really was broken in specific ways, and the repaired handoff is more faithful now
+    - but even a substantially healthier export/tax-unit structure only buys a small broad-loss improvement on the saved candidate
+    - the dominant remaining gap is still upstream of export, especially:
+      - missing pre-sim input surfaces
+      - thin state-age support
+      - weak IRS / AGI cell mass before calibration

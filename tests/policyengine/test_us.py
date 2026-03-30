@@ -1623,6 +1623,8 @@ class TestPolicyEngineUSProjection:
                 "state_fips": FakeVariable("household"),
                 "employment_income_before_lsr": FakeVariable("person"),
                 "is_female": FakeVariable("person"),
+                "rent": FakeVariable("person"),
+                "real_estate_taxes": FakeVariable("person"),
                 "medicaid": FakeVariable("person"),
                 "medicaid_enrolled": FakeVariable("person"),
                 "ssi": FakeVariable("person"),
@@ -1652,6 +1654,8 @@ class TestPolicyEngineUSProjection:
                     "household_id": [10],
                     "employment_income_before_lsr": [50_000.0],
                     "is_female": [True],
+                    "rent": [1_200.0],
+                    "real_estate_taxes": [300.0],
                     "medicaid": [1_200.0],
                     "medicaid_enrolled": [True],
                     "ssi": [400.0],
@@ -1692,6 +1696,8 @@ class TestPolicyEngineUSProjection:
         assert export_maps["person"] == {
             "employment_income_before_lsr": "employment_income_before_lsr",
             "is_female": "is_female",
+            "rent": "rent",
+            "real_estate_taxes": "real_estate_taxes",
             "self_employment_income_before_lsr": "self_employment_income_before_lsr",
             "taxable_interest_income": "taxable_interest_income",
             "qualified_dividend_income": "qualified_dividend_income",
@@ -1772,6 +1778,88 @@ class TestPolicyEngineUSProjection:
             "ssi": "ssi",
         }
         assert export_maps["spm_unit"] == {"snap": "snap"}
+
+    def test_build_policyengine_us_export_variable_maps_supports_pre_sim_aliases(self):
+        class FakeEntity:
+            def __init__(self, key):
+                self.key = key
+
+        class FakeVariable:
+            def __init__(self, entity):
+                self.entity = FakeEntity(entity)
+
+        class FakeSystem:
+            variables = {
+                "cps_race": FakeVariable("person"),
+            }
+
+        tables = PolicyEngineUSEntityTableBundle(
+            households=pd.DataFrame(
+                {
+                    "household_id": [10],
+                    "household_weight": [1.0],
+                }
+            ),
+            persons=pd.DataFrame(
+                {
+                    "person_id": [1],
+                    "household_id": [10],
+                    "race": [4],
+                }
+            ),
+        )
+
+        export_maps = build_policyengine_us_export_variable_maps(
+            tables,
+            tax_benefit_system=FakeSystem(),
+        )
+
+        assert export_maps["person"] == {
+            "race": "cps_race",
+        }
+
+    def test_build_policyengine_us_export_variable_maps_prefers_exact_pre_sim_names(self):
+        class FakeEntity:
+            def __init__(self, key):
+                self.key = key
+
+        class FakeVariable:
+            def __init__(self, entity):
+                self.entity = FakeEntity(entity)
+
+        class FakeSystem:
+            variables = {
+                "cps_race": FakeVariable("person"),
+                "is_hispanic": FakeVariable("person"),
+            }
+
+        tables = PolicyEngineUSEntityTableBundle(
+            households=pd.DataFrame(
+                {
+                    "household_id": [10],
+                    "household_weight": [1.0],
+                }
+            ),
+            persons=pd.DataFrame(
+                {
+                    "person_id": [1],
+                    "household_id": [10],
+                    "race": [4],
+                    "cps_race": [3],
+                    "is_hispanic": [False],
+                }
+            ),
+        )
+
+        export_maps = build_policyengine_us_export_variable_maps(
+            tables,
+            tax_benefit_system=FakeSystem(),
+        )
+
+        assert export_maps["person"] == {
+            "cps_race": "cps_race",
+            "is_hispanic": "is_hispanic",
+        }
 
     def test_projects_frame_and_writes_time_period_dataset(self, tmp_path):
         frame = pd.DataFrame(

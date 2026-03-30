@@ -252,6 +252,7 @@ class TestUSMicroplexPipeline:
             {
                 "household_id": [1, 2, 3],
                 "state_fips": [6, 36, 48],
+                "county_fips": [6037, 36061, 48201],
                 "hh_weight": [100.0, 150.0, 200.0],
                 "tenure": [1, 2, 1],
             }
@@ -278,6 +279,7 @@ class TestUSMicroplexPipeline:
 
         assert len(seed) == len(persons)
         assert "state" in seed.columns
+        assert "county_fips" in seed.columns
         assert "age_group" in seed.columns
         assert "income_bracket" in seed.columns
         assert set(seed["state"]) == {"CA", "NY", "TX"}
@@ -447,6 +449,8 @@ class TestUSMicroplexPipeline:
                 "weight": [1.0, 1.0],
                 "age": [45, 43],
                 "sex": [1, 2],
+                "race": [4, 2],
+                "hispanic": [2, 1],
                 "income": [60_000.0, 15_000.0],
                 "wage_income": [50_000.0, 10_000.0],
                 "self_employment_income": [5_000.0, 0.0],
@@ -486,6 +490,8 @@ class TestUSMicroplexPipeline:
         assert person_rows["taxable_private_pension_income"].tolist() == [0.0, 300.0]
         assert person_rows["unemployment_compensation"].tolist() == [0.0, 150.0]
         assert person_rows["is_female"].tolist() == [False, True]
+        assert person_rows["cps_race"].tolist() == [4, 2]
+        assert person_rows["is_hispanic"].tolist() == [False, True]
         assert person_rows["medicaid"].tolist() == [0.0, 1_250.0]
         assert person_rows["medicaid_enrolled"].tolist() == [False, True]
         assert person_rows["state_income_tax_reported"].tolist() == [400.0, 50.0]
@@ -571,6 +577,31 @@ class TestUSMicroplexPipeline:
         assert tax_units.iloc[0]["filing_status"] == "JOINT"
         assert tax_units.iloc[0]["n_dependents"] == 1
 
+    def test_build_policyengine_entity_tables_derives_relationships_from_one_based_family_relationship(self):
+        pipeline = USMicroplexPipeline(USMicroplexBuildConfig())
+        population = pd.DataFrame(
+            {
+                "person_id": [1, 2, 3],
+                "household_id": [10, 10, 10],
+                "weight": [1.0, 1.0, 1.0],
+                "age": [45, 43, 12],
+                "income": [60_000.0, 15_000.0, 0.0],
+                "family_relationship": [1, 2, 3],
+                "marital_status": [1, 1, 7],
+                "state_fips": [6, 6, 6],
+                "tenure": [1, 1, 1],
+            }
+        )
+
+        tables = pipeline.build_policyengine_entity_tables(population)
+        person_rows = tables.persons.sort_values("person_id").reset_index(drop=True)
+        tax_units = tables.tax_units.sort_values("tax_unit_id").reset_index(drop=True)
+
+        assert person_rows["relationship_to_head"].tolist() == [0, 1, 2]
+        assert len(tax_units) == 1
+        assert tax_units.iloc[0]["filing_status"] == "JOINT"
+        assert tax_units.iloc[0]["n_dependents"] == 1
+
     def test_build_policyengine_entity_tables_uses_spouse_and_dependent_flags_when_relationship_missing(self):
         pipeline = USMicroplexPipeline(USMicroplexBuildConfig())
         population = pd.DataFrame(
@@ -631,7 +662,7 @@ class TestUSMicroplexPipeline:
                 "weight": [1.0, 1.0, 1.0],
                 "age": [45, 43, 12],
                 "income": [60_000.0, 15_000.0, 0.0],
-                "family_relationship": [1, 1, 2],
+                "relationship_to_head": [1, 1, 2],
                 "marital_status": [1, 1, 7],
                 "state_fips": [6, 6, 6],
                 "tenure": [1, 1, 1],

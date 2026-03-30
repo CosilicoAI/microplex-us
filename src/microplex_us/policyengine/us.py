@@ -171,7 +171,10 @@ ENTITY_TYPE_TO_POLICYENGINE_US_ENTITY_KEY: dict[EntityType, str] = {
 
 SAFE_POLICYENGINE_US_EXPORT_VARIABLES: set[str] = {
     "age",
+    "cps_race",
     "is_female",
+    "is_hispanic",
+    "is_disabled",
     "employment_income",
     "employment_income_before_lsr",
     "self_employment_income",
@@ -189,12 +192,17 @@ SAFE_POLICYENGINE_US_EXPORT_VARIABLES: set[str] = {
     "dividend_income",
     "qualified_dividend_income",
     "non_qualified_dividend_income",
+    "rent",
+    "real_estate_taxes",
     "rental_income",
     "capital_gains",
     "short_term_capital_gains",
     "long_term_capital_gains_before_response",
     "partnership_s_corp_income",
     "farm_income",
+    "has_esi",
+    "has_marketplace_health_coverage",
+    "net_worth",
     "taxable_private_pension_income",
     "taxable_public_pension_income",
     "tax_exempt_private_pension_income",
@@ -204,6 +212,10 @@ SAFE_POLICYENGINE_US_EXPORT_VARIABLES: set[str] = {
     "state_fips",
     "county_fips",
     "filing_status",
+}
+
+POLICYENGINE_US_EXPORT_COLUMN_ALIASES: dict[str, str] = {
+    "race": "cps_race",
 }
 
 
@@ -2352,13 +2364,25 @@ def _infer_policyengine_us_table_variable_map(
 ) -> dict[str, str]:
     if table is None:
         return {}
-    return {
+    variable_map = {
         column: column
         for column in table.columns
         if column in allowed_variables
         and column not in excluded_columns
         and not column.endswith("_id")
     }
+    exported_targets = set(variable_map.values())
+    available_columns = set(table.columns)
+    for source_column, target_variable in POLICYENGINE_US_EXPORT_COLUMN_ALIASES.items():
+        if target_variable not in allowed_variables:
+            continue
+        if source_column not in available_columns or source_column in excluded_columns:
+            continue
+        if source_column.endswith("_id") or target_variable in exported_targets:
+            continue
+        variable_map[source_column] = target_variable
+        exported_targets.add(target_variable)
+    return variable_map
 
 
 def _group_policyengine_us_export_variables_by_entity(
