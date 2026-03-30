@@ -214,6 +214,41 @@ def test_puf_source_provider_does_not_duplicate_joint_tax_unit_financial_income(
     assert persons["income"].sum() == 200.0
 
 
+def test_puf_source_provider_maps_policyengine_medical_and_alimony_inputs(tmp_path):
+    puf = pd.DataFrame(
+        {
+            "RECID": [101],
+            "MARS": [1],
+            "XTOT": [1],
+            "S006": [100.0],
+            "E00200": [50_000.0],
+            "E00800": [2_000.0],
+            "E17500": [1_000.0],
+            "AGE_HEAD": [45],
+            "GENDER": [1],
+        }
+    )
+    puf_path = tmp_path / "puf.csv"
+    demographics_path = tmp_path / "demographics.csv"
+    puf.to_csv(puf_path, index=False)
+    pd.DataFrame({"RECID": [101]}).to_csv(demographics_path, index=False)
+
+    provider = PUFSourceProvider(
+        puf_path=puf_path,
+        demographics_path=demographics_path,
+        target_year=2015,
+    )
+    frame = provider.load_frame(SourceQuery(period=2015))
+    persons = frame.tables[EntityType.PERSON]
+
+    assert persons["alimony_income"].sum() == 2_000.0
+    assert persons["health_insurance_premiums_without_medicare_part_b"].sum() == 453.0
+    assert persons["other_medical_expenses"].sum() == 325.0
+    assert persons["medicare_part_b_premiums"].sum() == 137.0
+    assert persons["over_the_counter_health_expenses"].sum() == 85.0
+    assert persons["income"].sum() == 52_000.0
+
+
 def test_download_puf_prefers_existing_local_files_without_hub_lookup(tmp_path, monkeypatch):
     puf_path = tmp_path / "puf_2015.csv"
     demographics_path = tmp_path / "demographics_2015.csv"

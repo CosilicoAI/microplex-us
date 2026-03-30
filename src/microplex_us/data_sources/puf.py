@@ -65,7 +65,7 @@ UPRATING_FACTORS = {
     "gross_social_security": 1.45,
     "taxable_social_security": 1.45,
     "unemployment_compensation": 0.30,  # Down from COVID peak
-    "alimony_received": 0.50,  # Declining due to tax law change
+    "alimony_income": 0.50,  # Declining due to tax law change
     "medical_expense_agi_floor": 1.50,
     "state_income_tax_paid": 1.40,
     "real_estate_tax_paid": 1.35,
@@ -98,7 +98,7 @@ JOINT_EQUAL_SHARE_ALLOCATION = (
     "gross_social_security",
     "taxable_social_security",
     "unemployment_compensation",
-    "alimony_received",
+    "alimony_income",
     "medical_expense_agi_floor",
     "state_income_tax_paid",
     "real_estate_tax_paid",
@@ -108,6 +108,13 @@ JOINT_EQUAL_SHARE_ALLOCATION = (
     "ira_deduction",
     "student_loan_interest",
 )
+
+MEDICAL_EXPENSE_CATEGORY_BREAKDOWNS = {
+    "health_insurance_premiums_without_medicare_part_b": 0.453,
+    "other_medical_expenses": 0.325,
+    "medicare_part_b_premiums": 0.137,
+    "over_the_counter_health_expenses": 0.085,
+}
 
 def download_puf(cache_dir: Path | None = None) -> Path:
     """Download PUF from HuggingFace.
@@ -194,6 +201,10 @@ def map_puf_variables(
         result.get("rental_income_positive", 0).fillna(0) +
         result.get("rental_income_negative", 0).fillna(0)
     )
+    medical_expense_floor = result.get("medical_expense_agi_floor")
+    if medical_expense_floor is not None:
+        for variable, fraction in MEDICAL_EXPENSE_CATEGORY_BREAKDOWNS.items():
+            result[variable] = medical_expense_floor.fillna(0) * fraction
 
     # Map filing status code to string
     filing_status_map = {
@@ -316,6 +327,7 @@ def _add_derived_income_columns(df: pd.DataFrame) -> pd.DataFrame:
         result,
         "unemployment_compensation",
     )
+    alimony_income = _numeric_series(result, "alimony_income")
 
     result["interest_income"] = taxable_interest_income
     result["dividend_income"] = ordinary_dividend_income
@@ -335,6 +347,7 @@ def _add_derived_income_columns(df: pd.DataFrame) -> pd.DataFrame:
         + result["social_security"]
         + result["pension_income"]
         + unemployment_compensation
+        + alimony_income
     )
     result["employment_status"] = (
         (employment_income + self_employment_income) > 0

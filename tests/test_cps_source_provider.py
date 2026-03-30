@@ -220,6 +220,41 @@ def test_load_cps_asec_caches_household_geography_on_persons(tmp_path):
     assert sorted(second.households["county_fips"].to_list()) == [1, 61]
 
 
+def test_load_cps_asec_derives_policyengine_value_inputs(tmp_path):
+    person_rows = pd.DataFrame(
+        {
+            "PH_SEQ": [1, 1],
+            "A_LINENO": [1, 2],
+            "A_AGE": [34, 62],
+            "A_FNLWGT": [100, 100],
+            "OI_OFF": [20, 12],
+            "OI_VAL": [1200, 800],
+            "CSP_VAL": [300, -1],
+            "DIS_VAL1": [500, 400],
+            "DIS_SC1": [2, 1],
+            "DIS_VAL2": [50, 25],
+            "DIS_SC2": [3, 2],
+            "PHIP_VAL": [900, -1],
+            "POTC_VAL": [120, -1],
+            "PMED_VAL": [450, -1],
+            "PEMCPREM": [600, -1],
+        }
+    )
+    with zipfile.ZipFile(tmp_path / "cps_asec_2023.zip", "w") as archive:
+        archive.writestr("pppub23.csv", person_rows.to_csv(index=False))
+
+    dataset = load_cps_asec(year=2023, cache_dir=tmp_path, download=False)
+    persons = dataset.persons.to_pandas().sort_values("person_number").reset_index(drop=True)
+
+    assert persons["alimony_income"].tolist() == [1200, 0]
+    assert persons["child_support_received"].tolist() == [300, 0]
+    assert persons["disability_benefits"].tolist() == [550, 25]
+    assert persons["health_insurance_premiums_without_medicare_part_b"].tolist() == [900, 0]
+    assert persons["over_the_counter_health_expenses"].tolist() == [120, 0]
+    assert persons["other_medical_expenses"].tolist() == [450, 0]
+    assert persons["medicare_part_b_premiums"].tolist() == [600, 0]
+
+
 def test_load_cps_asec_rebuilds_stale_processed_cache_without_pe_presim_inputs(tmp_path):
     stale_processed = pl.DataFrame(
         {

@@ -1622,8 +1622,15 @@ class TestPolicyEngineUSProjection:
         class FakeSystem:
             variables = {
                 "state_fips": FakeVariable("household"),
+                "alimony_income": FakeVariable("person"),
+                "child_support_received": FakeVariable("person"),
+                "disability_benefits": FakeVariable("person"),
                 "employment_income_before_lsr": FakeVariable("person"),
+                "health_insurance_premiums_without_medicare_part_b": FakeVariable("person"),
                 "is_female": FakeVariable("person"),
+                "medicare_part_b_premiums": FakeVariable("person"),
+                "other_medical_expenses": FakeVariable("person"),
+                "over_the_counter_health_expenses": FakeVariable("person"),
                 "rent": FakeVariable("person"),
                 "real_estate_taxes": FakeVariable("person"),
                 "medicaid": FakeVariable("person"),
@@ -1653,8 +1660,15 @@ class TestPolicyEngineUSProjection:
                 {
                     "person_id": [1],
                     "household_id": [10],
+                    "alimony_income": [500.0],
+                    "child_support_received": [200.0],
+                    "disability_benefits": [300.0],
                     "employment_income_before_lsr": [50_000.0],
+                    "health_insurance_premiums_without_medicare_part_b": [900.0],
                     "is_female": [True],
+                    "medicare_part_b_premiums": [400.0],
+                    "other_medical_expenses": [250.0],
+                    "over_the_counter_health_expenses": [75.0],
                     "rent": [1_200.0],
                     "real_estate_taxes": [300.0],
                     "medicaid": [1_200.0],
@@ -1695,8 +1709,15 @@ class TestPolicyEngineUSProjection:
         assert export_maps["tax_unit"] == {}
         assert export_maps["spm_unit"] == {}
         assert export_maps["person"] == {
+            "alimony_income": "alimony_income",
+            "child_support_received": "child_support_received",
+            "disability_benefits": "disability_benefits",
             "employment_income_before_lsr": "employment_income_before_lsr",
+            "health_insurance_premiums_without_medicare_part_b": "health_insurance_premiums_without_medicare_part_b",
             "is_female": "is_female",
+            "medicare_part_b_premiums": "medicare_part_b_premiums",
+            "other_medical_expenses": "other_medical_expenses",
+            "over_the_counter_health_expenses": "over_the_counter_health_expenses",
             "rent": "rent",
             "real_estate_taxes": "real_estate_taxes",
             "self_employment_income_before_lsr": "self_employment_income_before_lsr",

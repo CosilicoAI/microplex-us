@@ -56,6 +56,10 @@ PERSON_VARIABLES = {
     "PEDISOUT": "_disability_errands",
     "PEDISPHY": "_disability_physical",
     "PEDISREM": "_disability_cognitive",
+    "DIS_VAL1": "_disability_income_1",
+    "DIS_SC1": "_disability_income_code_1",
+    "DIS_VAL2": "_disability_income_2",
+    "DIS_SC2": "_disability_income_code_2",
     # Employment
     "A_CLSWKR": "class_of_worker",
     "A_WKSTAT": "work_status",
@@ -70,12 +74,19 @@ PERSON_VARIABLES = {
     "SSI_VAL": "ssi",
     "UC_VAL": "unemployment_compensation",
     "PTOTVAL": "total_person_income",
+    "OI_OFF": "_other_income_code",
+    "OI_VAL": "_other_income_value",
     # Benefits
     "PAW_VAL": "public_assistance",
+    "CSP_VAL": "child_support_received",
     "MCARE": "has_medicare",
     "MCAID": "has_medicaid",
     "NOW_GRP": "has_esi",
     "NOW_MRK": "has_marketplace_health_coverage",
+    "PHIP_VAL": "health_insurance_premiums_without_medicare_part_b",
+    "POTC_VAL": "over_the_counter_health_expenses",
+    "PMED_VAL": "other_medical_expenses",
+    "PEMCPREM": "medicare_part_b_premiums",
     # Identifiers
     "PH_SEQ": "household_id",
     "GESTFIPS": "state_fips",
@@ -114,7 +125,7 @@ HOUSEHOLD_OBSERVATION_EXCLUDED_COLUMNS = (
     "year",
 )
 
-PERSON_INCOME_COLUMNS = (
+PERSON_NONNEGATIVE_VALUE_COLUMNS = (
     "wage_income",
     "self_employment_income",
     "interest_income",
@@ -125,6 +136,13 @@ PERSON_INCOME_COLUMNS = (
     "unemployment_compensation",
     "public_assistance",
     "total_person_income",
+    "alimony_income",
+    "child_support_received",
+    "disability_benefits",
+    "health_insurance_premiums_without_medicare_part_b",
+    "over_the_counter_health_expenses",
+    "other_medical_expenses",
+    "medicare_part_b_premiums",
 )
 
 PERSON_CACHE_REQUIRED_COLUMNS = (
@@ -145,6 +163,9 @@ PERSON_CPS_DISABILITY_COLUMNS = (
     "_disability_physical",
     "_disability_cognitive",
 )
+
+WORKERS_COMP_DISABILITY_CODE = 1
+ALIMONY_OTHER_INCOME_CODE = 20
 
 
 @dataclass
@@ -623,16 +644,6 @@ def _process_persons(df: pl.DataFrame, year: int) -> pl.DataFrame:
             (pl.col("march_supplement_weight") / 100).alias("march_supplement_weight")
         )
 
-    # Convert income values (negative values indicate no income or missing)
-    for col in PERSON_INCOME_COLUMNS:
-        if col in result.columns:
-            result = result.with_columns(
-                pl.when(pl.col(col) < 0)
-                .then(0)
-                .otherwise(pl.col(col))
-                .alias(col)
-            )
-
     # Add derived columns
     if "age" in result.columns:
         result = result.with_columns([
@@ -647,6 +658,24 @@ def _process_persons(df: pl.DataFrame, year: int) -> pl.DataFrame:
         result = result.with_columns(
             (pl.col("_cps_hispanic_code") != 0).alias("is_hispanic")
         ).drop("_cps_hispanic_code")
+    if {
+        "_other_income_code",
+        "_other_income_value",
+    }.issubset(set(result.columns)) and "alimony_income" not in result.columns:
+        result = result.with_columns(
+            pl.when(pl.col("_other_income_code") == ALIMONY_OTHER_INCOME_CODE)
+            .then(pl.col("_other_income_value"))
+            .otherwise(0)
+            .alias("alimony_income")
+        ).drop(["_other_income_code", "_other_income_value"])
+    else:
+        drop_columns = [
+            column
+            for column in ("_other_income_code", "_other_income_value")
+            if column in result.columns
+        ]
+        if drop_columns:
+            result = result.drop(drop_columns)
     disability_columns = [
         column for column in PERSON_CPS_DISABILITY_COLUMNS if column in result.columns
     ]
@@ -658,9 +687,54 @@ def _process_persons(df: pl.DataFrame, year: int) -> pl.DataFrame:
         ).drop(disability_columns)
     elif disability_columns:
         result = result.drop(disability_columns)
+    if {
+        "_disability_income_1",
+        "_disability_income_code_1",
+        "_disability_income_2",
+        "_disability_income_code_2",
+    }.issubset(set(result.columns)) and "disability_benefits" not in result.columns:
+        result = result.with_columns(
+            (
+                pl.when(pl.col("_disability_income_code_1") != WORKERS_COMP_DISABILITY_CODE)
+                .then(pl.col("_disability_income_1"))
+                .otherwise(0)
+                +
+                pl.when(pl.col("_disability_income_code_2") != WORKERS_COMP_DISABILITY_CODE)
+                .then(pl.col("_disability_income_2"))
+                .otherwise(0)
+            ).alias("disability_benefits")
+        ).drop(
+            [
+                "_disability_income_1",
+                "_disability_income_code_1",
+                "_disability_income_2",
+                "_disability_income_code_2",
+            ]
+        )
+    else:
+        drop_columns = [
+            column
+            for column in (
+                "_disability_income_1",
+                "_disability_income_code_1",
+                "_disability_income_2",
+                "_disability_income_code_2",
+            )
+            if column in result.columns
+        ]
+        if drop_columns:
+            result = result.drop(drop_columns)
     for bool_column in ("has_esi", "has_marketplace_health_coverage"):
         if bool_column in result.columns:
             result = result.with_columns((pl.col(bool_column) == 1).alias(bool_column))
+    for col in PERSON_NONNEGATIVE_VALUE_COLUMNS:
+        if col in result.columns:
+            result = result.with_columns(
+                pl.when(pl.col(col) < 0)
+                .then(0)
+                .otherwise(pl.col(col))
+                .alias(col)
+            )
 
     # Add year
     result = result.with_columns(pl.lit(year).alias("year"))

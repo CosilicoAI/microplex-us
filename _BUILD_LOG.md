@@ -1252,3 +1252,46 @@ Append-only notes for agents working in `microplex-us`.
     - `/Users/maxghenis/CosilicoAI/microplex-us/artifacts/tmp_leaf_default_export_ab_20260330.h5`
     - `/Users/maxghenis/CosilicoAI/microplex-us/artifacts/tmp_leaf_filing_override_export_ab_20260330.h5`
   - broad PE-native scores are still running; this is the cleanest test of whether `filing_status` should remain a temporary deliberate exception while deeper tax-unit structure is fixed
+
+## 2026-03-30 repeatability + exact-target diagnosis + parity-input patch
+
+- confirmed the current nominally best broad config is still not reproducible under the same seed:
+  - repeated `cps_asec_2023 + irs_soi_puf_2024`, `sample_n=1000`, `n_synthetic=2000`, `bootstrap + qrf + entropy`, `donor_imputer_excluded_variables=('filing_status_code',)` landed at:
+    - loss `0.8643217352`, `n_constraints=1234`, `mean_error=0.77098`
+    - loss `0.8810677038`, `n_constraints=1252`, `mean_error=0.79746`
+  - implication: there is still a real nondeterminism bug in the live build path, not just scorer noise
+- exact broad target deltas on the current best saved H5 (`/Users/maxghenis/CosilicoAI/microplex-us/artifacts/tmp_best_broad_target_deltas_20260330.json`) show many hard-zero regressions against PE's enhanced CPS, including:
+  - `nation/irs/aca_spending/la`
+  - `nation/census/medicare_part_b_premiums/age_20_to_29`
+  - `nation/irs/aca_spending/nh`
+  - `nation/irs/aca_spending/tx`
+  - `nation/irs/adjusted gross income/total/AGI in 500k-1m/taxable/Head of Household`
+  - `nation/census/child_support_received`
+  - `nation/irs/total social security/total/AGI in 10k-15k/taxable/All`
+- traced the zeroed-out targets back to missing pre-sim inputs rather than donor-imputer choice:
+  - current best candidate H5 did not export `child_support_received`, `medicare_part_b_premiums`, `other_medical_expenses`, `health_insurance_premiums_without_medicare_part_b`, `alimony_income`, or `disability_benefits`
+  - `policyengine-us-data` does source these already:
+    - CPS: `/Users/maxghenis/PolicyEngine/policyengine-us-data/policyengine_us_data/datasets/cps/cps.py`
+    - PUF: `/Users/maxghenis/PolicyEngine/policyengine-us-data/policyengine_us_data/datasets/puf/puf.py`
+- implemented a parity-input patch on the Microplex-US side:
+  - CPS now derives and keeps:
+    - `alimony_income`
+    - `child_support_received`
+    - `disability_benefits`
+    - `health_insurance_premiums_without_medicare_part_b`
+    - `other_medical_expenses`
+    - `over_the_counter_health_expenses`
+    - `medicare_part_b_premiums`
+  - PUF now maps `alimony_income` under the PE-native name and derives the PE-style medical-expense category breakout from `medical_expense_agi_floor`
+  - default PE export surface now includes those new pre-sim inputs
+  - focused verification passed:
+    - `tests/test_cps_source_provider.py`
+    - `tests/test_puf_source_provider.py`
+    - `tests/policyengine/test_us.py`
+    - Ruff clean
+- structural donor-variable ablation did **not** help:
+  - excluding `eitc_children`, `exemptions_count`, and `is_male` in addition to `filing_status_code` worsened broad loss from `0.8791992898` to `0.9247766974`
+  - implication: do not generalize a blanket “exclude count/binary donor vars” policy
+- current pending mission run:
+  - `/Users/maxghenis/CosilicoAI/microplex-us/artifacts/tmp_parity_inputs_broad_pe_native_20260330.json`
+  - same broad config as the current best path, but with the new CPS/PUF parity inputs on the runtime surface

@@ -171,11 +171,18 @@ ENTITY_TYPE_TO_POLICYENGINE_US_ENTITY_KEY: dict[EntityType, str] = {
 
 SAFE_POLICYENGINE_US_EXPORT_VARIABLES: set[str] = {
     "age",
+    "alimony_income",
+    "child_support_received",
     "cps_race",
+    "disability_benefits",
+    "health_insurance_premiums_without_medicare_part_b",
     "is_female",
     "is_hispanic",
     "is_disabled",
+    "medicare_part_b_premiums",
     "employment_income_before_lsr",
+    "other_medical_expenses",
+    "over_the_counter_health_expenses",
     "self_employment_income_before_lsr",
     "social_security_retirement",
     "social_security_disability",

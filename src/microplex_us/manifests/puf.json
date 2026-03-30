@@ -32,7 +32,7 @@
         { "raw_column": "E02400", "canonical_name": "gross_social_security" },
         { "raw_column": "E02500", "canonical_name": "taxable_social_security" },
         { "raw_column": "E02300", "canonical_name": "unemployment_compensation" },
-        { "raw_column": "E00800", "canonical_name": "alimony_received" },
+        { "raw_column": "E00800", "canonical_name": "alimony_income" },
         { "raw_column": "E17500", "canonical_name": "medical_expense_agi_floor" },
         { "raw_column": "E18400", "canonical_name": "state_income_tax_paid" },
         { "raw_column": "E18500", "canonical_name": "real_estate_tax_paid" },
