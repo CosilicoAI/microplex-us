@@ -1174,3 +1174,29 @@ Append-only notes for agents working in `microplex-us`.
 - interpretation:
   - this aligns `microplex-us` much more closely with the PE-US-data “store leaf inputs, not recomputed aggregates” rule
   - `filing_status` remains available as an explicit direct override if we intentionally want to bypass PE, but it is no longer part of the default pre-sim export contract
+
+## 2026-03-30 scorer env fix + leafified/state-floor follow-up
+
+- fixed a real PE-native rescoring portability bug in `/Users/maxghenis/CosilicoAI/microplex-us/src/microplex_us/pipelines/pe_native_scores.py`
+  - the scorer now automatically includes a sibling `/Users/maxghenis/PolicyEngine/microimpute` checkout on `PYTHONPATH` when resolving a local `policyengine-us-data` repo
+  - added regression coverage in `/Users/maxghenis/CosilicoAI/microplex-us/tests/pipelines/test_pe_native_scores.py`
+- focused verification:
+  - `pytest -q tests/pipelines/test_pe_native_scores.py tests/test_cps_source_provider.py` -> `12 passed`
+  - `ruff check src/microplex_us/pipelines/pe_native_scores.py src/microplex_us/data_sources/cps.py tests/pipelines/test_pe_native_scores.py tests/test_cps_source_provider.py` -> clean
+- direct candidate-only PE-native broad rescoring of the leafified export:
+  - artifact: `/Users/maxghenis/CosilicoAI/microplex-us/artifacts/tmp_qrf_leafified_export_pe_native_broad_20260330.h5`
+  - candidate loss `0.8892950182`
+  - this is worse than the deterministic no-filing checkpoint `0.8677052580`
+  - interpretation: leafifying the export surface is the right correctness/control-surface fix, but it does not improve the mission metric by itself
+- checked a CPS source-sampling state-floor experiment and reverted it
+  - temporary artifact: `/Users/maxghenis/CosilicoAI/microplex-us/artifacts/tmp_qrf_leafified_statefloor_export_pe_native_broad_20260330.h5`
+  - pre-sim effect:
+    - all `51` states survive through seed, synthetic, and calibrated tables
+    - exported H5 state-age support recall improved from about `0.5708` to `0.5871`
+  - mission effect:
+    - candidate loss worsened to `0.9147484499`
+  - action:
+    - do **not** keep a one-household-per-state floor in default CPS source subsampling
+- additional seam confirmed from the live build:
+  - `rent` and `real_estate_taxes` are absent from `seed_data`, `synthetic_data`, and `calibrated_data` on the current `cps+puf` path
+  - the exported H5 now includes those arrays, but they are all-zero placeholders rather than populated pre-sim inputs

@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import json
+import os
 from types import SimpleNamespace
 
 from microplex_us.pipelines.pe_native_scores import (
     PolicyEngineUSEnhancedCPSNativeScores,
+    build_policyengine_us_data_pythonpath,
     compare_us_pe_native_target_deltas,
     compute_batch_us_pe_native_scores,
     compute_us_pe_native_scores,
@@ -214,6 +216,27 @@ def test_compute_batch_us_pe_native_scores_wraps_multiple_candidates(
     assert results[1]["broad_loss"]["enhanced_cps_native_loss_delta"] == 0.25
     assert results[0]["family_breakdown"][0]["family"] == "state_age_distribution"
     assert results[1]["broad_loss"]["family_breakdown"][0]["family"] == "state_agi_distribution"
+
+
+def test_build_policyengine_us_data_pythonpath_includes_sibling_microimpute(
+    tmp_path,
+) -> None:
+    repo = tmp_path / "policyengine-us-data"
+    (repo / "policyengine_us_data").mkdir(parents=True)
+    microimpute = tmp_path / "microimpute"
+    (microimpute / "microimpute").mkdir(parents=True)
+
+    pythonpath = build_policyengine_us_data_pythonpath(
+        repo,
+        existing_pythonpath="/tmp/existing-one:/tmp/existing-two",
+    )
+
+    assert pythonpath.split(os.pathsep) == [
+        str(repo),
+        str(microimpute),
+        "/tmp/existing-one",
+        "/tmp/existing-two",
+    ]
 
 
 def test_compare_us_pe_native_target_deltas_wraps_subprocess_payload(

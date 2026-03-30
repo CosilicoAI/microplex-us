@@ -705,6 +705,27 @@ def resolve_policyengine_us_data_python(
     )
 
 
+def build_policyengine_us_data_pythonpath(
+    repo_root: str | Path | None = None,
+    *,
+    existing_pythonpath: str | None = None,
+) -> str:
+    """Build the native-scoring PYTHONPATH for local PE-US-data checkouts."""
+
+    resolved_repo = resolve_policyengine_us_data_repo_root(repo_root)
+    path_entries: list[str] = [str(resolved_repo)]
+
+    sibling_microimpute = resolved_repo.parent / "microimpute"
+    if (sibling_microimpute / "microimpute").exists():
+        path_entries.append(str(sibling_microimpute))
+
+    if existing_pythonpath:
+        path_entries.extend(
+            entry for entry in existing_pythonpath.split(os.pathsep) if entry
+        )
+    return os.pathsep.join(path_entries)
+
+
 def compute_policyengine_us_enhanced_cps_native_scores(
     candidate_dataset: str | Path,
     baseline_dataset: str | Path,
@@ -716,11 +737,9 @@ def compute_policyengine_us_enhanced_cps_native_scores(
     """Score one candidate and baseline under the exact enhanced-CPS loss."""
     resolved_repo = resolve_policyengine_us_data_repo_root(policyengine_us_data_repo)
     env = dict(os.environ)
-    existing_pythonpath = env.get("PYTHONPATH")
-    env["PYTHONPATH"] = (
-        f"{resolved_repo}{os.pathsep}{existing_pythonpath}"
-        if existing_pythonpath
-        else str(resolved_repo)
+    env["PYTHONPATH"] = build_policyengine_us_data_pythonpath(
+        resolved_repo,
+        existing_pythonpath=env.get("PYTHONPATH"),
     )
     if policyengine_us_data_python is not None:
         command = [str(Path(policyengine_us_data_python).expanduser().resolve())]
@@ -828,11 +847,9 @@ def compute_batch_us_pe_native_scores(
         return []
     resolved_repo = resolve_policyengine_us_data_repo_root(policyengine_us_data_repo)
     env = dict(os.environ)
-    existing_pythonpath = env.get("PYTHONPATH")
-    env["PYTHONPATH"] = (
-        f"{resolved_repo}{os.pathsep}{existing_pythonpath}"
-        if existing_pythonpath
-        else str(resolved_repo)
+    env["PYTHONPATH"] = build_policyengine_us_data_pythonpath(
+        resolved_repo,
+        existing_pythonpath=env.get("PYTHONPATH"),
     )
     if policyengine_us_data_python is not None:
         command = [str(Path(policyengine_us_data_python).expanduser().resolve())]
@@ -942,11 +959,9 @@ def compare_us_pe_native_target_deltas(
 
     resolved_repo = resolve_policyengine_us_data_repo_root(policyengine_us_data_repo)
     env = dict(os.environ)
-    existing_pythonpath = env.get("PYTHONPATH")
-    env["PYTHONPATH"] = (
-        f"{resolved_repo}{os.pathsep}{existing_pythonpath}"
-        if existing_pythonpath
-        else str(resolved_repo)
+    env["PYTHONPATH"] = build_policyengine_us_data_pythonpath(
+        resolved_repo,
+        existing_pythonpath=env.get("PYTHONPATH"),
     )
     if policyengine_us_data_python is not None:
         command = [str(Path(policyengine_us_data_python).expanduser().resolve())]
