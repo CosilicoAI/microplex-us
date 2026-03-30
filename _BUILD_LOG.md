@@ -641,7 +641,44 @@ Append-only notes for agents working in `microplex-us`.
     - pre-fix candidate loss `0.9369853544124408`
     - post-fix candidate loss `0.9386384097643049`
     - change `+0.0016530553518641` (slightly worse)
-  - interpretation:
+ - interpretation:
     - the relationship/head repair and confirmed person-native IRS semantic fixes corrected real structural bugs
     - but on this saved `cps+puf` broad candidate they did not improve the mission metric
     - broad PE-native loss is still dominated by seams outside this export-structure fix, especially the already-identified `national_irs_other`, `state_agi_distribution`, and `state_age_distribution` families
+
+2026-03-29
+- PE pre-sim parity audit against `source_imputed_stratified_extended_cps_2024.h5`:
+  - added reusable audit helper:
+    - `src/microplex_us/pipelines/pre_sim_parity.py`
+    - `tests/pipelines/test_pre_sim_parity.py`
+  - real audit artifact written to:
+    - `/Users/maxghenis/CosilicoAI/microplex-us/artifacts/tmp_pre_sim_parity_audit_20260329.json`
+  - saved broad candidate audited:
+    - `/Users/maxghenis/CosilicoAI/microplex-us/artifacts/live_pe_native_broad_entropy_batch_noharness_20260329/20260329T210427Z-057066af/policyengine_us.h5`
+  - key findings:
+    - candidate schema recall vs PE pre-sim input surface is only `35 / 165 = 21.2%`
+    - missing critical pre-sim inputs include:
+      - `county_fips`
+      - `cps_race`
+      - `is_hispanic`
+      - `is_disabled`
+      - `rent`
+      - `real_estate_taxes`
+      - `net_worth`
+      - `has_esi`
+      - `has_marketplace_health_coverage`
+    - candidate tax-unit structure is still pathological pre-sim:
+      - `share_multi_person_tax_units = 0.0`
+      - reference `share_multi_person_tax_units = 0.446`
+    - candidate state-by-age pre-sim support recall is only `0.627`
+      - `576 / 918` nonempty `(state, 5-year-age-bin)` cells
+      - worst missing states by cell count include DC (`11`), WY (`56`), SD (`46`), VT (`50`)
+    - several mission-relevant IRS donor inputs have zero positive support in the candidate while PE pre-sim has real mass, notably:
+      - `long_term_capital_gains_before_response`
+      - `partnership_s_corp_income`
+      - `farm_income`
+  - interpretation:
+    - the broad PE-native gap is not just calibration
+    - we are feeding PE a far thinner and structurally weaker pre-sim dataset than PE-US-data feeds itself
+  - next step:
+    - build a parity-focused fix list around missing pre-sim inputs and tax-unit structure before spending more cycles on donor-backend A/B tests

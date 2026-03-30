@@ -49,6 +49,10 @@ from microplex_us.pipelines.performance import (
     run_us_microplex_performance_harness,
     warm_us_microplex_parity_cache,
 )
+from microplex_us.pipelines.pre_sim_parity import (
+    build_us_pre_sim_parity_audit,
+    write_us_pre_sim_parity_audit,
+)
 from microplex_us.pipelines.registry import (
     FrontierMetric,
     USMicroplexRunRegistryEntry,
@@ -107,6 +111,7 @@ __all__ = [
     "compute_batch_us_pe_native_scores",
     "compute_policyengine_us_enhanced_cps_native_scores",
     "compute_us_pe_native_scores",
+    "build_us_pre_sim_parity_audit",
     "load_us_microplex_run_registry",
     "resolve_policyengine_us_data_python",
     "resolve_policyengine_us_data_repo_root",
@@ -116,6 +121,7 @@ __all__ = [
     "select_us_microplex_frontier_entry",
     "build_us_microplex_site_snapshot",
     "write_us_pe_native_scores",
+    "write_us_pre_sim_parity_audit",
     "write_us_microplex_site_snapshot",
     "USMicroplexBuildConfig",
     "USMicroplexBuildResult",
