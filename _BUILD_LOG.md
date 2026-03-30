@@ -680,5 +680,43 @@ Append-only notes for agents working in `microplex-us`.
   - interpretation:
     - the broad PE-native gap is not just calibration
     - we are feeding PE a far thinner and structurally weaker pre-sim dataset than PE-US-data feeds itself
-  - next step:
+ - next step:
     - build a parity-focused fix list around missing pre-sim inputs and tax-unit structure before spending more cycles on donor-backend A/B tests
+
+2026-03-29
+- PE pre-sim parity follow-up:
+  - re-exported the saved broad candidate under current code to isolate export/handoff vs upstream candidate quality:
+    - candidate source tables:
+      - `/Users/maxghenis/CosilicoAI/microplex-us/artifacts/live_pe_native_broad_entropy_batch_noharness_20260329/20260329T210427Z-057066af/calibrated_data.parquet`
+    - re-exported H5:
+      - `/Users/maxghenis/CosilicoAI/microplex-us/artifacts/tmp_pre_sim_parity_reexport_20260329.h5`
+    - updated audit:
+      - `/Users/maxghenis/CosilicoAI/microplex-us/artifacts/tmp_pre_sim_parity_reexport_20260329.json`
+  - compared with the original saved candidate H5 audit:
+    - common PE pre-sim vars improved from `35` to `39`
+    - schema recall improved from `0.2121` to `0.2364`
+    - recovered exactly these PE inputs in the H5 handoff:
+      - `cps_race`
+      - `is_hispanic`
+      - `rent`
+      - `real_estate_taxes`
+    - missing critical vars dropped from:
+      - `county_fips`, `cps_race`, `is_hispanic`, `is_disabled`, `rent`, `real_estate_taxes`, `net_worth`, `has_esi`, `has_marketplace_health_coverage`
+      - to:
+      - `county_fips`, `is_disabled`, `net_worth`, `has_esi`, `has_marketplace_health_coverage`
+    - candidate tax-unit structure improved slightly under current entity-table/export code:
+      - `share_multi_person_tax_units` from `0.0` to `0.0260`
+  - interpretation:
+    - the export bridge was a real part of the problem, but not the dominant one
+    - after current-code re-export, the remaining broad gap is clearly upstream of H5 writing
+- CPS pre-sim source-surface restoration:
+  - updated `src/microplex_us/data_sources/cps.py` so raw CPS loads now carry the same core CPS-derived pre-sim inputs that `policyengine-us-data` uses:
+    - `county_fips` from household `GTCO`
+    - `cps_race` from `PRDTRACE`
+    - `is_hispanic` from `PRDTHSP != 0`
+    - `is_disabled` from the CPS disability flags (`PEDISDRS`, `PEDISEAR`, `PEDISEYE`, `PEDISOUT`, `PEDISPHY`, `PEDISREM`)
+    - `has_esi` from `NOW_GRP == 1`
+    - `has_marketplace_health_coverage` from `NOW_MRK == 1`
+  - also tightened processed-cache freshness so stale cached CPS parquet will rebuild if those PE-style pre-sim columns are missing
+  - verified in `tests/test_cps_source_provider.py` (`6 passed`, Ruff clean)
+  - this is aimed at future broad reruns; it does not retroactively change the already-saved broad artifact

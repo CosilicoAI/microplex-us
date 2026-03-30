@@ -48,7 +48,14 @@ PERSON_VARIABLES = {
     "A_SEX": "sex",
     "PRDTRACE": "race",
     "PEHSPNON": "hispanic",
+    "PRDTHSP": "_cps_hispanic_code",
     "A_HGA": "education",
+    "PEDISDRS": "_disability_dressing",
+    "PEDISEAR": "_disability_hearing",
+    "PEDISEYE": "_disability_vision",
+    "PEDISOUT": "_disability_errands",
+    "PEDISPHY": "_disability_physical",
+    "PEDISREM": "_disability_cognitive",
     # Employment
     "A_CLSWKR": "class_of_worker",
     "A_WKSTAT": "work_status",
@@ -67,6 +74,8 @@ PERSON_VARIABLES = {
     "PAW_VAL": "public_assistance",
     "MCARE": "has_medicare",
     "MCAID": "has_medicaid",
+    "NOW_GRP": "has_esi",
+    "NOW_MRK": "has_marketplace_health_coverage",
     # Identifiers
     "PH_SEQ": "household_id",
     "GESTFIPS": "state_fips",
@@ -82,6 +91,7 @@ PERSON_VARIABLES = {
 HOUSEHOLD_VARIABLES = {
     "H_SEQ": "household_id",
     "GESTFIPS": "state_fips",
+    "GTCO": "county_fips",
     "GTCBSA": "cbsa",
     "HRHTYPE": "household_type",
     "H_NUMPER": "household_size",
@@ -115,6 +125,25 @@ PERSON_INCOME_COLUMNS = (
     "unemployment_compensation",
     "public_assistance",
     "total_person_income",
+)
+
+PERSON_CACHE_REQUIRED_COLUMNS = (
+    "state_fips",
+    "county_fips",
+    "cps_race",
+    "is_hispanic",
+    "is_disabled",
+    "has_esi",
+    "has_marketplace_health_coverage",
+)
+
+PERSON_CPS_DISABILITY_COLUMNS = (
+    "_disability_dressing",
+    "_disability_hearing",
+    "_disability_vision",
+    "_disability_errands",
+    "_disability_physical",
+    "_disability_cognitive",
 )
 
 
@@ -602,6 +631,27 @@ def _process_persons(df: pl.DataFrame, year: int) -> pl.DataFrame:
             (pl.col("age") >= 65).alias("is_senior"),
         ])
 
+    if "race" in result.columns and "cps_race" not in result.columns:
+        result = result.with_columns(pl.col("race").alias("cps_race"))
+    if "_cps_hispanic_code" in result.columns and "is_hispanic" not in result.columns:
+        result = result.with_columns(
+            (pl.col("_cps_hispanic_code") != 0).alias("is_hispanic")
+        ).drop("_cps_hispanic_code")
+    disability_columns = [
+        column for column in PERSON_CPS_DISABILITY_COLUMNS if column in result.columns
+    ]
+    if disability_columns and "is_disabled" not in result.columns:
+        result = result.with_columns(
+            pl.any_horizontal(
+                *[(pl.col(column) == 1) for column in disability_columns]
+            ).alias("is_disabled")
+        ).drop(disability_columns)
+    elif disability_columns:
+        result = result.drop(disability_columns)
+    for bool_column in ("has_esi", "has_marketplace_health_coverage"):
+        if bool_column in result.columns:
+            result = result.with_columns((pl.col(bool_column) == 1).alias(bool_column))
+
     # Add year
     result = result.with_columns(pl.lit(year).alias("year"))
 
@@ -610,7 +660,8 @@ def _process_persons(df: pl.DataFrame, year: int) -> pl.DataFrame:
 
 def _processed_persons_have_household_geography(persons: pl.DataFrame) -> bool:
     """Whether cached processed person data can derive household geography."""
-    if "state_fips" not in persons.columns:
+    required_columns = set(PERSON_CACHE_REQUIRED_COLUMNS)
+    if not required_columns.issubset(set(persons.columns)):
         return False
     return len(persons["state_fips"].drop_nulls()) > 0
 
@@ -643,22 +694,35 @@ def _attach_household_geography_to_persons(
     households: pl.DataFrame,
 ) -> pl.DataFrame:
     """Propagate household geography onto cached person rows when needed."""
-    if "state_fips" not in households.columns or "household_id" not in households.columns:
+    if "household_id" not in households.columns:
         return persons
-    geography = households.select(["household_id", "state_fips"])
-    if "state_fips" not in persons.columns:
-        return persons.join(geography, on="household_id", how="left")
-    return (
-        persons.join(
-            geography.rename({"state_fips": "_household_state_fips"}),
-            on="household_id",
-            how="left",
-        )
-        .with_columns(
-            pl.coalesce("state_fips", "_household_state_fips").alias("state_fips")
-        )
-        .drop("_household_state_fips")
+    geography_columns = [
+        column
+        for column in ("state_fips", "county_fips")
+        if column in households.columns
+    ]
+    if not geography_columns:
+        return persons
+    joined = persons.join(
+        households.select(["household_id", *geography_columns]).rename(
+            {
+                column: f"_household_{column}"
+                for column in geography_columns
+            }
+        ),
+        on="household_id",
+        how="left",
     )
+    for column in geography_columns:
+        household_column = f"_household_{column}"
+        if column in joined.columns:
+            joined = joined.with_columns(
+                pl.coalesce(column, household_column).alias(column)
+            )
+        else:
+            joined = joined.with_columns(pl.col(household_column).alias(column))
+        joined = joined.drop(household_column)
+    return joined
 
 
 def _derive_households(persons: pl.DataFrame) -> pl.DataFrame:
@@ -674,6 +738,10 @@ def _derive_households(persons: pl.DataFrame) -> pl.DataFrame:
         aggregations.append(pl.col("state_fips").first().alias("state_fips"))
     else:
         aggregations.append(pl.lit(None).alias("state_fips"))
+    if "county_fips" in persons.columns:
+        aggregations.append(pl.col("county_fips").first().alias("county_fips"))
+    else:
+        aggregations.append(pl.lit(None).alias("county_fips"))
     if "total_person_income" in persons.columns:
         aggregations.append(
             pl.col("total_person_income").sum().alias("household_total_income")

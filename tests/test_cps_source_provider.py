@@ -141,12 +141,24 @@ def test_load_cps_asec_caches_household_geography_on_persons(tmp_path):
             "A_LINENO": [1, 2, 1],
             "A_AGE": [34, 12, 52],
             "A_FNLWGT": [100, 100, 200],
+            "PRDTRACE": [4, 4, 1],
+            "PRDTHSP": [0, 1, 0],
+            "PEHSPNON": [2, 1, 2],
+            "PEDISDRS": [0, 1, 0],
+            "PEDISEAR": [0, 0, 0],
+            "PEDISEYE": [0, 0, 0],
+            "PEDISOUT": [0, 0, 0],
+            "PEDISPHY": [0, 0, 0],
+            "PEDISREM": [0, 0, 0],
+            "NOW_MRK": [1, 0, 0],
+            "NOW_GRP": [0, 1, 0],
         }
     )
     household_rows = pd.DataFrame(
         {
             "H_SEQ": [1, 2],
             "GESTFIPS": [6, 36],
+            "GTCO": [1, 61],
             "HSUP_WGT": [100, 200],
         }
     )
@@ -159,6 +171,75 @@ def test_load_cps_asec_caches_household_geography_on_persons(tmp_path):
     second = load_cps_asec(year=2023, cache_dir=tmp_path, download=False)
 
     assert "state_fips" in first.persons.columns
+    assert "county_fips" in first.persons.columns
+    assert "cps_race" in first.persons.columns
+    assert "is_hispanic" in first.persons.columns
+    assert "is_disabled" in first.persons.columns
+    assert "has_marketplace_health_coverage" in first.persons.columns
+    assert "has_esi" in first.persons.columns
     assert cached_persons["state_fips"].to_list() == [6, 6, 36]
+    assert cached_persons["county_fips"].to_list() == [1, 1, 61]
+    assert cached_persons["cps_race"].to_list() == [4, 4, 1]
+    assert cached_persons["is_hispanic"].to_list() == [False, True, False]
+    assert cached_persons["is_disabled"].to_list() == [False, True, False]
+    assert cached_persons["has_marketplace_health_coverage"].to_list() == [True, False, False]
+    assert cached_persons["has_esi"].to_list() == [False, True, False]
     assert second.source.endswith("cps_asec_2023_processed.parquet")
     assert sorted(second.households["state_fips"].to_list()) == [6, 36]
+    assert sorted(second.households["county_fips"].to_list()) == [1, 61]
+
+
+def test_load_cps_asec_rebuilds_stale_processed_cache_without_pe_presim_inputs(tmp_path):
+    stale_processed = pl.DataFrame(
+        {
+            "household_id": [1, 1, 2],
+            "person_number": [1, 2, 1],
+            "age": [34, 12, 52],
+            "weight": [1.0, 1.0, 2.0],
+            "state_fips": [6, 6, 36],
+            "year": [2023, 2023, 2023],
+        }
+    )
+    stale_processed.write_parquet(tmp_path / "cps_asec_2023_processed.parquet")
+
+    person_rows = pd.DataFrame(
+        {
+            "PH_SEQ": [1, 1, 2],
+            "GESTFIPS": [6, 6, 36],
+            "A_LINENO": [1, 2, 1],
+            "A_AGE": [34, 12, 52],
+            "A_FNLWGT": [100, 100, 200],
+            "PRDTRACE": [4, 4, 1],
+            "PRDTHSP": [0, 1, 0],
+            "PEHSPNON": [2, 1, 2],
+            "PEDISDRS": [0, 1, 0],
+            "PEDISEAR": [0, 0, 0],
+            "PEDISEYE": [0, 0, 0],
+            "PEDISOUT": [0, 0, 0],
+            "PEDISPHY": [0, 0, 0],
+            "PEDISREM": [0, 0, 0],
+            "NOW_MRK": [1, 0, 0],
+            "NOW_GRP": [0, 1, 0],
+        }
+    )
+    household_rows = pd.DataFrame(
+        {
+            "H_SEQ": [1, 2],
+            "GESTFIPS": [6, 36],
+            "GTCO": [1, 61],
+            "HSUP_WGT": [100, 200],
+        }
+    )
+    with zipfile.ZipFile(tmp_path / "cps_asec_2023.zip", "w") as archive:
+        archive.writestr("pppub23.csv", person_rows.to_csv(index=False))
+        archive.writestr("hhpub23.csv", household_rows.to_csv(index=False))
+
+    dataset = load_cps_asec(year=2023, cache_dir=tmp_path, download=False)
+
+    assert dataset.source.endswith("cps_asec_2023.zip")
+    assert dataset.persons["county_fips"].to_list() == [1, 1, 61]
+    assert dataset.persons["cps_race"].to_list() == [4, 4, 1]
+    assert dataset.persons["is_hispanic"].to_list() == [False, True, False]
+    assert dataset.persons["is_disabled"].to_list() == [False, True, False]
+    assert dataset.persons["has_marketplace_health_coverage"].to_list() == [True, False, False]
+    assert dataset.persons["has_esi"].to_list() == [False, True, False]
