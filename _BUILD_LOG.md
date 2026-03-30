@@ -1022,3 +1022,44 @@ Append-only notes for agents working in `microplex-us`.
   - but skip donor integration of `filing_status_code`
   - output target: `/Users/maxghenis/CosilicoAI/microplex-us/artifacts/tmp_qrf_no_filing_status_pe_native_broad_20260329.json`
 - this is the cleanest immediate test of the current filer-structure hypothesis.
+
+## 2026-03-29 filing-status donor checkpoint
+
+- the `filing_status_code` ablation landed and improved the real mission metric:
+  - baseline broad run: `/Users/maxghenis/CosilicoAI/microplex-us/artifacts/tmp_qrf_weighted_sample1000_pe_native_broad_20260329.json`
+    - candidate loss `0.8696287975`
+  - no-filing ablation: `/Users/maxghenis/CosilicoAI/microplex-us/artifacts/tmp_qrf_no_filing_status_pe_native_broad_20260329.json`
+    - candidate loss `0.8596198236`
+  - improvement: `-0.010009`
+- the gains are concentrated in the same broad families we already care about:
+  - `national_irs_other`: `-0.00358`
+  - `state_aca_spending`: `-0.00281`
+  - `state_agi_distribution`: `-0.00136`
+  - `national_population_by_age`: `-0.00091`
+- pre-sim parity did **not** improve on state-age support:
+  - best broad run: state-age support recall `0.5980`
+  - no-filing ablation: `0.5643`
+  - interpretation: this is a tax/filer-structure win, not a generic coverage win
+- exported tax-unit structure changed modestly in the healthier direction:
+  - best broad run:
+    - `filing_status` shares `SINGLE 59.6%`, `JOINT 35.1%`, `HOH 5.3%`
+    - mean tax-unit size `1.7266`
+    - multi-person tax-unit share `0.4038`
+  - no-filing ablation:
+    - `filing_status` shares `SINGLE 58.0%`, `JOINT 37.8%`, `HOH 4.2%`
+    - mean tax-unit size `1.7432`
+    - multi-person tax-unit share `0.4199`
+- raw PUF confirms why the donor path is risky here:
+  - `filing_status_code` exists only in PUF, not in the CPS scaffold seed
+  - raw sampled PUF distribution is strongly categorical and skewed:
+    - `JOINT 1112`, `SINGLE 316`, `HOH 103`, `SEPARATE 25`
+  - current donor logic was treating `filing_status_code` as a generic continuous donor target under weak shared numeric conditions
+- code change:
+  - `src/microplex_us/pipelines/us.py` now supports `donor_imputer_excluded_variables`
+  - default exclusion is now `("filing_status_code",)` so this path no longer requires a one-off subclass
+  - `synthesis_metadata` now records `donor_excluded_variables`
+  - focused test added in `tests/pipelines/test_us.py`
+- next likely tax/filer ablation candidates, if broad loss plateaus here:
+  - `eitc_children`
+  - `exemptions_count`
+  - possibly other PUF-only count/categorical surfaces before touching zero-inflated amount variables

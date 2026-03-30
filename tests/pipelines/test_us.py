@@ -3407,6 +3407,186 @@ class TestUSMicroplexPipeline:
         assert "taxable_interest_income" in integration["seed_data"].columns
         assert "employment_income" not in integration["seed_data"].columns
 
+    def test_integrate_donor_sources_respects_excluded_variables(self, monkeypatch):
+        class FakeSynthesizer:
+            def __init__(self, *, target_vars, condition_vars, **kwargs):
+                _ = condition_vars, kwargs
+                self.target_vars = tuple(target_vars)
+
+            def fit(self, *args, **kwargs):
+                _ = args, kwargs
+
+            def generate(self, frame, seed=None):
+                _ = seed
+                result = frame.copy()
+                result["taxable_interest_income"] = [10.0] * len(result)
+                return result
+
+        monkeypatch.setattr("microplex_us.pipelines.us.Synthesizer", FakeSynthesizer)
+
+        cps_households = pd.DataFrame(
+            {
+                "household_id": [1, 2, 3],
+                "hh_weight": [100.0, 120.0, 140.0],
+                "state_fips": [6, 36, 12],
+                "tenure": [1, 2, 1],
+            }
+        )
+        cps_persons = pd.DataFrame(
+            {
+                "person_id": [10, 20, 30],
+                "household_id": [1, 2, 3],
+                "age": [45, 19, 62],
+                "sex": [1, 2, 1],
+                "education": [3, 2, 4],
+                "employment_status": [1, 0, 1],
+                "income": [60_000.0, 12_000.0, 40_000.0],
+            }
+        )
+        donor_households = pd.DataFrame(
+            {
+                "household_id": [101, 102, 103],
+                "hh_weight": [80.0, 90.0, 110.0],
+                "state_fips": [0, 0, 0],
+                "tenure": [1, 2, 1],
+            }
+        )
+        donor_persons = pd.DataFrame(
+            {
+                "person_id": [1001, 1002, 1003],
+                "household_id": [101, 102, 103],
+                "age": [44, 21, 61],
+                "sex": [1, 2, 1],
+                "education": [3, 2, 4],
+                "employment_status": [1, 0, 1],
+                "income": [58_000.0, 13_000.0, 41_000.0],
+                "taxable_interest_income": [0.0, 25.0, 100.0],
+            }
+        )
+        cps_frame = ObservationFrame(
+            source=SourceDescriptor(
+                name="cps_like",
+                shareability=Shareability.PUBLIC,
+                time_structure=TimeStructure.REPEATED_CROSS_SECTION,
+                observations=(
+                    EntityObservation(
+                        entity=EntityType.HOUSEHOLD,
+                        key_column="household_id",
+                        variable_names=("state_fips", "tenure"),
+                        weight_column="hh_weight",
+                    ),
+                    EntityObservation(
+                        entity=EntityType.PERSON,
+                        key_column="person_id",
+                        variable_names=(
+                            "household_id",
+                            "age",
+                            "sex",
+                            "education",
+                            "employment_status",
+                            "income",
+                        ),
+                    ),
+                ),
+            ),
+            tables={
+                EntityType.HOUSEHOLD: cps_households,
+                EntityType.PERSON: cps_persons,
+            },
+            relationships=(
+                EntityRelationship(
+                    parent_entity=EntityType.HOUSEHOLD,
+                    child_entity=EntityType.PERSON,
+                    parent_key="household_id",
+                    child_key="household_id",
+                    cardinality=RelationshipCardinality.ONE_TO_MANY,
+                ),
+            ),
+        )
+        donor_frame = ObservationFrame(
+            source=SourceDescriptor(
+                name="irs_soi_puf_2024",
+                shareability=Shareability.RESTRICTED,
+                time_structure=TimeStructure.REPEATED_CROSS_SECTION,
+                observations=(
+                    EntityObservation(
+                        entity=EntityType.HOUSEHOLD,
+                        key_column="household_id",
+                        variable_names=("state_fips", "tenure"),
+                        weight_column="hh_weight",
+                    ),
+                    EntityObservation(
+                        entity=EntityType.PERSON,
+                        key_column="person_id",
+                        variable_names=(
+                            "household_id",
+                            "age",
+                            "sex",
+                            "education",
+                            "employment_status",
+                            "income",
+                            "taxable_interest_income",
+                        ),
+                    ),
+                ),
+                variable_capabilities={
+                    "state_fips": SourceVariableCapability(
+                        authoritative=False,
+                        usable_as_condition=False,
+                    ),
+                    "tenure": SourceVariableCapability(
+                        authoritative=False,
+                        usable_as_condition=False,
+                    ),
+                    "income": SourceVariableCapability(
+                        authoritative=False,
+                        usable_as_condition=False,
+                    ),
+                    "employment_status": SourceVariableCapability(
+                        authoritative=False,
+                        usable_as_condition=False,
+                    ),
+                    "taxable_interest_income": SourceVariableCapability(
+                        authoritative=True,
+                        usable_as_condition=True,
+                    ),
+                },
+            ),
+            tables={
+                EntityType.HOUSEHOLD: donor_households,
+                EntityType.PERSON: donor_persons,
+            },
+            relationships=(
+                EntityRelationship(
+                    parent_entity=EntityType.HOUSEHOLD,
+                    child_entity=EntityType.PERSON,
+                    parent_key="household_id",
+                    child_key="household_id",
+                    cardinality=RelationshipCardinality.ONE_TO_MANY,
+                ),
+            ),
+        )
+        pipeline = USMicroplexPipeline(
+            USMicroplexBuildConfig(
+                n_synthetic=6,
+                synthesis_backend="bootstrap",
+                calibration_backend="entropy",
+                donor_imputer_excluded_variables=("taxable_interest_income",),
+            )
+        )
+        cps_input = pipeline.prepare_source_input(cps_frame)
+        donor_input = pipeline.prepare_source_input(donor_frame)
+        seed_data = pipeline.prepare_seed_data_from_source(cps_input)
+
+        integration = pipeline._integrate_donor_sources(
+            seed_data,
+            scaffold_input=cps_input,
+            donor_inputs=[donor_input],
+        )
+
+        assert integration["integrated_variables"] == []
+        assert "taxable_interest_income" not in integration["seed_data"].columns
+
     def test_integrate_donor_sources_drops_constant_donor_conditions(self, monkeypatch):
         captured: list[tuple[str, ...]] = []
 

@@ -484,6 +484,7 @@ class USMicroplexBuildConfig:
         "top_correlated"
     )
     donor_imputer_max_condition_vars: int | None = 8
+    donor_imputer_excluded_variables: tuple[str, ...] = ("filing_status_code",)
     bootstrap_strata_columns: tuple[str, ...] = ()
     prefer_cached_cps_asec_source: bool = False
     cps_asec_source_year: int = 2023
@@ -688,6 +689,7 @@ class USMicroplexPipeline:
             "target_vars": list(synthesis_variables.target_vars),
             "scaffold_source": scaffold_input.frame.source.name,
             "donor_integrated_variables": donor_integration["integrated_variables"],
+            "donor_excluded_variables": list(self.config.donor_imputer_excluded_variables),
             "state_program_support_proxies": _state_program_support_proxy_summary(
                 set(seed_data.columns)
             ),
@@ -1885,6 +1887,7 @@ class USMicroplexPipeline:
                 variable
                 for variable in donor_observed - scaffold_observed
                 if variable not in excluded
+                and variable not in self.config.donor_imputer_excluded_variables
                 and variable in donor_seed.columns
                 and variable in numeric_donor
                 and donor_input.frame.source.is_authoritative_for(variable)
