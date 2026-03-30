@@ -229,3 +229,57 @@ def test_download_puf_prefers_existing_local_files_without_hub_lookup(tmp_path, 
 
     assert resolved_puf_path == puf_path
     assert resolved_demo_path == demographics_path
+
+
+def test_map_puf_variables_seed_controls_age_imputation():
+    puf = pd.DataFrame(
+        {
+            "RECID": [101, 202, 303],
+            "MARS": [1, 1, 1],
+            "XTOT": [1, 1, 1],
+            "S006": [100.0, 100.0, 100.0],
+            "E00200": [50_000.0, 150_000.0, 250_000.0],
+            "E02400": [0.0, 10_000.0, 0.0],
+            "E01400": [0.0, 0.0, 20_000.0],
+        }
+    )
+
+    first = puf_module.map_puf_variables(puf, random_seed=17)
+    second = puf_module.map_puf_variables(puf, random_seed=17)
+    third = puf_module.map_puf_variables(puf, random_seed=18)
+
+    assert first["age"].tolist() == second["age"].tolist()
+    assert first["age"].tolist() != third["age"].tolist()
+
+
+def test_puf_source_provider_age_imputation_is_reproducible_with_same_seed(tmp_path):
+    puf = pd.DataFrame(
+        {
+            "RECID": [101, 202, 303],
+            "MARS": [1, 2, 1],
+            "XTOT": [1, 2, 1],
+            "S006": [100.0, 120.0, 80.0],
+            "E00200": [50_000.0, 75_000.0, 150_000.0],
+            "E02400": [0.0, 8_000.0, 0.0],
+            "E01400": [0.0, 0.0, 25_000.0],
+            "GENDER": [1, 2, 1],
+        }
+    )
+    puf_path = tmp_path / "puf.csv"
+    demographics_path = tmp_path / "demographics.csv"
+    puf.to_csv(puf_path, index=False)
+    pd.DataFrame({"RECID": [101, 202, 303]}).to_csv(demographics_path, index=False)
+
+    provider = PUFSourceProvider(
+        puf_path=puf_path,
+        demographics_path=demographics_path,
+        target_year=2024,
+    )
+    query = SourceQuery(period=2024, provider_filters={"sample_n": 3, "random_seed": 7})
+    first = provider.load_frame(query)
+    second = provider.load_frame(query)
+
+    first_persons = first.tables[EntityType.PERSON].sort_values("person_id").reset_index(drop=True)
+    second_persons = second.tables[EntityType.PERSON].sort_values("person_id").reset_index(drop=True)
+
+    assert first_persons["age"].tolist() == second_persons["age"].tolist()

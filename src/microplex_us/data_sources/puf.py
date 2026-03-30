@@ -169,7 +169,11 @@ def load_puf_raw(puf_path: Path, demographics_path: Path | None = None) -> pd.Da
     return puf
 
 
-def map_puf_variables(puf: pd.DataFrame) -> pd.DataFrame:
+def map_puf_variables(
+    puf: pd.DataFrame,
+    *,
+    random_seed: int = 42,
+) -> pd.DataFrame:
     """Map PUF variable codes to common names."""
     result = pd.DataFrame(index=puf.index)
     manifest = load_us_source_manifest("puf")
@@ -208,7 +212,7 @@ def map_puf_variables(puf: pd.DataFrame) -> pd.DataFrame:
         result["age"] = puf["AGE_HEAD"]
     else:
         # Impute age based on income patterns
-        result["age"] = _impute_age(result)
+        result["age"] = _impute_age(result, random_seed=random_seed)
 
     # Add sex from demographics if available
     if "is_male" in puf.columns:
@@ -225,7 +229,11 @@ def map_puf_variables(puf: pd.DataFrame) -> pd.DataFrame:
     return result
 
 
-def _impute_age(df: pd.DataFrame) -> pd.Series:
+def _impute_age(
+    df: pd.DataFrame,
+    *,
+    random_seed: int = 42,
+) -> pd.Series:
     """Simple age imputation based on income patterns.
 
     This is a rough heuristic. The masked MAF will learn
@@ -251,7 +259,8 @@ def _impute_age(df: pd.DataFrame) -> pd.Series:
     age = age.where(~high_wage, 45)
 
     # Add some noise
-    noise = np.random.normal(0, 5, len(age))
+    rng = np.random.default_rng(random_seed)
+    noise = rng.normal(0, 5, len(age))
     age = (age + noise).clip(18, 95).astype(int)
 
     return age
@@ -495,9 +504,10 @@ def _build_puf_tax_units(
     *,
     raw: pd.DataFrame,
     target_year: int,
+    random_seed: int = 42,
 ) -> pd.DataFrame:
     """Map raw PUF records into a normalized tax-unit table."""
-    tax_units = map_puf_variables(raw)
+    tax_units = map_puf_variables(raw, random_seed=random_seed)
     tax_units = uprate_puf(tax_units, from_year=2015, to_year=target_year)
     identifier = (
         raw["RECID"].astype(str).reset_index(drop=True)
@@ -690,7 +700,11 @@ class PUFSourceProvider:
             sample_n=provider_filters.get("sample_n"),
             random_seed=int(provider_filters.get("random_seed", 0)),
         )
-        tax_units = _build_puf_tax_units(raw=raw, target_year=target_year)
+        tax_units = _build_puf_tax_units(
+            raw=raw,
+            target_year=target_year,
+            random_seed=int(provider_filters.get("random_seed", 0)),
+        )
         persons = _tax_units_to_persons(
             tax_units,
             expand_persons_flag=expand_persons_flag,

@@ -1056,10 +1056,69 @@ Append-only notes for agents working in `microplex-us`.
   - current donor logic was treating `filing_status_code` as a generic continuous donor target under weak shared numeric conditions
 - code change:
   - `src/microplex_us/pipelines/us.py` now supports `donor_imputer_excluded_variables`
-  - default exclusion is now `("filing_status_code",)` so this path no longer requires a one-off subclass
+  - exclusion remains opt-in; do **not** make `filing_status_code` the default exclusion until the result is reproducible
   - `synthesis_metadata` now records `donor_excluded_variables`
   - focused test added in `tests/pipelines/test_us.py`
 - next likely tax/filer ablation candidates, if broad loss plateaus here:
   - `eitc_children`
   - `exemptions_count`
   - possibly other PUF-only count/categorical surfaces before touching zero-inflated amount variables
+
+## 2026-03-29 filing-status reproducibility warning
+
+- the supported-path rerun of the same broad `qrf + bootstrap` idea with opt-in exclusion
+  - artifact: `/Users/maxghenis/CosilicoAI/microplex-us/artifacts/tmp_qrf_excluded_filing_status_config_pe_native_broad_20260329.json`
+  - candidate loss `1.3717579152`
+  - this is much worse than both:
+    - the earlier one-off no-filing artifact `0.8596198236`
+    - the ordinary broad run `0.8696287975`
+- family comparison against the earlier no-filing artifact says the regression is dominated by:
+  - `national_irs_other` `+0.4980`
+  - `state_aca_spending` `+0.0040`
+  - `state_age_distribution` `+0.0031`
+  - `national_population_by_age` `+0.0019`
+  - `state_agi_distribution` `+0.0017`
+- pre-sim parity also diverged materially:
+  - earlier no-filing artifact:
+    - state-age support recall `0.5643`
+    - state count `50`
+    - mean tax-unit size `1.7432`
+    - multi-person tax-unit share `0.4199`
+  - supported-path rerun:
+    - state-age support recall `0.5795`
+    - state count `48`
+    - mean tax-unit size `1.6550`
+    - multi-person tax-unit share `0.3808`
+- interpretation:
+  - the `filing_status_code` exclusion hook is worth keeping for controlled ablations
+  - but the win is **not yet reproducible enough** to set as the default mission path
+  - treat this as a reproducibility / run-path discrepancy that needs explanation before widening tax/filer exclusions
+
+## 2026-03-29 deterministic PUF age fix
+
+- found a concrete reproducibility bug in `src/microplex_us/data_sources/puf.py`
+  - the live PUF path does **not** have `age` or `AGE_HEAD` after the demographics merge
+  - so `map_puf_variables()` falls back to `_impute_age()`
+  - `_impute_age()` was adding Gaussian noise with unseeded `np.random.normal(...)`
+- that means identical broad `cps+puf + qrf + bootstrap + entropy` runs could differ before donor integration and calibration even with the same configured seed
+- patch:
+  - `map_puf_variables(..., random_seed=...)`
+  - `_impute_age(..., random_seed=...)`
+  - `_build_puf_tax_units(..., random_seed=...)`
+  - `PUFSourceProvider.load_frame()` now passes provider `random_seed` through to the age-imputation fallback
+- regression coverage:
+  - `tests/test_puf_source_provider.py::test_map_puf_variables_seed_controls_age_imputation`
+  - `tests/test_puf_source_provider.py::test_puf_source_provider_age_imputation_is_reproducible_with_same_seed`
+- validation after the patch:
+  - two same-seed exported H5s from the broad baseline path
+    - `/Users/maxghenis/CosilicoAI/microplex-us/artifacts/tmp_qrf_postfix_rebuild_a_20260329.h5`
+    - `/Users/maxghenis/CosilicoAI/microplex-us/artifacts/tmp_qrf_postfix_rebuild_b_20260329.h5`
+  - have identical pre-sim parity metrics:
+    - state-age nonempty cells `571`
+    - state-age support recall `0.6220`
+    - mean tax-unit size `1.7212`
+    - multi-person tax-unit share `0.4013`
+  - and identical exported variable arrays across the full common H5 surface (`different_variable_count = 0`)
+- implication:
+  - same-config A/Bs on the patched path are now much more trustworthy
+  - do not interpret older `cps+puf` broad comparisons as fully clean unless they were built after this fix

@@ -484,7 +484,7 @@ class USMicroplexBuildConfig:
         "top_correlated"
     )
     donor_imputer_max_condition_vars: int | None = 8
-    donor_imputer_excluded_variables: tuple[str, ...] = ("filing_status_code",)
+    donor_imputer_excluded_variables: tuple[str, ...] = ()
     bootstrap_strata_columns: tuple[str, ...] = ()
     prefer_cached_cps_asec_source: bool = False
     cps_asec_source_year: int = 2023
