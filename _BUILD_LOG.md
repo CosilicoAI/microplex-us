@@ -1365,3 +1365,19 @@ Append-only notes for agents working in `microplex-us`.
     - deterministic CPS sampling
     - rebuilt live CPS processed cache
     - actual carriage of the new CPS-derived PE inputs
+
+## 2026-03-30 focused Claude review — broad PE-native loss checkpoint
+
+- Scope: v2 clean broad result after deterministic CPS + rebuilt cache fixes
+- Full review: `reviews/2026-03-30-claude-broad-native-loss-checkpoint-review.md`
+- Top findings:
+  1. **HIGH**: Calibration-vs-scoring target mismatch dominates loss — calibrated against 1,255 constraints, scored against 2,817 targets. Top 3 families (`national_irs_other`, `state_agi_distribution`, `state_age_distribution`) account for 72% of the 0.855 delta.
+  2. **HIGH**: Calibration never converges — all saved artifacts show `converged=false`. A/B comparisons unreliable unless delta exceeds ~0.02-0.03.
+  3. **MEDIUM**: Cache invalidation checks column presence, not derivation correctness — same bug class as the 7.43 blow-up, different future trigger.
+- 7.43 blow-up: fully explained by stale CPS processed cache missing new PE-derived inputs. No deeper bug.
+- v2 result (candidate 0.875, PE baseline 0.020): trustworthy for family-level diagnosis, not for precision claims.
+- Top next fixes:
+  1. Increase source `sample_n` to 2000-3000 (steepest support-recall curve)
+  2. Diagnose calibration convergence with 10x solver iterations
+  3. Add cache derivation version to prevent stale-cache class bugs
+  4. Split `national_irs_other` in the family classifier for sub-family diagnosis
