@@ -382,6 +382,147 @@ class TestSaveUSMicroplexArtifacts:
         assert harness_payload["summary"]["slice_win_rate"] == 1.0
         assert harness_payload["summary"]["candidate_composite_parity_loss"] is not None
 
+    def test_can_defer_policyengine_harness_generation(self, monkeypatch, tmp_path):
+        baseline_dataset = _write_baseline_dataset(
+            tmp_path / "baseline.h5",
+            PolicyEngineUSEntityTableBundle(
+                households=pd.DataFrame(
+                    {
+                        "household_id": [1, 2],
+                        "household_weight": [1.0, 1.0],
+                        "state_fips": [6, 36],
+                        "snap": [75.0, 50.0],
+                    }
+                ),
+                persons=pd.DataFrame(
+                    {
+                        "person_id": [10, 11, 20],
+                        "household_id": [1, 1, 2],
+                        "tax_unit_id": [101, 101, 102],
+                        "spm_unit_id": [201, 201, 202],
+                        "family_id": [301, 301, 302],
+                        "marital_unit_id": [401, 401, 402],
+                        "age": [40.0, 10.0, 30.0],
+                        "income": [30_000.0, 0.0, 20_000.0],
+                    }
+                ),
+                tax_units=pd.DataFrame(
+                    {
+                        "tax_unit_id": [101, 102],
+                        "household_id": [1, 2],
+                        "filing_status": ["JOINT", "SINGLE"],
+                    }
+                ),
+                spm_units=pd.DataFrame(
+                    {"spm_unit_id": [201, 202], "household_id": [1, 2]}
+                ),
+                families=pd.DataFrame(
+                    {"family_id": [301, 302], "household_id": [1, 2]}
+                ),
+                marital_units=pd.DataFrame(
+                    {"marital_unit_id": [401, 402], "household_id": [1, 2]}
+                ),
+            ),
+        )
+        result = USMicroplexBuildResult(
+            config=USMicroplexBuildConfig(
+                n_synthetic=2,
+                synthesis_backend="bootstrap",
+                calibration_backend="entropy",
+                policyengine_dataset_year=2024,
+            ),
+            seed_data=pd.DataFrame({"income": [10.0], "hh_weight": [1.0]}),
+            synthetic_data=pd.DataFrame({"income": [10.0, 20.0], "weight": [1.0, 1.0]}),
+            calibrated_data=pd.DataFrame({"income": [10.0, 20.0], "weight": [0.5, 1.5]}),
+            targets=USMicroplexTargets(
+                marginal={"state": {"CA": 2.0}},
+                continuous={"income": 30.0},
+            ),
+            calibration_summary={"max_error": 0.01, "mean_error": 0.005},
+            synthesis_metadata={"backend": "bootstrap"},
+            synthesizer=None,
+            policyengine_tables=PolicyEngineUSEntityTableBundle(
+                households=pd.DataFrame(
+                    {
+                        "household_id": [1, 2],
+                        "household_weight": [2.0, 1.0],
+                        "state_fips": [6, 36],
+                        "snap": [100.0, 50.0],
+                    }
+                ),
+                persons=pd.DataFrame(
+                    {
+                        "person_id": [10, 11, 20],
+                        "household_id": [1, 1, 2],
+                        "tax_unit_id": [101, 101, 102],
+                        "spm_unit_id": [201, 201, 202],
+                        "family_id": [301, 301, 302],
+                        "marital_unit_id": [401, 401, 402],
+                        "age": [40.0, 10.0, 30.0],
+                        "income": [30_000.0, 0.0, 20_000.0],
+                    }
+                ),
+                tax_units=pd.DataFrame(
+                    {
+                        "tax_unit_id": [101, 102],
+                        "household_id": [1, 2],
+                        "filing_status": ["JOINT", "SINGLE"],
+                    }
+                ),
+                spm_units=pd.DataFrame(
+                    {"spm_unit_id": [201, 202], "household_id": [1, 2]}
+                ),
+                families=pd.DataFrame(
+                    {"family_id": [301, 302], "household_id": [1, 2]}
+                ),
+                marital_units=pd.DataFrame(
+                    {"marital_unit_id": [401, 402], "household_id": [1, 2]}
+                ),
+            ),
+        )
+        provider = StaticTargetProvider(
+            TargetSet(
+                [
+                    TargetSpec(
+                        name="snap_total",
+                        entity=EntityType.HOUSEHOLD,
+                        value=250.0,
+                        period=2024,
+                        measure="snap",
+                        aggregation="sum",
+                    ),
+                ]
+            )
+        )
+
+        monkeypatch.setattr(
+            "microplex_us.pipelines.artifacts.evaluate_policyengine_us_harness",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                AssertionError("harness evaluation should be deferred")
+            ),
+        )
+
+        paths = save_us_microplex_artifacts(
+            result,
+            tmp_path / "bundle",
+            policyengine_target_provider=provider,
+            policyengine_baseline_dataset=baseline_dataset,
+            policyengine_harness_slices=(
+                PolicyEngineUSHarnessSlice(
+                    name="snap",
+                    description="SNAP parity",
+                    query=TargetQuery(period=2024, names=("snap_total",)),
+                ),
+            ),
+            defer_policyengine_harness=True,
+            defer_policyengine_native_score=True,
+        )
+
+        manifest = json.loads(paths.manifest.read_text())
+        assert paths.policyengine_harness is None
+        assert manifest["artifacts"]["policyengine_harness"] is None
+        assert "policyengine_harness" not in manifest
+
     def test_writes_policyengine_harness_from_build_config_defaults(self, tmp_path):
         targets_db = tmp_path / "policyengine_targets.db"
         _create_policyengine_targets_db(targets_db)
@@ -528,3 +669,206 @@ class TestSaveUSMicroplexArtifacts:
         assert registry_entries[0].supported_target_rate == 1.0
         assert registry_entries[0].candidate_composite_parity_loss is not None
         assert registry_entries[0].tag_summaries["all_targets"]["target_win_rate"] == 1.0
+
+    def test_writes_policyengine_native_scores_when_available(
+        self, monkeypatch, tmp_path
+    ) -> None:
+        monkeypatch.setattr(
+            "microplex_us.pipelines.artifacts.compute_us_pe_native_scores",
+            lambda **_kwargs: {
+                "metric": "enhanced_cps_native_loss",
+                "summary": {
+                    "candidate_enhanced_cps_native_loss": 0.25,
+                    "baseline_enhanced_cps_native_loss": 0.5,
+                    "enhanced_cps_native_loss_delta": -0.25,
+                    "candidate_beats_baseline": True,
+                    "candidate_unweighted_msre": 0.3,
+                    "baseline_unweighted_msre": 0.6,
+                    "unweighted_msre_delta": -0.3,
+                    "n_targets_total": 2863,
+                    "n_targets_kept": 2853,
+                    "n_targets_zero_dropped": 10,
+                    "n_targets_bad_dropped": 10,
+                    "n_national_targets": 2000,
+                    "n_state_targets": 853,
+                },
+            },
+        )
+
+        result = USMicroplexBuildResult(
+            config=USMicroplexBuildConfig(
+                n_synthetic=2,
+                synthesis_backend="bootstrap",
+                calibration_backend="entropy",
+                policyengine_dataset_year=2024,
+            ),
+            seed_data=pd.DataFrame({"income": [10.0], "hh_weight": [1.0]}),
+            synthetic_data=pd.DataFrame({"income": [10.0, 20.0], "weight": [1.0, 1.0]}),
+            calibrated_data=pd.DataFrame({"income": [10.0, 20.0], "weight": [0.5, 1.5]}),
+            targets=USMicroplexTargets(marginal={}, continuous={"income": 30.0}),
+            calibration_summary={"max_error": 0.01, "mean_error": 0.005},
+            synthesis_metadata={"backend": "bootstrap"},
+            synthesizer=None,
+            policyengine_tables=PolicyEngineUSEntityTableBundle(
+                households=pd.DataFrame(
+                    {
+                        "household_id": [1, 2],
+                        "household_weight": [0.5, 1.5],
+                        "state_fips": [6, 48],
+                        "snap": [0.0, 50.0],
+                    }
+                ),
+                persons=pd.DataFrame(
+                    {
+                        "person_id": [10, 11],
+                        "household_id": [1, 2],
+                        "tax_unit_id": [101, 102],
+                        "spm_unit_id": [201, 202],
+                        "family_id": [301, 302],
+                        "marital_unit_id": [401, 402],
+                        "age": [35.0, 62.0],
+                    }
+                ),
+                tax_units=pd.DataFrame(
+                    {
+                        "tax_unit_id": [101, 102],
+                        "household_id": [1, 2],
+                        "filing_status": ["SINGLE", "JOINT"],
+                    }
+                ),
+                spm_units=pd.DataFrame(
+                    {"spm_unit_id": [201, 202], "household_id": [1, 2]}
+                ),
+                families=pd.DataFrame(
+                    {"family_id": [301, 302], "household_id": [1, 2]}
+                ),
+                marital_units=pd.DataFrame(
+                    {"marital_unit_id": [401, 402], "household_id": [1, 2]}
+                ),
+            ),
+        )
+
+        baseline_dataset = tmp_path / "baseline.h5"
+        baseline_dataset.write_text("baseline")
+
+        paths = save_us_microplex_artifacts(
+            result,
+            tmp_path / "bundle-native",
+            policyengine_baseline_dataset=baseline_dataset,
+        )
+
+        assert paths.policyengine_native_scores is not None
+        assert paths.policyengine_native_scores.exists()
+
+        manifest = json.loads(paths.manifest.read_text())
+        assert (
+            manifest["artifacts"]["policyengine_native_scores"]
+            == "policyengine_native_scores.json"
+        )
+        assert paths.run_registry is not None
+        assert paths.run_registry.exists()
+        assert (
+            manifest["policyengine_native_scores"]["candidate_enhanced_cps_native_loss"]
+            == 0.25
+        )
+        assert manifest["policyengine_native_scores"]["candidate_beats_baseline"] is True
+        assert (
+            manifest["run_registry"]["default_frontier_metric"]
+            == "enhanced_cps_native_loss_delta"
+        )
+
+        registry_entries = load_us_microplex_run_registry(paths.run_registry)
+        assert len(registry_entries) == 1
+        assert registry_entries[0].candidate_beats_baseline_native_loss is True
+
+    def test_uses_precomputed_policyengine_native_scores_without_recomputing(
+        self, monkeypatch, tmp_path
+    ) -> None:
+        def _boom(**_kwargs):
+            raise AssertionError("native scorer should not be called")
+
+        monkeypatch.setattr(
+            "microplex_us.pipelines.artifacts.compute_us_pe_native_scores",
+            _boom,
+        )
+
+        result = USMicroplexBuildResult(
+            config=USMicroplexBuildConfig(
+                n_synthetic=2,
+                synthesis_backend="bootstrap",
+                calibration_backend="entropy",
+                policyengine_dataset_year=2024,
+            ),
+            seed_data=pd.DataFrame({"income": [10.0], "hh_weight": [1.0]}),
+            synthetic_data=pd.DataFrame({"income": [10.0, 20.0], "weight": [1.0, 1.0]}),
+            calibrated_data=pd.DataFrame({"income": [10.0, 20.0], "weight": [0.5, 1.5]}),
+            targets=USMicroplexTargets(marginal={}, continuous={"income": 30.0}),
+            calibration_summary={"max_error": 0.01, "mean_error": 0.005},
+            synthesis_metadata={"backend": "bootstrap"},
+            synthesizer=None,
+            policyengine_tables=PolicyEngineUSEntityTableBundle(
+                households=pd.DataFrame(
+                    {
+                        "household_id": [1, 2],
+                        "household_weight": [0.5, 1.5],
+                        "state_fips": [6, 48],
+                        "snap": [0.0, 50.0],
+                    }
+                ),
+                persons=pd.DataFrame(
+                    {
+                        "person_id": [10, 11],
+                        "household_id": [1, 2],
+                        "tax_unit_id": [101, 102],
+                        "spm_unit_id": [201, 202],
+                        "family_id": [301, 302],
+                        "marital_unit_id": [401, 402],
+                        "age": [35.0, 62.0],
+                    }
+                ),
+                tax_units=pd.DataFrame(
+                    {
+                        "tax_unit_id": [101, 102],
+                        "household_id": [1, 2],
+                        "filing_status": ["SINGLE", "JOINT"],
+                    }
+                ),
+                spm_units=pd.DataFrame(
+                    {"spm_unit_id": [201, 202], "household_id": [1, 2]}
+                ),
+                families=pd.DataFrame(
+                    {"family_id": [301, 302], "household_id": [1, 2]}
+                ),
+                marital_units=pd.DataFrame(
+                    {"marital_unit_id": [401, 402], "household_id": [1, 2]}
+                ),
+            ),
+        )
+
+        payload = {
+            "metric": "enhanced_cps_native_loss",
+            "summary": {
+                "candidate_enhanced_cps_native_loss": 0.25,
+                "baseline_enhanced_cps_native_loss": 0.5,
+                "enhanced_cps_native_loss_delta": -0.25,
+                "candidate_beats_baseline": True,
+                "candidate_unweighted_msre": 0.3,
+                "baseline_unweighted_msre": 0.6,
+                "unweighted_msre_delta": -0.3,
+                "n_targets_total": 2863,
+                "n_targets_kept": 2853,
+                "n_targets_zero_dropped": 10,
+                "n_targets_bad_dropped": 10,
+                "n_national_targets": 2000,
+                "n_state_targets": 853,
+            },
+        }
+
+        paths = save_us_microplex_artifacts(
+            result,
+            tmp_path / "bundle-native-precomputed",
+            precomputed_policyengine_native_scores=payload,
+        )
+
+        assert paths.policyengine_native_scores is not None
+        assert json.loads(paths.policyengine_native_scores.read_text()) == payload

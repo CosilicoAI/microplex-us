@@ -1,0 +1,47 @@
+name: Site Snapshot
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  site-snapshot:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: microplex-us
+    steps:
+      - name: Check out microplex-us
+        uses: actions/checkout@v4
+        with:
+          path: microplex-us
+
+      - name: Check out core microplex
+        uses: actions/checkout@v4
+        with:
+          repository: CosilicoAI/microplex
+          path: microplex
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v6
+
+      - name: Verify snapshot tooling
+        run: |
+          uv run pytest -q \
+            tests/pipelines/test_check_site_snapshot.py \
+            tests/pipelines/test_site_snapshot.py \
+            tests/pipelines/test_version_benchmark.py
+
+      - name: Check canonical site snapshot
+        run: uv run microplex-us-check-site-snapshot artifacts/site_snapshot_us.json

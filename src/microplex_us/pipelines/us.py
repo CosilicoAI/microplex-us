@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import importlib.util
+import warnings
+from collections.abc import Iterable
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from types import FunctionType
@@ -30,7 +33,12 @@ from microplex.fusion import FusionPlan
 from microplex.hierarchical import TaxUnitOptimizer
 from microplex.synthesizer import Synthesizer
 from microplex.targets import TargetQuery, TargetSpec
+from sklearn.ensemble import RandomForestClassifier
 
+from microplex_us.policyengine.target_profiles import (
+    PolicyEngineUSTargetCell,
+    resolve_policyengine_us_target_profile,
+)
 from microplex_us.policyengine.us import (
     PolicyEngineUSDBTargetProvider,
     PolicyEngineUSEntityTableBundle,
@@ -49,6 +57,7 @@ from microplex_us.policyengine.us import (
 )
 from microplex_us.variables import (
     DonorMatchStrategy,
+    VariableSupportFamily,
     donor_imputation_block_specs,
     is_projected_condition_var_compatible,
     normalize_dividend_columns,
@@ -112,6 +121,118 @@ STATE_FIPS = {
 }
 
 AGE_BINS = [0, 18, 35, 55, 65, np.inf]
+
+
+class ColumnwiseQRFDonorImputer:
+    """Columnwise QRF donor imputer, optionally with zero-inflated support."""
+
+    def __init__(
+        self,
+        *,
+        condition_vars: list[str],
+        target_vars: list[str],
+        n_estimators: int = 100,
+        zero_inflated_vars: set[str] | None = None,
+        nonnegative_vars: set[str] | None = None,
+        zero_threshold: float = 0.05,
+        quantiles: tuple[float, ...] = (0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95),
+    ) -> None:
+        self.condition_vars = list(condition_vars)
+        self.target_vars = list(target_vars)
+        self.n_estimators = int(n_estimators)
+        self.zero_inflated_vars = set(zero_inflated_vars or ())
+        self.nonnegative_vars = set(nonnegative_vars or ())
+        self.zero_threshold = float(zero_threshold)
+        self.quantiles = tuple(float(value) for value in quantiles)
+        self._models: dict[str, Any] = {}
+        self._zero_models: dict[str, RandomForestClassifier] = {}
+
+    def fit(
+        self,
+        data: pd.DataFrame,
+        *,
+        weight_col: str | None = "weight",
+        epochs: int | None = None,
+        batch_size: int | None = None,
+        learning_rate: float | None = None,
+        verbose: bool = False,
+    ) -> ColumnwiseQRFDonorImputer:
+        del weight_col, epochs, batch_size, learning_rate, verbose
+        if importlib.util.find_spec("quantile_forest") is None:
+            raise ImportError("quantile-forest is required for donor_imputer_backend='qrf'")
+        from quantile_forest import RandomForestQuantileRegressor
+
+        self._models = {}
+        self._zero_models = {}
+        for column in self.target_vars:
+            subset = data[self.condition_vars + [column]].dropna()
+            if len(subset) < 25:
+                continue
+            x_values = subset[self.condition_vars].to_numpy(dtype=float)
+            y_values = subset[column].to_numpy(dtype=float)
+            if (
+                column in self.zero_inflated_vars
+                and (y_values == 0).mean() >= self.zero_threshold
+                and (y_values == 0).sum() >= 10
+                and (y_values > 0).sum() >= 10
+            ):
+                zero_model = RandomForestClassifier(
+                    n_estimators=max(50, self.n_estimators // 2),
+                    random_state=42,
+                    n_jobs=-1,
+                )
+                zero_model.fit(x_values, (y_values > 0).astype(int))
+                self._zero_models[column] = zero_model
+                x_values = x_values[y_values > 0]
+                y_values = y_values[y_values > 0]
+            if len(y_values) < 25:
+                continue
+            model = RandomForestQuantileRegressor(
+                n_estimators=self.n_estimators,
+                random_state=42,
+                n_jobs=-1,
+            )
+            model.fit(x_values, y_values)
+            self._models[column] = model
+        return self
+
+    def generate(
+        self,
+        conditions: pd.DataFrame,
+        seed: int | None = None,
+    ) -> pd.DataFrame:
+        rng = np.random.RandomState(seed or 42)
+        synthetic = conditions.copy().reset_index(drop=True)
+        x_values = synthetic[self.condition_vars].to_numpy(dtype=float)
+        for column in self.target_vars:
+            model = self._models.get(column)
+            if model is None:
+                synthetic[column] = np.nan
+                continue
+            values = np.zeros(len(synthetic), dtype=float)
+            target_rows = np.ones(len(synthetic), dtype=bool)
+            zero_model = self._zero_models.get(column)
+            if zero_model is not None:
+                probabilities = zero_model.predict_proba(x_values)
+                positive_probs = (
+                    probabilities[:, 1]
+                    if probabilities.shape[1] > 1
+                    else np.zeros(len(synthetic), dtype=float)
+                )
+                target_rows = rng.random(len(synthetic)) < positive_probs
+                values[:] = 0.0
+            if target_rows.any():
+                predictions = model.predict(
+                    x_values[target_rows],
+                    quantiles=list(self.quantiles),
+                )
+                quantile_choices = rng.choice(len(self.quantiles), size=target_rows.sum())
+                draws = predictions[np.arange(target_rows.sum()), quantile_choices]
+                if column in self.nonnegative_vars:
+                    draws = np.maximum(draws, 0.0)
+                values[target_rows] = draws
+            synthetic[column] = values
+        return synthetic
 AGE_LABELS = ["0-17", "18-34", "35-54", "55-64", "65+"]
 INCOME_BINS = [-np.inf, 25_000, 50_000, 100_000, np.inf]
 INCOME_LABELS = ["<25k", "25-50k", "50-100k", "100k+"]
@@ -122,6 +243,207 @@ ENTITY_ID_COLUMNS = {
     EntityType.SPM_UNIT: "spm_unit_id",
     EntityType.FAMILY: "family_id",
 }
+TINY_WEIGHT_THRESHOLD = 1e-8
+DEFAULT_POLICYENGINE_CALIBRATION_MAX_CONSTRAINTS_PER_HOUSEHOLD = 1.0
+DEFAULT_POLICYENGINE_CALIBRATION_MIN_ACTIVE_HOUSEHOLDS = 5
+CALIBRATION_FEASIBILITY_DROP_WARNING_THRESHOLD = 0.2
+STATE_PROGRAM_SUPPORT_PROXY_VARIABLES = (
+    "has_medicaid",
+    "public_assistance",
+    "ssi",
+    "social_security",
+)
+STATE_PROGRAM_AUTO_CONDITION_VARIABLES = ("has_medicaid",)
+
+
+def _summarize_weight_diagnostics(
+    weights: pd.Series | np.ndarray | list[float],
+    *,
+    tiny_threshold: float = TINY_WEIGHT_THRESHOLD,
+) -> dict[str, Any]:
+    """Summarize whether a calibrated weight vector looks numerically healthy."""
+    series = pd.to_numeric(pd.Series(weights), errors="coerce").fillna(0.0).astype(float)
+    row_count = int(len(series))
+    if row_count == 0:
+        return {
+            "row_count": 0,
+            "positive_count": 0,
+            "nonpositive_count": 0,
+            "tiny_count": 0,
+            "tiny_share": 0.0,
+            "total_weight": 0.0,
+            "min_weight": 0.0,
+            "p01_weight": 0.0,
+            "p50_weight": 0.0,
+            "p99_weight": 0.0,
+            "max_weight": 0.0,
+            "effective_sample_size": 0.0,
+            "collapse_suspected": True,
+        }
+
+    total_weight = float(series.sum())
+    squared_weight_sum = float(np.square(series).sum())
+    positive_count = int((series > 0.0).sum())
+    nonpositive_count = row_count - positive_count
+    tiny_count = int((series <= tiny_threshold).sum())
+    tiny_share = float(tiny_count / row_count)
+    effective_sample_size = (
+        float((total_weight * total_weight) / squared_weight_sum)
+        if squared_weight_sum > 0.0
+        else 0.0
+    )
+    effective_sample_ratio = (
+        float(effective_sample_size / positive_count) if positive_count > 0 else 0.0
+    )
+    collapse_suspected = bool(
+        total_weight <= tiny_threshold
+        or positive_count == 0
+        or tiny_share >= 0.95
+        or effective_sample_ratio <= 0.25
+    )
+    return {
+        "row_count": row_count,
+        "positive_count": positive_count,
+        "nonpositive_count": nonpositive_count,
+        "tiny_count": tiny_count,
+        "tiny_share": tiny_share,
+        "total_weight": total_weight,
+        "min_weight": float(series.min()),
+        "p01_weight": float(series.quantile(0.01)),
+        "p50_weight": float(series.quantile(0.5)),
+        "p99_weight": float(series.quantile(0.99)),
+        "max_weight": float(series.max()),
+        "effective_sample_size": effective_sample_size,
+        "effective_sample_ratio": effective_sample_ratio,
+        "collapse_suspected": collapse_suspected,
+    }
+
+
+def _state_program_support_proxy_summary(available_columns: set[str]) -> dict[str, list[str]]:
+    available = sorted(
+        variable for variable in STATE_PROGRAM_SUPPORT_PROXY_VARIABLES if variable in available_columns
+    )
+    missing = sorted(
+        variable
+        for variable in STATE_PROGRAM_SUPPORT_PROXY_VARIABLES
+        if variable not in available_columns
+    )
+    return {
+        "available": available,
+        "missing": missing,
+    }
+
+
+def _policyengine_target_geo_priority(target: TargetSpec) -> int:
+    geo_level = str(target.metadata.get("geo_level", "")).lower()
+    return {
+        "national": 0,
+        "state": 1,
+        "district": 2,
+    }.get(geo_level, 99)
+
+
+def _constraint_active_household_count(
+    constraint: Any,
+    *,
+    epsilon: float = 1e-12,
+) -> int:
+    coefficients = np.asarray(getattr(constraint, "coefficients", ()), dtype=float)
+    if coefficients.size == 0:
+        return 0
+    return int(np.count_nonzero(np.abs(coefficients) > epsilon))
+
+
+def _select_feasible_policyengine_calibration_constraints(
+    targets: list[TargetSpec],
+    constraints: tuple[Any, ...],
+    *,
+    household_count: int,
+    max_constraints: int | None,
+    max_constraints_per_household: float | None,
+    min_active_households: int,
+) -> tuple[list[TargetSpec], tuple[Any, ...], dict[str, Any]]:
+    selected_targets = list(targets)
+    selected_constraints = tuple(constraints)
+    requested_max_constraints = max_constraints
+    if (
+        requested_max_constraints is None
+        and max_constraints_per_household is not None
+        and household_count > 0
+    ):
+        requested_max_constraints = max(
+            1,
+            int(np.floor(max_constraints_per_household * household_count)),
+        )
+
+    records = []
+    for target, constraint in zip(targets, constraints, strict=True):
+        active_households = _constraint_active_household_count(constraint)
+        records.append(
+            {
+                "target": target,
+                "constraint": constraint,
+                "active_households": active_households,
+                "geo_priority": _policyengine_target_geo_priority(target),
+                "aggregation_priority": 0 if target.aggregation.name == "COUNT" else 1,
+                "coefficient_mass": float(
+                    np.abs(
+                        np.asarray(getattr(constraint, "coefficients", ()), dtype=float)
+                    ).sum()
+                ),
+            }
+        )
+
+    min_required_households = max(1, int(min_active_households))
+    support_filtered = [
+        record
+        for record in records
+        if record["active_households"] >= min_required_households
+    ]
+    low_support_dropped = len(records) - len(support_filtered)
+
+    support_filtered.sort(
+        key=lambda record: (
+            record["geo_priority"],
+            record["aggregation_priority"],
+            -record["active_households"],
+            -record["coefficient_mass"],
+            record["target"].name,
+        )
+    )
+
+    over_capacity_dropped = 0
+    if requested_max_constraints is not None and len(support_filtered) > requested_max_constraints:
+        over_capacity_dropped = len(support_filtered) - requested_max_constraints
+        support_filtered = support_filtered[:requested_max_constraints]
+
+    selected_targets = [record["target"] for record in support_filtered]
+    selected_constraints = tuple(record["constraint"] for record in support_filtered)
+    dropped_total = low_support_dropped + over_capacity_dropped
+    drop_share = float(dropped_total / len(records)) if records else 0.0
+    warning_messages: list[str] = []
+    if drop_share > CALIBRATION_FEASIBILITY_DROP_WARNING_THRESHOLD:
+        warning_messages.append(
+            "Calibration feasibility filter dropped "
+            f"{dropped_total}/{len(records)} constraints "
+            f"({drop_share:.1%}) before solving."
+        )
+    diagnostics = {
+        "requested_max_constraints": requested_max_constraints,
+        "max_constraints_per_household": max_constraints_per_household,
+        "min_active_households": min_required_households,
+        "n_constraints_before_feasibility_filter": len(constraints),
+        "n_constraints_after_feasibility_filter": len(selected_constraints),
+        "n_constraints_dropped_low_support": low_support_dropped,
+        "n_constraints_dropped_over_capacity": over_capacity_dropped,
+        "n_constraints_dropped_total": dropped_total,
+        "constraint_drop_share": drop_share,
+        "warning_messages": warning_messages,
+        "feasibility_filter_applied": bool(
+            low_support_dropped > 0 or over_capacity_dropped > 0
+        ),
+    }
+    return selected_targets, selected_constraints, diagnostics
 
 
 @dataclass(frozen=True)
@@ -155,11 +477,17 @@ class USMicroplexBuildConfig:
     donor_imputer_learning_rate: float = 1e-3
     donor_imputer_n_layers: int = 2
     donor_imputer_hidden_dim: int = 32
+    donor_imputer_backend: Literal["maf", "qrf", "zi_qrf"] = "maf"
+    donor_imputer_qrf_n_estimators: int = 100
+    donor_imputer_qrf_zero_threshold: float = 0.05
     donor_imputer_condition_selection: Literal["all_shared", "top_correlated"] = (
         "top_correlated"
     )
     donor_imputer_max_condition_vars: int | None = 8
     bootstrap_strata_columns: tuple[str, ...] = ()
+    prefer_cached_cps_asec_source: bool = False
+    cps_asec_source_year: int = 2023
+    cps_asec_cache_dir: str | None = None
     policyengine_dataset: str | None = None
     policyengine_baseline_dataset: str | None = None
     policyengine_dataset_year: int | None = None
@@ -169,9 +497,18 @@ class USMicroplexBuildConfig:
     policyengine_target_variables: tuple[str, ...] = ()
     policyengine_target_domains: tuple[str, ...] = ()
     policyengine_target_geo_levels: tuple[str, ...] = ()
+    policyengine_target_profile: str | None = None
     policyengine_calibration_target_variables: tuple[str, ...] = ()
     policyengine_calibration_target_domains: tuple[str, ...] = ()
     policyengine_calibration_target_geo_levels: tuple[str, ...] = ()
+    policyengine_calibration_target_profile: str | None = None
+    policyengine_calibration_max_constraints: int | None = None
+    policyengine_calibration_max_constraints_per_household: float | None = (
+        DEFAULT_POLICYENGINE_CALIBRATION_MAX_CONSTRAINTS_PER_HOUSEHOLD
+    )
+    policyengine_calibration_min_active_households: int = (
+        DEFAULT_POLICYENGINE_CALIBRATION_MIN_ACTIVE_HOUSEHOLDS
+    )
     policyengine_target_reform_id: int = 0
     policyengine_simulation_cls: Any | None = None
 
@@ -260,7 +597,29 @@ class USMicroplexPipeline:
         self.config = config or USMicroplexBuildConfig()
 
     def build_from_data_dir(self, data_dir: str | Path) -> USMicroplexBuildResult:
-        from microplex_us.data_sources.cps import CPSASECParquetSourceProvider
+        from microplex_us.data_sources.cps import (
+            DEFAULT_CACHE_DIR,
+            CPSASECParquetSourceProvider,
+            CPSASECSourceProvider,
+        )
+
+        if self.config.prefer_cached_cps_asec_source:
+            cache_dir = (
+                Path(self.config.cps_asec_cache_dir)
+                if self.config.cps_asec_cache_dir is not None
+                else DEFAULT_CACHE_DIR
+            )
+            processed_path = (
+                cache_dir / f"cps_asec_{int(self.config.cps_asec_source_year)}_processed.parquet"
+            )
+            if processed_path.exists():
+                return self.build_from_source_provider(
+                    CPSASECSourceProvider(
+                        year=int(self.config.cps_asec_source_year),
+                        cache_dir=cache_dir,
+                        download=False,
+                    )
+                )
 
         return self.build_from_source_provider(
             CPSASECParquetSourceProvider(data_dir=data_dir)
@@ -316,6 +675,7 @@ class USMicroplexPipeline:
             fusion_plan=fusion_plan,
             include_all_observed_targets=len(source_inputs) > 1,
             available_columns=set(seed_data.columns),
+            observed_frame=seed_data,
         )
         synthetic_data, synthesizer, synthesis_metadata = self.synthesize(
             seed_data,
@@ -328,6 +688,9 @@ class USMicroplexPipeline:
             "target_vars": list(synthesis_variables.target_vars),
             "scaffold_source": scaffold_input.frame.source.name,
             "donor_integrated_variables": donor_integration["integrated_variables"],
+            "state_program_support_proxies": _state_program_support_proxy_summary(
+                set(seed_data.columns)
+            ),
         }
         synthetic_data = self.ensure_target_support(synthetic_data, seed_data, targets)
         if self.config.policyengine_targets_db is not None:
@@ -694,6 +1057,13 @@ class USMicroplexPipeline:
     ) -> pd.DataFrame:
         """Ensure every marginal target category has support in the synthetic sample."""
         result = synthetic_data.copy().reset_index(drop=True)
+        bool_columns = [
+            column
+            for column in result.columns
+            if pd.api.types.is_bool_dtype(result[column].dtype)
+        ]
+        if bool_columns:
+            result[bool_columns] = result[bool_columns].astype(float)
         replace_idx = 0
 
         for _ in range(sum(len(v) for v in targets.marginal.values())):
@@ -715,7 +1085,20 @@ class USMicroplexPipeline:
                 row_idx = replace_idx % len(result)
                 for column_name, value in exemplar.items():
                     if column_name in result.columns and column_name not in {"person_id", "household_id", "weight"}:
-                        result.at[row_idx, column_name] = value
+                        resolved_value = value
+                        destination = result[column_name]
+                        if pd.api.types.is_bool_dtype(destination.dtype) and not isinstance(
+                            resolved_value,
+                            (bool, np.bool_),
+                        ):
+                            result[column_name] = destination.astype(float)
+                            destination = result[column_name]
+                        if pd.api.types.is_numeric_dtype(destination.dtype) and isinstance(
+                            value,
+                            (bool, np.bool_),
+                        ):
+                            resolved_value = float(value)
+                        result.at[row_idx, column_name] = resolved_value
                 replace_idx += 1
 
         initial_weight = float(result["weight"].mean()) if "weight" in result.columns else 1.0
@@ -733,10 +1116,9 @@ class USMicroplexPipeline:
         """Generate synthetic records from the seed data."""
         initial_weight = float(seed_data["hh_weight"].sum()) / max(self.config.n_synthetic, 1)
         synthesis_variables = synthesis_variables or USMicroplexSynthesisVariables(
-            condition_vars=tuple(
-                column
-                for column in self.config.synthesizer_condition_vars
-                if column in seed_data.columns
+            condition_vars=self._resolve_synthesis_condition_vars(
+                seed_data.columns,
+                observed_frame=seed_data,
             ),
             target_vars=tuple(
                 column
@@ -774,8 +1156,8 @@ class USMicroplexPipeline:
         targets: USMicroplexTargets,
     ) -> tuple[pd.DataFrame, dict[str, Any]]:
         """Calibrate synthetic records to weighted targets."""
+        calibrator = self._build_weight_calibrator()
         if self.config.calibration_backend in {"entropy", "ipf", "chi2"}:
-            calibrator = Calibrator(method=self.config.calibration_backend)
             calibrated = calibrator.fit_transform(
                 synthetic_data,
                 targets.marginal,
@@ -797,21 +1179,6 @@ class USMicroplexPipeline:
             }
             return calibrated, summary
 
-        if self.config.calibration_backend == "sparse":
-            calibrator = SparseCalibrator(target_sparsity=self.config.target_sparsity)
-        elif self.config.calibration_backend == "hardconcrete":
-            calibrator = HardConcreteCalibrator(
-                lambda_l0=1e-4,
-                epochs=500,
-                lr=0.1,
-                device=self.config.device,
-                verbose=False,
-            )
-        else:
-            raise ValueError(
-                f"Unsupported calibration backend: {self.config.calibration_backend}"
-            )
-
         calibrated = calibrator.fit_transform(
             synthetic_data,
             targets.marginal,
@@ -824,8 +1191,28 @@ class USMicroplexPipeline:
             "max_error": float(validation["max_error"]),
             "mean_error": float(validation["mean_error"]),
             "sparsity": float(validation.get("sparsity", 0.0)),
+            "converged": bool(validation.get("converged", False)),
         }
         return calibrated, summary
+
+    def _build_weight_calibrator(
+        self,
+    ) -> Calibrator | SparseCalibrator | HardConcreteCalibrator:
+        if self.config.calibration_backend in {"entropy", "ipf", "chi2"}:
+            return Calibrator(method=self.config.calibration_backend)
+        if self.config.calibration_backend == "sparse":
+            return SparseCalibrator(target_sparsity=self.config.target_sparsity)
+        if self.config.calibration_backend == "hardconcrete":
+            return HardConcreteCalibrator(
+                lambda_l0=1e-4,
+                epochs=500,
+                lr=0.1,
+                device=self.config.device,
+                verbose=False,
+            )
+        raise ValueError(
+            f"Unsupported calibration backend: {self.config.calibration_backend}"
+        )
 
     def calibrate_policyengine_tables(
         self,
@@ -834,10 +1221,6 @@ class USMicroplexPipeline:
         """Calibrate household weights using PolicyEngine US target DB constraints."""
         if self.config.policyengine_targets_db is None:
             raise ValueError("policyengine_targets_db is required for DB calibration")
-        if self.config.calibration_backend not in {"entropy", "ipf", "chi2"}:
-            raise ValueError(
-                "PolicyEngine DB calibration currently supports only entropy/ipf/chi2"
-            )
 
         provider = PolicyEngineUSDBTargetProvider(self.config.policyengine_targets_db)
         target_period = (
@@ -852,6 +1235,7 @@ class USMicroplexPipeline:
             supported_targets,
             unsupported_targets,
             constraints,
+            feasibility_filter_summary,
             materialized_variables,
             materialization_failures,
         ) = self._resolve_policyengine_calibration_targets(
@@ -861,7 +1245,7 @@ class USMicroplexPipeline:
         )
         if not supported_targets:
             raise ValueError("No supported PolicyEngine DB targets matched current tables")
-        calibrator = Calibrator(method=self.config.calibration_backend)
+        calibrator = self._build_weight_calibrator()
         calibrated_households = calibrator.fit_transform(
             tables.households.copy(),
             {},
@@ -885,6 +1269,14 @@ class USMicroplexPipeline:
             families=tables.families,
             marital_units=tables.marital_units,
         )
+        household_weight_diagnostics = _summarize_weight_diagnostics(
+            calibrated_households["household_weight"]
+        )
+        person_weight_diagnostics = (
+            _summarize_weight_diagnostics(calibrated_persons["weight"])
+            if not calibrated_persons.empty and "weight" in calibrated_persons.columns
+            else None
+        )
         linear_errors = list(validation.get("linear_errors", {}).values())
         summary = {
             "backend": f"policyengine_db_{self.config.calibration_backend}",
@@ -893,9 +1285,12 @@ class USMicroplexPipeline:
             "n_supported_targets": len(supported_targets),
             "n_unsupported_targets": len(unsupported_targets),
             "n_constraints": len(constraints),
+            "feasibility_filter": feasibility_filter_summary,
             "target_variables": list(self._policyengine_target_scope(for_calibration=True)[0]),
             "target_domains": list(self._policyengine_target_scope(for_calibration=True)[1]),
             "target_geo_levels": list(self._policyengine_target_scope(for_calibration=True)[2]),
+            "target_profile": self._policyengine_target_profile(for_calibration=True),
+            "target_cell_count": len(self._policyengine_target_cells(for_calibration=True)),
             "materialized_variables": sorted(materialized_variables),
             "materialization_failures": materialization_failures,
             "max_error": float(validation["max_error"]),
@@ -905,7 +1300,25 @@ class USMicroplexPipeline:
                 else 0.0
             ),
             "converged": bool(validation["converged"]),
+            "sparsity": float(validation.get("sparsity", 0.0)),
+            "weight_collapse_suspected": bool(
+                household_weight_diagnostics["collapse_suspected"]
+                or (
+                    person_weight_diagnostics is not None
+                    and person_weight_diagnostics["collapse_suspected"]
+                )
+            ),
+            "household_weight_diagnostics": household_weight_diagnostics,
+            "person_weight_diagnostics": person_weight_diagnostics,
         }
+        warning_messages = list(feasibility_filter_summary.get("warning_messages", ()))
+        if not summary["converged"]:
+            warning_messages.append(
+                "Calibration did not converge on the selected constraint set."
+            )
+        summary["warnings"] = warning_messages
+        for message in warning_messages:
+            warnings.warn(message, stacklevel=2)
         return updated_tables, calibrated_persons, summary
 
     def _resolve_policyengine_calibration_targets(
@@ -921,6 +1334,7 @@ class USMicroplexPipeline:
         list[TargetSpec],
         list[TargetSpec],
         tuple[Any, ...],
+        dict[str, Any],
         set[str],
         dict[str, str],
     ]:
@@ -970,6 +1384,22 @@ class USMicroplexPipeline:
                 variable_bindings=bindings,
             )
         )
+        (
+            supported_targets,
+            constraints,
+            feasibility_filter_summary,
+        ) = _select_feasible_policyengine_calibration_constraints(
+            supported_targets,
+            constraints,
+            household_count=len(tables.households),
+            max_constraints=self.config.policyengine_calibration_max_constraints,
+            max_constraints_per_household=(
+                self.config.policyengine_calibration_max_constraints_per_household
+            ),
+            min_active_households=(
+                self.config.policyengine_calibration_min_active_households
+            ),
+        )
         return (
             tables,
             bindings,
@@ -977,6 +1407,7 @@ class USMicroplexPipeline:
             supported_targets,
             unsupported_targets,
             constraints,
+            feasibility_filter_summary,
             materialized_variables,
             materialization_failures,
         )
@@ -1019,6 +1450,27 @@ class USMicroplexPipeline:
         )
         return variables, domain_variables, geo_levels
 
+    def _policyengine_target_profile(
+        self,
+        *,
+        for_calibration: bool,
+    ) -> str | None:
+        return (
+            self.config.policyengine_calibration_target_profile
+            if for_calibration and self.config.policyengine_calibration_target_profile
+            else self.config.policyengine_target_profile
+        )
+
+    def _policyengine_target_cells(
+        self,
+        *,
+        for_calibration: bool,
+    ) -> tuple[PolicyEngineUSTargetCell, ...]:
+        profile_name = self._policyengine_target_profile(for_calibration=for_calibration)
+        if profile_name is None:
+            return ()
+        return resolve_policyengine_us_target_profile(profile_name)
+
     def _build_policyengine_target_query(
         self,
         bindings: dict[str, PolicyEngineUSVariableBinding],
@@ -1029,6 +1481,8 @@ class USMicroplexPipeline:
         variables, domain_variables, geo_levels = self._policyengine_target_scope(
             for_calibration=for_calibration
         )
+        profile_name = self._policyengine_target_profile(for_calibration=for_calibration)
+        target_cells = self._policyengine_target_cells(for_calibration=for_calibration)
         return TargetQuery(
             period=period,
             provider_filters={
@@ -1037,6 +1491,12 @@ class USMicroplexPipeline:
                     list(domain_variables) if domain_variables else None
                 ),
                 "geo_levels": list(geo_levels) if geo_levels else None,
+                "target_profile": profile_name,
+                "target_cells": (
+                    [cell.to_provider_filter() for cell in target_cells]
+                    if target_cells
+                    else None
+                ),
                 "reform_id": self.config.policyengine_target_reform_id,
                 "entity_overrides": {
                     variable: binding.entity for variable, binding in bindings.items()
@@ -1162,6 +1622,52 @@ class USMicroplexPipeline:
         )
         return synthesizer
 
+    def _build_donor_imputer(
+        self,
+        *,
+        condition_vars: list[str],
+        target_vars: tuple[str, ...],
+    ) -> Synthesizer | ColumnwiseQRFDonorImputer:
+        backend = self.config.donor_imputer_backend
+        if backend == "maf":
+            return Synthesizer(
+                target_vars=list(target_vars),
+                condition_vars=condition_vars,
+                n_layers=self.config.donor_imputer_n_layers,
+                hidden_dim=self.config.donor_imputer_hidden_dim,
+            )
+
+        support_families = {
+            variable: variable_semantic_spec_for(variable).support_family
+            for variable in target_vars
+        }
+        zero_inflated_vars = (
+            {
+                variable
+                for variable, support_family in support_families.items()
+                if support_family is VariableSupportFamily.ZERO_INFLATED_POSITIVE
+            }
+            if backend == "zi_qrf"
+            else set()
+        )
+        nonnegative_vars = {
+            variable
+            for variable, support_family in support_families.items()
+            if support_family
+            in {
+                VariableSupportFamily.ZERO_INFLATED_POSITIVE,
+                VariableSupportFamily.BOUNDED_SHARE,
+            }
+        }
+        return ColumnwiseQRFDonorImputer(
+            condition_vars=condition_vars,
+            target_vars=list(target_vars),
+            n_estimators=self.config.donor_imputer_qrf_n_estimators,
+            zero_inflated_vars=zero_inflated_vars,
+            nonnegative_vars=nonnegative_vars,
+            zero_threshold=self.config.donor_imputer_qrf_zero_threshold,
+        )
+
     def _resolve_synthesis_variables(
         self,
         source_input: USMicroplexSourceInput,
@@ -1169,6 +1675,7 @@ class USMicroplexPipeline:
         fusion_plan: FusionPlan | None = None,
         include_all_observed_targets: bool = False,
         available_columns: set[str] | None = None,
+        observed_frame: pd.DataFrame | None = None,
     ) -> USMicroplexSynthesisVariables:
         """Select the observed variables to feed into synthesis."""
         active_plan = fusion_plan or source_input.fusion_plan
@@ -1178,11 +1685,22 @@ class USMicroplexPipeline:
         )
         if available_columns is not None:
             available_variables = available_variables & available_columns
+        condition_vars = self._resolve_synthesis_condition_vars(
+            available_variables,
+            observed_frame=observed_frame,
+        )
         configured_targets = [
             variable
             for variable in self.config.synthesizer_target_vars
-            if variable in available_variables
+            if variable in available_variables and variable not in condition_vars
         ]
+        configured_targets.extend(
+            variable
+            for variable in STATE_PROGRAM_SUPPORT_PROXY_VARIABLES
+            if variable in available_variables
+            and variable not in condition_vars
+            and variable not in configured_targets
+        )
         extra_targets: list[str] = []
         if include_all_observed_targets:
             excluded = {
@@ -1198,17 +1716,52 @@ class USMicroplexPipeline:
                 variable
                 for variable in available_variables
                 if variable not in excluded
-                and variable not in self.config.synthesizer_condition_vars
+                and variable not in condition_vars
                 and variable not in configured_targets
             )
         return USMicroplexSynthesisVariables(
-            condition_vars=tuple(
-                variable
-                for variable in self.config.synthesizer_condition_vars
-                if variable in available_variables
-            ),
+            condition_vars=condition_vars,
             target_vars=tuple(configured_targets + extra_targets),
         )
+
+    def _resolve_synthesis_condition_vars(
+        self,
+        available_columns: Iterable[str],
+        *,
+        observed_frame: pd.DataFrame | None = None,
+    ) -> tuple[str, ...]:
+        available = set(available_columns)
+        ordered = list(self.config.synthesizer_condition_vars)
+        for variable in STATE_PROGRAM_AUTO_CONDITION_VARIABLES:
+            if (
+                variable in available
+                and variable not in ordered
+                and (
+                    observed_frame is None
+                    or self._is_informative_state_program_proxy(
+                        observed_frame,
+                        variable,
+                    )
+                )
+            ):
+                ordered.append(variable)
+        return tuple(variable for variable in ordered if variable in available)
+
+    def _is_informative_state_program_proxy(
+        self,
+        frame: pd.DataFrame,
+        variable: str,
+    ) -> bool:
+        if variable not in frame.columns:
+            return False
+        series = pd.to_numeric(frame[variable], errors="coerce").replace(
+            [np.inf, -np.inf],
+            np.nan,
+        )
+        series = series.dropna()
+        if series.empty:
+            return False
+        return bool(series.nunique(dropna=True) > 1)
 
     def _select_scaffold_source(
         self,
@@ -1228,16 +1781,27 @@ class USMicroplexPipeline:
         def score(source: USMicroplexSourceInput) -> tuple[int, int, int, int]:
             public_score = int(source.frame.source.shareability == Shareability.PUBLIC)
             geography_score = self._household_geography_coverage(source)
-            observed_vars = len(
+            observed_variables = (
                 source.fusion_plan.variables_for(EntityType.HOUSEHOLD)
                 | source.fusion_plan.variables_for(EntityType.PERSON)
             )
+            support_proxy_score = sum(
+                variable in observed_variables
+                for variable in STATE_PROGRAM_SUPPORT_PROXY_VARIABLES
+            )
+            observed_vars = len(observed_variables)
             household_rows = (
                 len(source.households)
                 if source.households is not None
                 else 0
             )
-            return (public_score, geography_score, observed_vars, household_rows)
+            return (
+                public_score,
+                geography_score,
+                support_proxy_score,
+                observed_vars,
+                household_rows,
+            )
 
         return max(candidates, key=score)
 
@@ -1393,11 +1957,9 @@ class USMicroplexPipeline:
                     donor_condition_vars + list(donor_block_spec.model_variables) + ["hh_weight"]
                 ].copy()
                 fit_frame = fit_frame.rename(columns={"hh_weight": "weight"})
-                imputer = Synthesizer(
-                    target_vars=list(donor_block_spec.model_variables),
+                imputer = self._build_donor_imputer(
                     condition_vars=donor_condition_vars,
-                    n_layers=self.config.donor_imputer_n_layers,
-                    hidden_dim=self.config.donor_imputer_hidden_dim,
+                    target_vars=donor_block_spec.model_variables,
                 )
                 imputer.fit(
                     fit_frame,
@@ -2193,9 +2755,52 @@ class USMicroplexPipeline:
         )
 
     def _normalize_relationship_to_head(self, persons: pd.DataFrame) -> pd.Series:
+        family_normalized: pd.Series | None = None
+        if "family_relationship" in persons.columns:
+            family_relationship = (
+                pd.to_numeric(persons["family_relationship"], errors="coerce")
+                .fillna(-1)
+                .astype(int)
+            )
+            unique_values = set(family_relationship.unique().tolist())
+            # CPS A_FAMREL/family_relationship codes align closely with the
+            # relationship_to_head codes TaxUnitOptimizer expects:
+            # 0=self, 1=spouse, 2=child, 3+=other household member.
+            if unique_values.issubset({0, 1, 2, 3, 4}):
+                family_normalized = (
+                    family_relationship
+                    .map({0: 0, 1: 1, 2: 2, 3: 3, 4: 3})
+                    .fillna(3)
+                    .astype(int)
+                )
+
         if "relationship_to_head" not in persons.columns:
+            if family_normalized is not None:
+                return self._repair_relationship_to_head(persons, family_normalized)
+            if "is_spouse" in persons.columns or "is_dependent" in persons.columns:
+                order = persons.groupby("household_id").cumcount()
+                normalized = pd.Series(3, index=persons.index, dtype=int)
+                normalized.loc[order == 0] = 0
+                if "is_spouse" in persons.columns:
+                    spouse_mask = (
+                        pd.to_numeric(persons["is_spouse"], errors="coerce")
+                        .fillna(0)
+                        .astype(int)
+                        > 0
+                    )
+                    normalized.loc[spouse_mask] = 1
+                if "is_dependent" in persons.columns:
+                    dependent_mask = (
+                        pd.to_numeric(persons["is_dependent"], errors="coerce")
+                        .fillna(0)
+                        .astype(int)
+                        > 0
+                    )
+                    normalized.loc[dependent_mask & ~normalized.eq(1)] = 2
+                return self._repair_relationship_to_head(persons, normalized)
             order = persons.groupby("household_id").cumcount()
-            return order.map(lambda idx: 0 if idx == 0 else 3).astype(int)
+            normalized = order.map(lambda idx: 0 if idx == 0 else 3).astype(int)
+            return self._repair_relationship_to_head(persons, normalized)
 
         relationship = (
             pd.to_numeric(persons["relationship_to_head"], errors="coerce")
@@ -2204,17 +2809,74 @@ class USMicroplexPipeline:
         )
         unique_values = set(relationship.unique().tolist())
         if unique_values.issubset({0, 1, 2, 3}):
-            return relationship
+            if family_normalized is not None:
+                relationship_detail = set(relationship.unique().tolist()) & {1, 2}
+                family_detail = set(family_normalized.unique().tolist()) & {1, 2}
+                if len(family_detail) > len(relationship_detail):
+                    return self._repair_relationship_to_head(persons, family_normalized)
+            return self._repair_relationship_to_head(persons, relationship)
 
         if unique_values.issubset({1, 2, 3, 4}):
-            return relationship.map({1: 0, 2: 1, 3: 3, 4: 2}).fillna(3).astype(int)
+            normalized = relationship.map({1: 0, 2: 1, 3: 3, 4: 2}).fillna(3).astype(int)
+            return self._repair_relationship_to_head(persons, normalized)
 
         order = persons.groupby("household_id").cumcount()
         normalized = pd.Series(3, index=persons.index, dtype=int)
         normalized.loc[order == 0] = 0
         normalized.loc[(order == 1) & (persons["age"] >= 18)] = 1
         normalized.loc[persons["age"] < 18] = 2
-        return normalized
+        return self._repair_relationship_to_head(persons, normalized)
+
+    def _repair_relationship_to_head(
+        self,
+        persons: pd.DataFrame,
+        relationship: pd.Series,
+    ) -> pd.Series:
+        """Repair household relationship patterns so tax-unit construction has one clear head."""
+        normalized = relationship.astype(int).copy()
+        if "household_id" not in persons.columns:
+            return normalized
+
+        ages = pd.to_numeric(persons.get("age", 0), errors="coerce").fillna(0.0)
+        grouped = persons.groupby("household_id", sort=False).groups
+        for member_index in grouped.values():
+            member_index = list(member_index)
+            household_relationship = normalized.loc[member_index].copy()
+            household_ages = ages.loc[member_index]
+
+            head_index = household_relationship[household_relationship.eq(0)].index.tolist()
+            if not head_index:
+                spouse_candidates = [
+                    index
+                    for index in household_relationship[household_relationship.eq(1)].index.tolist()
+                    if household_ages.loc[index] >= 18
+                ]
+                adult_candidates = [
+                    index
+                    for index in household_relationship.index.tolist()
+                    if household_ages.loc[index] >= 18
+                ]
+                candidate_pool = spouse_candidates or adult_candidates or household_relationship.index.tolist()
+                head_choice = max(candidate_pool, key=lambda index: household_ages.loc[index])
+                normalized.loc[head_choice] = 0
+                head_index = [head_choice]
+            elif len(head_index) > 1:
+                keep_head = max(head_index, key=lambda index: household_ages.loc[index])
+                for index in head_index:
+                    if index == keep_head:
+                        continue
+                    normalized.loc[index] = 3 if household_ages.loc[index] >= 19 else 2
+                head_index = [keep_head]
+
+            spouse_index = normalized.loc[member_index][normalized.loc[member_index].eq(1)].index.tolist()
+            if len(spouse_index) > 1:
+                keep_spouse = max(spouse_index, key=lambda index: household_ages.loc[index])
+                for index in spouse_index:
+                    if index == keep_spouse:
+                        continue
+                    normalized.loc[index] = 3 if household_ages.loc[index] >= 19 else 2
+
+        return normalized.astype(int)
 
     def _infer_policyengine_variable_bindings(
         self,
@@ -2286,12 +2948,29 @@ class USMicroplexPipeline:
         def has_any(*columns: str) -> bool:
             return any(column in result.columns for column in columns)
 
+        if "is_female" in result.columns:
+            result["is_female"] = result["is_female"].fillna(False).astype(bool)
+        elif "sex" in result.columns:
+            sex = pd.to_numeric(result["sex"], errors="coerce").fillna(0).astype(int)
+            result["is_female"] = sex.eq(2)
+
+        if "medicaid" in result.columns:
+            result["medicaid"] = (
+                pd.to_numeric(result["medicaid"], errors="coerce").fillna(0.0).astype(float)
+            )
+        if "medicaid_enrolled" in result.columns:
+            result["medicaid_enrolled"] = (
+                result["medicaid_enrolled"].fillna(False).astype(bool)
+            )
+
         known_nonemployment = (
             first_present("self_employment_income")
             + first_present("taxable_interest_income", "interest_income")
             + first_present("ordinary_dividend_income", "dividend_income")
             + first_present("rental_income")
             + first_present("gross_social_security", "social_security")
+            + first_present("ssi")
+            + first_present("public_assistance")
             + first_present("taxable_pension_income", "pension_income")
             + first_present("unemployment_compensation")
         )

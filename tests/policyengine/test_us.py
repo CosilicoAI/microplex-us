@@ -37,6 +37,7 @@ from microplex_us.policyengine.us import (
     compute_policyengine_us_definition_hash,
     detect_policyengine_pseudo_inputs,
     materialize_policyengine_us_variables,
+    materialize_policyengine_us_variables_safely,
     project_frame_to_time_period_arrays,
     write_policyengine_us_time_period_dataset,
 )
@@ -247,6 +248,35 @@ class TestPolicyEngineUSDBTargetProvider:
             variables=["snap"],
             geo_levels=["state"],
             domain_variable_values=["snap"],
+        )
+
+        assert [target.target_id for target in national_targets] == [10]
+        assert [target.target_id for target in state_targets] == [11]
+
+    def test_load_targets_supports_exact_target_cells(self, tmp_path):
+        db_path = tmp_path / "policy_data.db"
+        _create_policyengine_targets_db(db_path)
+
+        provider = PolicyEngineUSDBTargetProvider(db_path)
+        national_targets = provider.load_targets(
+            period=2024,
+            target_cells=[
+                {
+                    "variable": "snap",
+                    "geo_level": "national",
+                    "domain_variable": None,
+                }
+            ],
+        )
+        state_targets = provider.load_targets(
+            period=2024,
+            target_cells=[
+                {
+                    "variable": "snap",
+                    "geo_level": "state",
+                    "domain_variable": "snap",
+                }
+            ],
         )
 
         assert [target.target_id for target in national_targets] == [10]
@@ -1327,6 +1357,102 @@ class TestPolicyEngineUSConstraintCompilation:
             np.array([10.0]),
         )
 
+    def test_safe_materialization_one_by_one_uses_prior_materialized_outputs(
+        self,
+        monkeypatch,
+    ):
+        tables = PolicyEngineUSEntityTableBundle(
+            households=pd.DataFrame(
+                {
+                    "household_id": [1],
+                    "household_weight": [1.0],
+                    "state_fips": [6],
+                }
+            ),
+            persons=pd.DataFrame(
+                {
+                    "person_id": [10],
+                    "household_id": [1],
+                    "tax_unit_id": [100],
+                    "spm_unit_id": [1000],
+                    "family_id": [5000],
+                    "marital_unit_id": [7000],
+                }
+            ),
+            tax_units=pd.DataFrame({"tax_unit_id": [100], "household_id": [1]}),
+            spm_units=pd.DataFrame({"spm_unit_id": [1000], "household_id": [1]}),
+            families=pd.DataFrame({"family_id": [5000], "household_id": [1]}),
+            marital_units=pd.DataFrame(
+                {"marital_unit_id": [7000], "household_id": [1]}
+            ),
+        )
+
+        def fake_materialize(
+            incoming_tables,
+            *,
+            variables,
+            period,
+            dataset_year=None,
+            simulation_cls=None,
+            microsimulation_kwargs=None,
+            temp_dir=None,
+        ):
+            _ = period, dataset_year, simulation_cls, microsimulation_kwargs, temp_dir
+            if tuple(variables) == ("a", "b"):
+                raise RuntimeError("batch failed")
+            if tuple(variables) == ("a",):
+                updated = PolicyEngineUSEntityTableBundle(
+                    households=incoming_tables.households.assign(a=[1.0]),
+                    persons=incoming_tables.persons.copy(),
+                    tax_units=incoming_tables.tax_units.copy(),
+                    spm_units=incoming_tables.spm_units.copy(),
+                    families=incoming_tables.families.copy(),
+                    marital_units=incoming_tables.marital_units.copy(),
+                )
+                return updated, {
+                    "a": PolicyEngineUSVariableBinding(
+                        entity=EntityType.HOUSEHOLD,
+                        column="a",
+                    )
+                }
+            if tuple(variables) == ("b",):
+                assert "a" in incoming_tables.households.columns
+                updated = PolicyEngineUSEntityTableBundle(
+                    households=incoming_tables.households.assign(
+                        b=incoming_tables.households["a"] + 1.0
+                    ),
+                    persons=incoming_tables.persons.copy(),
+                    tax_units=incoming_tables.tax_units.copy(),
+                    spm_units=incoming_tables.spm_units.copy(),
+                    families=incoming_tables.families.copy(),
+                    marital_units=incoming_tables.marital_units.copy(),
+                )
+                return updated, {
+                    "b": PolicyEngineUSVariableBinding(
+                        entity=EntityType.HOUSEHOLD,
+                        column="b",
+                    )
+                }
+            raise AssertionError(f"unexpected variables: {variables}")
+
+        monkeypatch.setattr(
+            "microplex_us.policyengine.us.materialize_policyengine_us_variables",
+            fake_materialize,
+        )
+
+        result = materialize_policyengine_us_variables_safely(
+            tables,
+            variables=("a", "b"),
+            period=2024,
+        )
+
+        assert result.materialized_variables == ("a", "b")
+        assert result.failed_variables == {}
+        np.testing.assert_allclose(
+            result.tables.households["b"].to_numpy(dtype=float),
+            np.array([2.0]),
+        )
+
 
 class TestPolicyEngineUSProjection:
     def test_builds_structural_time_period_arrays_from_entity_tables(self):
@@ -1496,6 +1622,10 @@ class TestPolicyEngineUSProjection:
             variables = {
                 "state_fips": FakeVariable("household"),
                 "employment_income_before_lsr": FakeVariable("person"),
+                "is_female": FakeVariable("person"),
+                "medicaid": FakeVariable("person"),
+                "medicaid_enrolled": FakeVariable("person"),
+                "ssi": FakeVariable("person"),
                 "self_employment_income_before_lsr": FakeVariable("person"),
                 "taxable_interest_income": FakeVariable("person"),
                 "qualified_dividend_income": FakeVariable("person"),
@@ -1505,6 +1635,7 @@ class TestPolicyEngineUSProjection:
                 "rental_income": FakeVariable("person"),
                 "unemployment_compensation": FakeVariable("person"),
                 "filing_status": FakeVariable("tax_unit"),
+                "snap": FakeVariable("spm_unit"),
             }
 
         tables = PolicyEngineUSEntityTableBundle(
@@ -1520,6 +1651,10 @@ class TestPolicyEngineUSProjection:
                     "person_id": [1],
                     "household_id": [10],
                     "employment_income_before_lsr": [50_000.0],
+                    "is_female": [True],
+                    "medicaid": [1_200.0],
+                    "medicaid_enrolled": [True],
+                    "ssi": [400.0],
                     "self_employment_income_before_lsr": [2_000.0],
                     "taxable_interest_income": [100.0],
                     "qualified_dividend_income": [40.0],
@@ -1537,6 +1672,13 @@ class TestPolicyEngineUSProjection:
                     "filing_status": ["SINGLE"],
                 }
             ),
+            spm_units=pd.DataFrame(
+                {
+                    "spm_unit_id": [1000],
+                    "household_id": [10],
+                    "snap": [1_800.0],
+                }
+            ),
         )
 
         export_maps = build_policyengine_us_export_variable_maps(
@@ -1546,8 +1688,10 @@ class TestPolicyEngineUSProjection:
 
         assert export_maps["household"] == {"state_fips": "state_fips"}
         assert export_maps["tax_unit"] == {"filing_status": "filing_status"}
+        assert export_maps["spm_unit"] == {}
         assert export_maps["person"] == {
             "employment_income_before_lsr": "employment_income_before_lsr",
+            "is_female": "is_female",
             "self_employment_income_before_lsr": "self_employment_income_before_lsr",
             "taxable_interest_income": "taxable_interest_income",
             "qualified_dividend_income": "qualified_dividend_income",
@@ -1557,6 +1701,77 @@ class TestPolicyEngineUSProjection:
             "rental_income": "rental_income",
             "unemployment_compensation": "unemployment_compensation",
         }
+
+    def test_build_policyengine_us_export_variable_maps_include_direct_overrides_only_when_requested(self):
+        class FakeEntity:
+            def __init__(self, key):
+                self.key = key
+
+        class FakeVariable:
+            def __init__(self, entity):
+                self.entity = FakeEntity(entity)
+
+        class FakeSystem:
+            variables = {
+                "state_fips": FakeVariable("household"),
+                "employment_income_before_lsr": FakeVariable("person"),
+                "is_female": FakeVariable("person"),
+                "medicaid": FakeVariable("person"),
+                "medicaid_enrolled": FakeVariable("person"),
+                "ssi": FakeVariable("person"),
+                "filing_status": FakeVariable("tax_unit"),
+                "snap": FakeVariable("spm_unit"),
+            }
+
+        tables = PolicyEngineUSEntityTableBundle(
+            households=pd.DataFrame(
+                {
+                    "household_id": [10],
+                    "household_weight": [1.0],
+                    "state_fips": [6],
+                }
+            ),
+            persons=pd.DataFrame(
+                {
+                    "person_id": [1],
+                    "household_id": [10],
+                    "employment_income_before_lsr": [50_000.0],
+                    "is_female": [True],
+                    "medicaid": [1_200.0],
+                    "medicaid_enrolled": [True],
+                    "ssi": [400.0],
+                }
+            ),
+            tax_units=pd.DataFrame(
+                {
+                    "tax_unit_id": [100],
+                    "household_id": [10],
+                    "filing_status": ["SINGLE"],
+                }
+            ),
+            spm_units=pd.DataFrame(
+                {
+                    "spm_unit_id": [1000],
+                    "household_id": [10],
+                    "snap": [1_800.0],
+                }
+            ),
+        )
+
+        export_maps = build_policyengine_us_export_variable_maps(
+            tables,
+            tax_benefit_system=FakeSystem(),
+            direct_override_variables=("snap", "ssi", "medicaid", "medicaid_enrolled"),
+        )
+
+        assert export_maps["person"] == {
+            "employment_income_before_lsr": "employment_income_before_lsr",
+            "is_female": "is_female",
+            "medicaid": "medicaid",
+            "medicaid_enrolled": "medicaid_enrolled",
+            "ssi": "ssi",
+        }
+        assert export_maps["spm_unit"] == {"snap": "snap"}
 
     def test_projects_frame_and_writes_time_period_dataset(self, tmp_path):
         frame = pd.DataFrame(

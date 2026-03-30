@@ -13,6 +13,8 @@ FrontierMetric = Literal[
     "candidate_composite_parity_loss",
     "candidate_mean_abs_relative_error",
     "mean_abs_relative_error_delta",
+    "candidate_enhanced_cps_native_loss",
+    "enhanced_cps_native_loss_delta",
 ]
 
 
@@ -28,6 +30,8 @@ class USMicroplexRunRegistryEntry:
     config_hash: str | None = None
     synthesis_backend: str | None = None
     calibration_backend: str | None = None
+    calibration_converged: bool | None = None
+    weight_collapse_suspected: bool | None = None
     source_names: tuple[str, ...] = ()
     rows: dict[str, int] = field(default_factory=dict)
     weights: dict[str, float | int] = field(default_factory=dict)
@@ -37,6 +41,13 @@ class USMicroplexRunRegistryEntry:
     candidate_composite_parity_loss: float | None = None
     baseline_composite_parity_loss: float | None = None
     composite_parity_loss_delta: float | None = None
+    candidate_enhanced_cps_native_loss: float | None = None
+    baseline_enhanced_cps_native_loss: float | None = None
+    enhanced_cps_native_loss_delta: float | None = None
+    candidate_beats_baseline_native_loss: bool | None = None
+    candidate_unweighted_msre: float | None = None
+    baseline_unweighted_msre: float | None = None
+    unweighted_msre_delta: float | None = None
     slice_win_rate: float | None = None
     target_win_rate: float | None = None
     supported_target_rate: float | None = None
@@ -55,6 +66,7 @@ class USMicroplexRunRegistryEntry:
     improved_candidate_frontier: bool | None = None
     improved_delta_frontier: bool | None = None
     improved_composite_frontier: bool | None = None
+    improved_native_frontier: bool | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
@@ -68,6 +80,8 @@ class USMicroplexRunRegistryEntry:
             "config_hash": self.config_hash,
             "synthesis_backend": self.synthesis_backend,
             "calibration_backend": self.calibration_backend,
+            "calibration_converged": self.calibration_converged,
+            "weight_collapse_suspected": self.weight_collapse_suspected,
             "source_names": list(self.source_names),
             "rows": dict(self.rows),
             "weights": dict(self.weights),
@@ -77,6 +91,15 @@ class USMicroplexRunRegistryEntry:
             "candidate_composite_parity_loss": self.candidate_composite_parity_loss,
             "baseline_composite_parity_loss": self.baseline_composite_parity_loss,
             "composite_parity_loss_delta": self.composite_parity_loss_delta,
+            "candidate_enhanced_cps_native_loss": self.candidate_enhanced_cps_native_loss,
+            "baseline_enhanced_cps_native_loss": self.baseline_enhanced_cps_native_loss,
+            "enhanced_cps_native_loss_delta": self.enhanced_cps_native_loss_delta,
+            "candidate_beats_baseline_native_loss": (
+                self.candidate_beats_baseline_native_loss
+            ),
+            "candidate_unweighted_msre": self.candidate_unweighted_msre,
+            "baseline_unweighted_msre": self.baseline_unweighted_msre,
+            "unweighted_msre_delta": self.unweighted_msre_delta,
             "slice_win_rate": self.slice_win_rate,
             "target_win_rate": self.target_win_rate,
             "supported_target_rate": self.supported_target_rate,
@@ -93,6 +116,7 @@ class USMicroplexRunRegistryEntry:
             "improved_candidate_frontier": self.improved_candidate_frontier,
             "improved_delta_frontier": self.improved_delta_frontier,
             "improved_composite_frontier": self.improved_composite_frontier,
+            "improved_native_frontier": self.improved_native_frontier,
             "metadata": dict(self.metadata),
         }
 
@@ -108,6 +132,8 @@ class USMicroplexRunRegistryEntry:
             config_hash=payload.get("config_hash"),
             synthesis_backend=payload.get("synthesis_backend"),
             calibration_backend=payload.get("calibration_backend"),
+            calibration_converged=payload.get("calibration_converged"),
+            weight_collapse_suspected=payload.get("weight_collapse_suspected"),
             source_names=tuple(payload.get("source_names", [])),
             rows=dict(payload.get("rows", {})),
             weights=dict(payload.get("weights", {})),
@@ -125,6 +151,21 @@ class USMicroplexRunRegistryEntry:
                 "baseline_composite_parity_loss"
             ),
             composite_parity_loss_delta=payload.get("composite_parity_loss_delta"),
+            candidate_enhanced_cps_native_loss=payload.get(
+                "candidate_enhanced_cps_native_loss"
+            ),
+            baseline_enhanced_cps_native_loss=payload.get(
+                "baseline_enhanced_cps_native_loss"
+            ),
+            enhanced_cps_native_loss_delta=payload.get(
+                "enhanced_cps_native_loss_delta"
+            ),
+            candidate_beats_baseline_native_loss=payload.get(
+                "candidate_beats_baseline_native_loss"
+            ),
+            candidate_unweighted_msre=payload.get("candidate_unweighted_msre"),
+            baseline_unweighted_msre=payload.get("baseline_unweighted_msre"),
+            unweighted_msre_delta=payload.get("unweighted_msre_delta"),
             slice_win_rate=payload.get("slice_win_rate"),
             target_win_rate=payload.get("target_win_rate"),
             supported_target_rate=payload.get("supported_target_rate"),
@@ -149,6 +190,7 @@ class USMicroplexRunRegistryEntry:
             improved_candidate_frontier=payload.get("improved_candidate_frontier"),
             improved_delta_frontier=payload.get("improved_delta_frontier"),
             improved_composite_frontier=payload.get("improved_composite_frontier"),
+            improved_native_frontier=payload.get("improved_native_frontier"),
             metadata=dict(payload.get("metadata", {})),
         )
 
@@ -180,10 +222,12 @@ def select_us_microplex_frontier_entry(
         "candidate_composite_parity_loss": lambda entry: entry.candidate_composite_parity_loss,
         "candidate_mean_abs_relative_error": lambda entry: entry.candidate_mean_abs_relative_error,
         "mean_abs_relative_error_delta": lambda entry: entry.mean_abs_relative_error_delta,
+        "candidate_enhanced_cps_native_loss": lambda entry: entry.candidate_enhanced_cps_native_loss,
+        "enhanced_cps_native_loss_delta": lambda entry: entry.enhanced_cps_native_loss_delta,
     }
     value_fn = metric_values[metric]
     comparable_entries = [
-        entry for entry in entries if value_fn(entry) is not None
+        entry for entry in entries if value_fn(entry) is not None and _is_frontier_eligible(entry)
     ]
     if not comparable_entries:
         return None
@@ -222,6 +266,10 @@ def append_us_microplex_run_registry_entry(
                 existing_entries,
                 entry,
             ),
+            "improved_native_frontier": _improves_native_frontier(
+                existing_entries,
+                entry,
+            ),
         }
     )
     with registry_path.open("a", encoding="utf-8") as handle:
@@ -242,6 +290,8 @@ def build_us_microplex_run_registry_entry(
     harness_payload = dict(policyengine_harness_payload or {})
     harness_summary = dict(manifest.get("policyengine_harness", {}))
     harness_metadata = dict(harness_payload.get("metadata", {}))
+    calibration_summary = dict(manifest.get("calibration", {}))
+    native_summary = dict(manifest.get("policyengine_native_scores", {}))
     created_at = manifest.get("created_at") or datetime.now(UTC).isoformat()
     config = dict(manifest.get("config", {}))
     synthesis = dict(manifest.get("synthesis", {}))
@@ -259,6 +309,8 @@ def build_us_microplex_run_registry_entry(
         config_hash=_stable_config_hash(config),
         synthesis_backend=config.get("synthesis_backend"),
         calibration_backend=config.get("calibration_backend"),
+        calibration_converged=calibration_summary.get("converged"),
+        weight_collapse_suspected=calibration_summary.get("weight_collapse_suspected"),
         source_names=tuple(synthesis.get("source_names", [])),
         rows={key: int(value) for key, value in dict(manifest.get("rows", {})).items()},
         weights=dict(manifest.get("weights", {})),
@@ -280,6 +332,21 @@ def build_us_microplex_run_registry_entry(
         composite_parity_loss_delta=harness_summary.get(
             "composite_parity_loss_delta"
         ),
+        candidate_enhanced_cps_native_loss=native_summary.get(
+            "candidate_enhanced_cps_native_loss"
+        ),
+        baseline_enhanced_cps_native_loss=native_summary.get(
+            "baseline_enhanced_cps_native_loss"
+        ),
+        enhanced_cps_native_loss_delta=native_summary.get(
+            "enhanced_cps_native_loss_delta"
+        ),
+        candidate_beats_baseline_native_loss=native_summary.get(
+            "candidate_beats_baseline"
+        ),
+        candidate_unweighted_msre=native_summary.get("candidate_unweighted_msre"),
+        baseline_unweighted_msre=native_summary.get("baseline_unweighted_msre"),
+        unweighted_msre_delta=native_summary.get("unweighted_msre_delta"),
         slice_win_rate=harness_summary.get("slice_win_rate"),
         target_win_rate=harness_summary.get("target_win_rate"),
         supported_target_rate=harness_summary.get("supported_target_rate"),
@@ -319,17 +386,21 @@ def _resolve_run_registry_path(path: str | Path) -> Path:
     return candidate_path / "run_registry.jsonl"
 
 
+def _is_frontier_eligible(entry: USMicroplexRunRegistryEntry) -> bool:
+    return entry.weight_collapse_suspected is not True
+
+
 def _improves_candidate_frontier(
     entries: list[USMicroplexRunRegistryEntry],
     entry: USMicroplexRunRegistryEntry,
 ) -> bool | None:
     candidate_error = entry.candidate_mean_abs_relative_error
-    if candidate_error is None:
+    if candidate_error is None or not _is_frontier_eligible(entry):
         return None
     prior_errors = [
         item.candidate_mean_abs_relative_error
         for item in entries
-        if item.candidate_mean_abs_relative_error is not None
+        if item.candidate_mean_abs_relative_error is not None and _is_frontier_eligible(item)
     ]
     if not prior_errors:
         return True
@@ -341,12 +412,12 @@ def _improves_delta_frontier(
     entry: USMicroplexRunRegistryEntry,
 ) -> bool | None:
     error_delta = entry.mean_abs_relative_error_delta
-    if error_delta is None:
+    if error_delta is None or not _is_frontier_eligible(entry):
         return None
     prior_deltas = [
         item.mean_abs_relative_error_delta
         for item in entries
-        if item.mean_abs_relative_error_delta is not None
+        if item.mean_abs_relative_error_delta is not None and _is_frontier_eligible(item)
     ]
     if not prior_deltas:
         return True
@@ -358,13 +429,30 @@ def _improves_composite_frontier(
     entry: USMicroplexRunRegistryEntry,
 ) -> bool | None:
     composite_loss = entry.candidate_composite_parity_loss
-    if composite_loss is None:
+    if composite_loss is None or not _is_frontier_eligible(entry):
         return None
     prior_losses = [
         item.candidate_composite_parity_loss
         for item in entries
-        if item.candidate_composite_parity_loss is not None
+        if item.candidate_composite_parity_loss is not None and _is_frontier_eligible(item)
     ]
     if not prior_losses:
         return True
     return composite_loss < min(prior_losses)
+
+
+def _improves_native_frontier(
+    entries: list[USMicroplexRunRegistryEntry],
+    entry: USMicroplexRunRegistryEntry,
+) -> bool | None:
+    native_delta = entry.enhanced_cps_native_loss_delta
+    if native_delta is None or not _is_frontier_eligible(entry):
+        return None
+    prior_deltas = [
+        item.enhanced_cps_native_loss_delta
+        for item in entries
+        if item.enhanced_cps_native_loss_delta is not None and _is_frontier_eligible(item)
+    ]
+    if not prior_deltas:
+        return True
+    return native_delta < min(prior_deltas)

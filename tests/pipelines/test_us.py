@@ -2,6 +2,7 @@
 
 
 import sqlite3
+from types import SimpleNamespace
 
 import numpy as np
 import pandas as pd
@@ -19,13 +20,15 @@ from microplex.core import (
     StaticSourceProvider,
     TimeStructure,
 )
-from microplex.targets import TargetQuery, TargetSpec
+from microplex.targets import TargetAggregation, TargetQuery, TargetSpec
 
 from microplex_us.pipelines.us import (
     USMicroplexBuildConfig,
     USMicroplexBuildResult,
     USMicroplexPipeline,
     USMicroplexTargets,
+    _select_feasible_policyengine_calibration_constraints,
+    _summarize_weight_diagnostics,
     build_us_microplex,
 )
 from microplex_us.policyengine.us import (
@@ -443,6 +446,7 @@ class TestUSMicroplexPipeline:
                 "household_id": [10, 10],
                 "weight": [1.0, 1.0],
                 "age": [45, 43],
+                "sex": [1, 2],
                 "income": [60_000.0, 15_000.0],
                 "wage_income": [50_000.0, 10_000.0],
                 "self_employment_income": [5_000.0, 0.0],
@@ -453,8 +457,11 @@ class TestUSMicroplexPipeline:
                 "long_term_capital_gains": [40.0, 5.0],
                 "rental_income": [200.0, 0.0],
                 "gross_social_security": [0.0, 800.0],
+                "ssi": [0.0, 600.0],
                 "taxable_pension_income": [0.0, 300.0],
                 "unemployment_compensation": [0.0, 150.0],
+                "medicaid": [0.0, 1_250.0],
+                "medicaid_enrolled": [False, True],
                 "state_income_tax_paid": [400.0, 50.0],
                 "filing_status": ["JOINT", "JOINT"],
                 "relationship_to_head": [0, 1],
@@ -475,9 +482,40 @@ class TestUSMicroplexPipeline:
         assert person_rows["short_term_capital_gains"].tolist() == [10.0, 0.0]
         assert person_rows["long_term_capital_gains_before_response"].tolist() == [40.0, 5.0]
         assert person_rows["social_security_retirement"].tolist() == [0.0, 800.0]
+        assert person_rows["ssi"].tolist() == [0.0, 600.0]
         assert person_rows["taxable_private_pension_income"].tolist() == [0.0, 300.0]
         assert person_rows["unemployment_compensation"].tolist() == [0.0, 150.0]
+        assert person_rows["is_female"].tolist() == [False, True]
+        assert person_rows["medicaid"].tolist() == [0.0, 1_250.0]
+        assert person_rows["medicaid_enrolled"].tolist() == [False, True]
         assert person_rows["state_income_tax_reported"].tolist() == [400.0, 50.0]
+
+    def test_build_policyengine_entity_tables_fallback_employment_excludes_transfer_income(self):
+        pipeline = USMicroplexPipeline(USMicroplexBuildConfig())
+        population = pd.DataFrame(
+            {
+                "person_id": [1],
+                "household_id": [10],
+                "weight": [1.0],
+                "age": [62],
+                "sex": [2],
+                "income": [18_000.0],
+                "ssi": [9_000.0],
+                "public_assistance": [3_000.0],
+                "gross_social_security": [2_000.0],
+                "filing_status": ["SINGLE"],
+                "relationship_to_head": [0],
+                "state_fips": [6],
+                "tenure": [1],
+            }
+        )
+
+        tables = pipeline.build_policyengine_entity_tables(population)
+        person_row = tables.persons.iloc[0]
+
+        assert person_row["employment_income_before_lsr"] == 4_000.0
+        assert person_row["ssi"] == 9_000.0
+        assert person_row["social_security_retirement"] == 2_000.0
 
     def test_build_policyengine_entity_tables_derives_dividend_totals_from_atomic_components(self):
         pipeline = USMicroplexPipeline(USMicroplexBuildConfig())
@@ -507,6 +545,107 @@ class TestUSMicroplexPipeline:
         assert person_row["non_qualified_dividend_income"] == 12.0
         assert person_row["ordinary_dividend_income"] == 42.0
         assert person_row["dividend_income"] == 42.0
+
+    def test_build_policyengine_entity_tables_derives_relationships_from_family_relationship(self):
+        pipeline = USMicroplexPipeline(USMicroplexBuildConfig())
+        population = pd.DataFrame(
+            {
+                "person_id": [1, 2, 3],
+                "household_id": [10, 10, 10],
+                "weight": [1.0, 1.0, 1.0],
+                "age": [45, 43, 12],
+                "income": [60_000.0, 15_000.0, 0.0],
+                "family_relationship": [0, 1, 2],
+                "marital_status": [1, 1, 7],
+                "state_fips": [6, 6, 6],
+                "tenure": [1, 1, 1],
+            }
+        )
+
+        tables = pipeline.build_policyengine_entity_tables(population)
+        person_rows = tables.persons.sort_values("person_id").reset_index(drop=True)
+        tax_units = tables.tax_units.sort_values("tax_unit_id").reset_index(drop=True)
+
+        assert person_rows["relationship_to_head"].tolist() == [0, 1, 2]
+        assert len(tax_units) == 1
+        assert tax_units.iloc[0]["filing_status"] == "JOINT"
+        assert tax_units.iloc[0]["n_dependents"] == 1
+
+    def test_build_policyengine_entity_tables_uses_spouse_and_dependent_flags_when_relationship_missing(self):
+        pipeline = USMicroplexPipeline(USMicroplexBuildConfig())
+        population = pd.DataFrame(
+            {
+                "person_id": [1, 2, 3],
+                "household_id": [10, 10, 10],
+                "weight": [1.0, 1.0, 1.0],
+                "age": [45, 43, 12],
+                "income": [60_000.0, 15_000.0, 0.0],
+                "is_spouse": [0, 1, 0],
+                "is_dependent": [0, 0, 1],
+                "state_fips": [6, 6, 6],
+                "tenure": [1, 1, 1],
+            }
+        )
+
+        tables = pipeline.build_policyengine_entity_tables(population)
+        person_rows = tables.persons.sort_values("person_id").reset_index(drop=True)
+        tax_units = tables.tax_units.sort_values("tax_unit_id").reset_index(drop=True)
+
+        assert person_rows["relationship_to_head"].tolist() == [0, 1, 2]
+        assert len(tax_units) == 1
+        assert tax_units.iloc[0]["filing_status"] == "JOINT"
+        assert tax_units.iloc[0]["n_dependents"] == 1
+
+    def test_build_policyengine_entity_tables_prefers_richer_family_relationship_over_collapsed_relationship_to_head(self):
+        pipeline = USMicroplexPipeline(USMicroplexBuildConfig())
+        population = pd.DataFrame(
+            {
+                "person_id": [1, 2, 3],
+                "household_id": [10, 10, 10],
+                "weight": [1.0, 1.0, 1.0],
+                "age": [45, 43, 12],
+                "income": [60_000.0, 15_000.0, 0.0],
+                "family_relationship": [0, 1, 2],
+                "relationship_to_head": [0, 3, 3],
+                "marital_status": [1, 1, 7],
+                "state_fips": [6, 6, 6],
+                "tenure": [1, 1, 1],
+            }
+        )
+
+        tables = pipeline.build_policyengine_entity_tables(population)
+        person_rows = tables.persons.sort_values("person_id").reset_index(drop=True)
+        tax_units = tables.tax_units.sort_values("tax_unit_id").reset_index(drop=True)
+
+        assert person_rows["relationship_to_head"].tolist() == [0, 1, 2]
+        assert len(tax_units) == 1
+        assert tax_units.iloc[0]["filing_status"] == "JOINT"
+        assert tax_units.iloc[0]["n_dependents"] == 1
+
+    def test_build_policyengine_entity_tables_repairs_households_without_a_head(self):
+        pipeline = USMicroplexPipeline(USMicroplexBuildConfig())
+        population = pd.DataFrame(
+            {
+                "person_id": [1, 2, 3],
+                "household_id": [10, 10, 10],
+                "weight": [1.0, 1.0, 1.0],
+                "age": [45, 43, 12],
+                "income": [60_000.0, 15_000.0, 0.0],
+                "family_relationship": [1, 1, 2],
+                "marital_status": [1, 1, 7],
+                "state_fips": [6, 6, 6],
+                "tenure": [1, 1, 1],
+            }
+        )
+
+        tables = pipeline.build_policyengine_entity_tables(population)
+        person_rows = tables.persons.sort_values("person_id").reset_index(drop=True)
+        tax_units = tables.tax_units.sort_values("tax_unit_id").reset_index(drop=True)
+
+        assert person_rows["relationship_to_head"].tolist() == [0, 1, 2]
+        assert len(tax_units) == 1
+        assert tax_units.iloc[0]["filing_status"] == "JOINT"
+        assert tax_units.iloc[0]["n_dependents"] == 1
 
     def test_build_from_source_providers_accepts_year_specific_query_keys(self):
         households = pd.DataFrame(
@@ -1001,6 +1140,178 @@ class TestUSMicroplexPipeline:
             200.0,
         ]
 
+    def test_integrate_donor_sources_can_use_zi_qrf_backend(self, monkeypatch):
+        captured: dict[str, object] = {}
+
+        cps_households = pd.DataFrame(
+            {
+                "household_id": [1, 2],
+                "hh_weight": [100.0, 120.0],
+                "state_fips": [6, 36],
+                "tenure": [1, 2],
+            }
+        )
+        cps_persons = pd.DataFrame(
+            {
+                "person_id": [10, 20],
+                "household_id": [1, 2],
+                "age": [45, 19],
+                "sex": [1, 2],
+                "education": [3, 2],
+                "employment_status": [1, 0],
+                "income": [60_000.0, 12_000.0],
+            }
+        )
+        donor_households = pd.DataFrame(
+            {
+                "household_id": [101, 102],
+                "hh_weight": [80.0, 90.0],
+                "state_fips": [6, 36],
+                "tenure": [1, 2],
+            }
+        )
+        donor_persons = pd.DataFrame(
+            {
+                "person_id": [1001, 1002],
+                "household_id": [101, 102],
+                "age": [44, 21],
+                "sex": [1, 2],
+                "education": [3, 2],
+                "employment_status": [1, 0],
+                "income": [58_000.0, 13_000.0],
+                "public_assistance": [200.0, 0.0],
+            }
+        )
+
+        cps_frame = ObservationFrame(
+            source=SourceDescriptor(
+                name="cps_like",
+                shareability=Shareability.PUBLIC,
+                time_structure=TimeStructure.REPEATED_CROSS_SECTION,
+                observations=(
+                    EntityObservation(
+                        entity=EntityType.HOUSEHOLD,
+                        key_column="household_id",
+                        variable_names=("state_fips", "tenure"),
+                        weight_column="hh_weight",
+                    ),
+                    EntityObservation(
+                        entity=EntityType.PERSON,
+                        key_column="person_id",
+                        variable_names=(
+                            "household_id",
+                            "age",
+                            "sex",
+                            "education",
+                            "employment_status",
+                            "income",
+                        ),
+                    ),
+                ),
+            ),
+            tables={
+                EntityType.HOUSEHOLD: cps_households,
+                EntityType.PERSON: cps_persons,
+            },
+            relationships=(
+                EntityRelationship(
+                    parent_entity=EntityType.HOUSEHOLD,
+                    child_entity=EntityType.PERSON,
+                    parent_key="household_id",
+                    child_key="household_id",
+                    cardinality=RelationshipCardinality.ONE_TO_MANY,
+                ),
+            ),
+        )
+        donor_frame = ObservationFrame(
+            source=SourceDescriptor(
+                name="benefit_donor",
+                shareability=Shareability.PUBLIC,
+                time_structure=TimeStructure.REPEATED_CROSS_SECTION,
+                observations=(
+                    EntityObservation(
+                        entity=EntityType.HOUSEHOLD,
+                        key_column="household_id",
+                        variable_names=("state_fips", "tenure"),
+                        weight_column="hh_weight",
+                    ),
+                    EntityObservation(
+                        entity=EntityType.PERSON,
+                        key_column="person_id",
+                        variable_names=(
+                            "household_id",
+                            "age",
+                            "sex",
+                            "education",
+                            "employment_status",
+                            "income",
+                            "public_assistance",
+                        ),
+                    ),
+                ),
+            ),
+            tables={
+                EntityType.HOUSEHOLD: donor_households,
+                EntityType.PERSON: donor_persons,
+            },
+            relationships=(
+                EntityRelationship(
+                    parent_entity=EntityType.HOUSEHOLD,
+                    child_entity=EntityType.PERSON,
+                    parent_key="household_id",
+                    child_key="household_id",
+                    cardinality=RelationshipCardinality.ONE_TO_MANY,
+                ),
+            ),
+        )
+
+        class FakeQRFImputer:
+            def __init__(self, **kwargs):
+                captured["init_kwargs"] = kwargs
+
+            def fit(self, frame, **kwargs):
+                captured["fit_columns"] = list(frame.columns)
+                captured["fit_kwargs"] = kwargs
+                return self
+
+            def generate(self, frame, seed=None):
+                _ = seed
+                return frame.assign(public_assistance=[190.0, 10.0])
+
+        monkeypatch.setattr(
+            "microplex_us.pipelines.us.ColumnwiseQRFDonorImputer",
+            FakeQRFImputer,
+        )
+
+        pipeline = USMicroplexPipeline(
+            USMicroplexBuildConfig(
+                n_synthetic=4,
+                synthesis_backend="bootstrap",
+                calibration_backend="entropy",
+                donor_imputer_backend="zi_qrf",
+                donor_imputer_qrf_n_estimators=77,
+                donor_imputer_qrf_zero_threshold=0.1,
+            )
+        )
+        cps_input = pipeline.prepare_source_input(cps_frame)
+        donor_input = pipeline.prepare_source_input(donor_frame)
+        seed_data = pipeline.prepare_seed_data_from_source(cps_input)
+
+        integration = pipeline._integrate_donor_sources(
+            seed_data,
+            scaffold_input=cps_input,
+            donor_inputs=[donor_input],
+        )
+
+        assert integration["integrated_variables"] == ["public_assistance"]
+        assert captured["init_kwargs"]["n_estimators"] == 77
+        assert captured["init_kwargs"]["zero_threshold"] == 0.1
+        assert captured["init_kwargs"]["zero_inflated_vars"] == {"public_assistance"}
+        assert captured["init_kwargs"]["nonnegative_vars"] == {"public_assistance"}
+        assert "weight" in captured["fit_columns"]
+        assert captured["fit_kwargs"]["weight_col"] == "weight"
+        assert set(integration["seed_data"]["public_assistance"].tolist()) <= {0.0, 200.0}
+
     def test_integrate_donor_sources_preserves_informative_scaffold_values(self, monkeypatch):
         cps_households = pd.DataFrame(
             {
@@ -1189,6 +1500,7 @@ class TestUSMicroplexPipeline:
             policyengine_targets_db=str(db_path),
             policyengine_target_variables=("household_count",),
             policyengine_target_period=2024,
+            policyengine_calibration_min_active_households=1,
         )
         pipeline = USMicroplexPipeline(config)
         seed = pipeline.prepare_seed_data(persons, households).rename(
@@ -1211,11 +1523,352 @@ class TestUSMicroplexPipeline:
         assert summary["backend"] == "policyengine_db_entropy"
         assert summary["n_constraints"] == 2
         assert summary["max_error"] < 1e-6
+        assert summary["weight_collapse_suspected"] is False
+        assert summary["household_weight_diagnostics"]["total_weight"] == pytest.approx(
+            450.0,
+            rel=1e-6,
+        )
+        assert summary["household_weight_diagnostics"]["positive_count"] == summary[
+            "household_weight_diagnostics"
+        ]["row_count"]
         assert household_weights.sum() == pytest.approx(450.0, rel=1e-6)
         assert california_weight == pytest.approx(225.0, rel=1e-6)
         assert calibrated_persons.loc[
             calibrated_persons["state_fips"] == 6, "weight"
         ].iloc[0] == pytest.approx(225.0, rel=1e-6)
+
+    def test_calibrate_policyengine_tables_from_db_with_sparse_backend(
+        self,
+        persons,
+        households,
+        tmp_path,
+    ):
+        db_path = tmp_path / "policyengine_targets.db"
+        _create_policyengine_calibration_db(db_path)
+        config = USMicroplexBuildConfig(
+            calibration_backend="sparse",
+            target_sparsity=0.0,
+            policyengine_targets_db=str(db_path),
+            policyengine_target_variables=("household_count",),
+            policyengine_target_period=2024,
+            policyengine_calibration_min_active_households=1,
+        )
+        pipeline = USMicroplexPipeline(config)
+        seed = pipeline.prepare_seed_data(persons, households).rename(
+            columns={"hh_weight": "weight"}
+        )
+        tables = pipeline.build_policyengine_entity_tables(seed)
+
+        calibrated_tables, _, summary = pipeline.calibrate_policyengine_tables(tables)
+
+        assert summary["backend"] == "policyengine_db_sparse"
+        assert summary["n_constraints"] == 2
+        assert summary["max_error"] < 1e-5
+        assert summary["converged"] is True
+        assert summary["sparsity"] == pytest.approx(0.0, abs=1e-9)
+        assert calibrated_tables.households["household_weight"].sum() == pytest.approx(
+            450.0,
+            rel=1e-5,
+        )
+
+    def test_calibrate_policyengine_tables_from_db_with_hardconcrete_backend(
+        self,
+        persons,
+        households,
+        tmp_path,
+        monkeypatch,
+    ):
+        db_path = tmp_path / "policyengine_targets.db"
+        _create_policyengine_calibration_db(db_path)
+        seen_constraints = {}
+
+        class StubHardConcreteCalibrator:
+            def __init__(self, **_kwargs):
+                self._constraints = ()
+
+            def fit_transform(
+                self,
+                frame,
+                *_args,
+                weight_col,
+                linear_constraints=None,
+                **_kwargs,
+            ):
+                self._constraints = tuple(linear_constraints or ())
+                seen_constraints["count"] = len(self._constraints)
+                return frame.copy()
+
+            def validate(self, _frame):
+                return {
+                    "max_error": 0.0,
+                    "mean_error": 0.0,
+                    "converged": True,
+                    "sparsity": 0.25,
+                    "linear_errors": {
+                        constraint.name: {
+                            "actual": float(constraint.target),
+                            "target": float(constraint.target),
+                            "relative_error": 0.0,
+                        }
+                        for constraint in self._constraints
+                    },
+                }
+
+        monkeypatch.setattr(
+            "microplex_us.pipelines.us.HardConcreteCalibrator",
+            StubHardConcreteCalibrator,
+        )
+        config = USMicroplexBuildConfig(
+            calibration_backend="hardconcrete",
+            policyengine_targets_db=str(db_path),
+            policyengine_target_variables=("household_count",),
+            policyengine_target_period=2024,
+            policyengine_calibration_min_active_households=1,
+        )
+        pipeline = USMicroplexPipeline(config)
+        seed = pipeline.prepare_seed_data(persons, households).rename(
+            columns={"hh_weight": "weight"}
+        )
+        tables = pipeline.build_policyengine_entity_tables(seed)
+
+        calibrated_tables, _, summary = pipeline.calibrate_policyengine_tables(tables)
+
+        assert seen_constraints["count"] == 2
+        assert summary["backend"] == "policyengine_db_hardconcrete"
+        assert summary["n_constraints"] == 2
+        assert summary["converged"] is True
+        assert summary["sparsity"] == pytest.approx(0.25)
+        assert calibrated_tables.households["household_weight"].sum() == pytest.approx(
+            450.0,
+            rel=1e-6,
+        )
+
+    def test_calibrate_policyengine_tables_flags_weight_collapse(
+        self,
+        persons,
+        households,
+        tmp_path,
+        monkeypatch,
+    ):
+        db_path = tmp_path / "policyengine_targets.db"
+        _create_policyengine_calibration_db(db_path)
+
+        class CollapsingCalibrator:
+            def __init__(self, method):
+                self.method = method
+
+            def fit_transform(
+                self,
+                frame,
+                *_args,
+                weight_col,
+                **_kwargs,
+            ):
+                collapsed = frame.copy()
+                collapsed[weight_col] = 1e-10
+                return collapsed
+
+            def validate(self, _frame):
+                return {
+                    "max_error": 1.0,
+                    "mean_error": 1.0,
+                    "converged": False,
+                    "linear_errors": {},
+                }
+
+        monkeypatch.setattr(
+            "microplex_us.pipelines.us.Calibrator",
+            CollapsingCalibrator,
+        )
+        config = USMicroplexBuildConfig(
+            calibration_backend="entropy",
+            policyengine_targets_db=str(db_path),
+            policyengine_target_variables=("household_count",),
+            policyengine_target_period=2024,
+            policyengine_calibration_min_active_households=1,
+        )
+        pipeline = USMicroplexPipeline(config)
+        seed = pipeline.prepare_seed_data(persons, households).rename(
+            columns={"hh_weight": "weight"}
+        )
+        tables = pipeline.build_policyengine_entity_tables(seed)
+
+        _, calibrated_persons, summary = pipeline.calibrate_policyengine_tables(tables)
+
+        assert summary["weight_collapse_suspected"] is True
+        assert summary["household_weight_diagnostics"]["tiny_count"] == summary[
+            "household_weight_diagnostics"
+        ]["row_count"]
+        assert summary["household_weight_diagnostics"]["total_weight"] == pytest.approx(
+            summary["household_weight_diagnostics"]["row_count"] * 1e-10
+        )
+        assert summary["person_weight_diagnostics"]["tiny_count"] == len(calibrated_persons)
+
+    def test_summarize_weight_diagnostics_flags_low_effective_sample_ratio(self):
+        summary = _summarize_weight_diagnostics([100.0, 100.0] + [1e-10] * 10)
+
+        assert summary["tiny_share"] < 0.95
+        assert summary["effective_sample_ratio"] < 0.25
+        assert summary["collapse_suspected"] is True
+
+    def test_select_feasible_policyengine_calibration_constraints_caps_budget(self):
+        targets = [
+            TargetSpec(
+                name="national_count",
+                entity=EntityType.HOUSEHOLD,
+                value=100.0,
+                period=2024,
+                aggregation=TargetAggregation.COUNT,
+                metadata={"geo_level": "national"},
+            ),
+            TargetSpec(
+                name="state_count",
+                entity=EntityType.HOUSEHOLD,
+                value=50.0,
+                period=2024,
+                aggregation=TargetAggregation.COUNT,
+                metadata={"geo_level": "state"},
+            ),
+            TargetSpec(
+                name="state_sum",
+                entity=EntityType.HOUSEHOLD,
+                value=25.0,
+                period=2024,
+                measure="snap",
+                aggregation=TargetAggregation.SUM,
+                metadata={"geo_level": "state"},
+            ),
+        ]
+        constraints = (
+            SimpleNamespace(coefficients=np.array([1.0, 1.0])),
+            SimpleNamespace(coefficients=np.array([1.0, 0.0])),
+            SimpleNamespace(coefficients=np.array([1.0, 1.0])),
+        )
+
+        selected_targets, selected_constraints, summary = (
+            _select_feasible_policyengine_calibration_constraints(
+                targets,
+                constraints,
+                household_count=2,
+                max_constraints=None,
+                max_constraints_per_household=1.0,
+                min_active_households=1,
+            )
+        )
+
+        assert [target.name for target in selected_targets] == [
+            "national_count",
+            "state_count",
+        ]
+        assert len(selected_constraints) == 2
+        assert summary["feasibility_filter_applied"] is True
+        assert summary["requested_max_constraints"] == 2
+        assert summary["n_constraints_before_feasibility_filter"] == 3
+        assert summary["n_constraints_after_feasibility_filter"] == 2
+        assert summary["n_constraints_dropped_over_capacity"] == 1
+        assert summary["constraint_drop_share"] == pytest.approx(1 / 3)
+        assert summary["warning_messages"]
+
+    def test_select_feasible_policyengine_calibration_constraints_drops_low_support_rows(self):
+        targets = [
+            TargetSpec(
+                name="dense_state_count",
+                entity=EntityType.HOUSEHOLD,
+                value=50.0,
+                period=2024,
+                aggregation=TargetAggregation.COUNT,
+                metadata={"geo_level": "state"},
+            ),
+            TargetSpec(
+                name="thin_state_count",
+                entity=EntityType.HOUSEHOLD,
+                value=25.0,
+                period=2024,
+                aggregation=TargetAggregation.COUNT,
+                metadata={"geo_level": "state"},
+            ),
+        ]
+        constraints = (
+            SimpleNamespace(coefficients=np.array([1.0, 1.0, 1.0, 1.0, 1.0])),
+            SimpleNamespace(coefficients=np.array([0.0, 0.0, 0.0, 0.0, 1.0])),
+        )
+
+        selected_targets, _, summary = _select_feasible_policyengine_calibration_constraints(
+            targets,
+            constraints,
+            household_count=5,
+            max_constraints=None,
+            max_constraints_per_household=None,
+            min_active_households=5,
+        )
+
+        assert [target.name for target in selected_targets] == ["dense_state_count"]
+        assert summary["n_constraints_dropped_low_support"] == 1
+        assert summary["n_constraints_after_feasibility_filter"] == 1
+
+    def test_calibrate_policyengine_tables_applies_feasibility_constraint_budget(
+        self,
+        persons,
+        households,
+        tmp_path,
+    ):
+        db_path = tmp_path / "policyengine_targets.db"
+        _create_policyengine_calibration_db(db_path)
+        config = USMicroplexBuildConfig(
+            calibration_backend="entropy",
+            policyengine_targets_db=str(db_path),
+            policyengine_target_variables=("household_count",),
+            policyengine_target_period=2024,
+            policyengine_calibration_max_constraints_per_household=0.5,
+            policyengine_calibration_min_active_households=1,
+        )
+        pipeline = USMicroplexPipeline(config)
+        seed = pipeline.prepare_seed_data(persons, households).rename(
+            columns={"hh_weight": "weight"}
+        )
+        tables = pipeline.build_policyengine_entity_tables(seed)
+
+        calibrated_tables, _, summary = pipeline.calibrate_policyengine_tables(tables)
+
+        assert summary["n_constraints"] == 1
+        assert summary["feasibility_filter"]["feasibility_filter_applied"] is True
+        assert summary["feasibility_filter"]["requested_max_constraints"] == 1
+        assert summary["feasibility_filter"]["n_constraints_before_feasibility_filter"] == 2
+        assert summary["feasibility_filter"]["n_constraints_after_feasibility_filter"] == 1
+        assert calibrated_tables.households["household_weight"].sum() == pytest.approx(
+            450.0,
+            rel=1e-6,
+        )
+
+    def test_calibrate_policyengine_tables_warns_when_many_constraints_are_dropped(
+        self,
+        persons,
+        households,
+        tmp_path,
+    ):
+        db_path = tmp_path / "policyengine_targets.db"
+        _create_policyengine_calibration_db(db_path)
+        config = USMicroplexBuildConfig(
+            calibration_backend="entropy",
+            policyengine_targets_db=str(db_path),
+            policyengine_target_variables=("household_count",),
+            policyengine_target_period=2024,
+            policyengine_calibration_max_constraints_per_household=0.5,
+            policyengine_calibration_min_active_households=1,
+        )
+        pipeline = USMicroplexPipeline(config)
+        seed = pipeline.prepare_seed_data(persons, households).rename(
+            columns={"hh_weight": "weight"}
+        )
+        tables = pipeline.build_policyengine_entity_tables(seed)
+
+        with pytest.warns(
+            UserWarning,
+            match="Calibration feasibility filter dropped",
+        ):
+            _, _, summary = pipeline.calibrate_policyengine_tables(tables)
+
+        assert summary["warnings"]
 
     def test_calibrate_policyengine_tables_skips_structurally_unsupported_targets(
         self,
@@ -1229,6 +1882,7 @@ class TestUSMicroplexPipeline:
             calibration_backend="entropy",
             policyengine_targets_db=str(db_path),
             policyengine_target_period=2024,
+            policyengine_calibration_min_active_households=1,
         )
         pipeline = USMicroplexPipeline(config)
         seed = pipeline.prepare_seed_data(persons, households).rename(
@@ -1257,6 +1911,7 @@ class TestUSMicroplexPipeline:
             policyengine_targets_db=str(db_path),
             policyengine_target_variables=("household_count",),
             policyengine_target_period=2024,
+            policyengine_calibration_min_active_households=1,
         )
         pipeline = USMicroplexPipeline(config)
         seed = pipeline.prepare_seed_data(persons, households).rename(
@@ -1423,6 +2078,7 @@ class TestUSMicroplexPipeline:
             policyengine_target_period=2024,
             policyengine_dataset_year=2024,
             policyengine_simulation_cls=FakeSimulation,
+            policyengine_calibration_min_active_households=1,
         )
         pipeline = USMicroplexPipeline(config)
         seed = pipeline.prepare_seed_data(persons, households).rename(
@@ -1586,6 +2242,7 @@ class TestUSMicroplexPipeline:
             policyengine_target_period=2024,
             policyengine_dataset_year=2024,
             policyengine_simulation_cls=FakeSimulation,
+            policyengine_calibration_min_active_households=1,
         )
         pipeline = USMicroplexPipeline(config)
         seed = pipeline.prepare_seed_data(persons, households).rename(
@@ -1730,6 +2387,7 @@ class TestUSMicroplexPipeline:
             policyengine_target_period=2024,
             policyengine_dataset_year=2024,
             policyengine_simulation_cls=FakeSimulation,
+            policyengine_calibration_min_active_households=1,
         )
         pipeline = USMicroplexPipeline(config)
         seed = pipeline.prepare_seed_data(persons, households).rename(
@@ -1754,6 +2412,40 @@ class TestUSMicroplexPipeline:
             * calibrated_tables.households["household_weight"]
         ).sum() == pytest.approx(200.0, rel=1e-6)
 
+    def test_build_policyengine_target_query_includes_named_target_profile(self):
+        pipeline = USMicroplexPipeline(
+            USMicroplexBuildConfig(
+                policyengine_target_profile="pe_native_broad",
+            )
+        )
+
+        query = pipeline._build_policyengine_target_query({}, period=2024)
+
+        assert query.provider_filters["target_profile"] == "pe_native_broad"
+        assert query.provider_filters["target_cells"]
+        assert {
+            cell["geo_level"] for cell in query.provider_filters["target_cells"]
+        } <= {"national", "state"}
+
+    def test_build_policyengine_target_query_prefers_calibration_profile_override(self):
+        pipeline = USMicroplexPipeline(
+            USMicroplexBuildConfig(
+                policyengine_target_profile="pe_native_broad",
+                policyengine_calibration_target_profile="pe_native_broad",
+                policyengine_calibration_target_variables=("snap",),
+            )
+        )
+
+        query = pipeline._build_policyengine_target_query(
+            {},
+            period=2024,
+            for_calibration=True,
+        )
+
+        assert query.provider_filters["target_profile"] == "pe_native_broad"
+        assert query.provider_filters["variables"] == ["snap"]
+        assert query.provider_filters["target_cells"]
+
     def test_load_inputs_from_directory(self, persons, households, tmp_path):
         households.rename(columns={"hh_weight": "household_weight"}).to_parquet(
             tmp_path / "cps_asec_households.parquet",
@@ -1772,6 +2464,85 @@ class TestUSMicroplexPipeline:
         assert result.synthetic_data["household_id"].nunique() == 8
         assert len(result.synthetic_data) > 8
         assert result.seed_data["hh_weight"].sum() == pytest.approx(900.0)
+
+    def test_build_from_data_dir_can_prefer_cached_cps_asec_source(
+        self,
+        persons,
+        households,
+        tmp_path,
+        monkeypatch,
+    ):
+        households.rename(columns={"hh_weight": "household_weight"}).to_parquet(
+            tmp_path / "cps_asec_households.parquet",
+            index=False,
+        )
+        persons.to_parquet(tmp_path / "cps_asec_persons.parquet", index=False)
+        cache_dir = tmp_path / "cache"
+        cache_dir.mkdir()
+        (cache_dir / "cps_asec_2023_processed.parquet").write_text("stub")
+
+        class FakeCachedProvider:
+            def __init__(self, *, year, cache_dir, download):
+                self.year = year
+                self.cache_dir = cache_dir
+                self.download = download
+                self.descriptor = SourceDescriptor(
+                    name="cps_asec",
+                    shareability=Shareability.PUBLIC,
+                    time_structure=TimeStructure.REPEATED_CROSS_SECTION,
+                    observations=(
+                        EntityObservation(
+                            entity=EntityType.HOUSEHOLD,
+                            key_column="household_id",
+                            variable_names=("state_fips",),
+                        ),
+                    ),
+                )
+
+        class FakeParquetProvider:
+            def __init__(self, *, data_dir):
+                self.data_dir = data_dir
+                self.descriptor = SourceDescriptor(
+                    name="cps_asec_parquet",
+                    shareability=Shareability.PUBLIC,
+                    time_structure=TimeStructure.REPEATED_CROSS_SECTION,
+                    observations=(
+                        EntityObservation(
+                            entity=EntityType.HOUSEHOLD,
+                            key_column="household_id",
+                            variable_names=("state_fips",),
+                        ),
+                    ),
+                )
+
+        monkeypatch.setattr(
+            "microplex_us.data_sources.cps.CPSASECSourceProvider",
+            FakeCachedProvider,
+        )
+        monkeypatch.setattr(
+            "microplex_us.data_sources.cps.CPSASECParquetSourceProvider",
+            FakeParquetProvider,
+        )
+
+        pipeline = USMicroplexPipeline(
+            USMicroplexBuildConfig(
+                prefer_cached_cps_asec_source=True,
+                cps_asec_cache_dir=str(cache_dir),
+                cps_asec_source_year=2023,
+            )
+        )
+        chosen: dict[str, object] = {}
+
+        def fake_build_from_source_provider(provider):
+            chosen["provider"] = provider
+            return "cached"
+
+        monkeypatch.setattr(pipeline, "build_from_source_provider", fake_build_from_source_provider)
+
+        result = pipeline.build_from_data_dir(tmp_path)
+
+        assert result == "cached"
+        assert chosen["provider"].descriptor.name == "cps_asec"
 
     def test_build_from_source_provider(self, persons, households):
         provider_households = households.rename(
@@ -2027,6 +2798,264 @@ class TestUSMicroplexPipeline:
         assert result.source_frame is not None
         assert result.source_frame.source.name == "cps_like"
         assert result.seed_data["state_fips"].tolist() == [6, 36]
+
+    def test_build_from_frames_prefers_scaffold_with_state_program_proxies(self):
+        proxy_households = pd.DataFrame(
+            {
+                "household_id": [1, 2],
+                "hh_weight": [100.0, 120.0],
+                "state_fips": [6, 36],
+                "tenure": [1, 2],
+            }
+        )
+        proxy_persons = pd.DataFrame(
+            {
+                "person_id": [10, 20],
+                "household_id": [1, 2],
+                "age": [45, 19],
+                "sex": [1, 2],
+                "education": [3, 2],
+                "employment_status": [1, 0],
+                "income": [60_000.0, 12_000.0],
+                "has_medicaid": [1, 0],
+                "public_assistance": [0.0, 250.0],
+                "ssi": [0.0, 0.0],
+                "social_security": [0.0, 0.0],
+            }
+        )
+        wider_households = pd.DataFrame(
+            {
+                "household_id": [101, 102],
+                "hh_weight": [90.0, 110.0],
+                "state_fips": [6, 36],
+                "tenure": [1, 2],
+                "extra_household_var": [1.0, 2.0],
+            }
+        )
+        wider_persons = pd.DataFrame(
+            {
+                "person_id": [1001, 1002],
+                "household_id": [101, 102],
+                "age": [44, 21],
+                "sex": [1, 2],
+                "education": [3, 2],
+                "employment_status": [1, 0],
+                "income": [58_000.0, 13_000.0],
+                "extra_person_var": [9.0, 8.0],
+                "another_extra_var": [5.0, 6.0],
+            }
+        )
+
+        proxy_frame = ObservationFrame(
+            source=SourceDescriptor(
+                name="proxy_rich_cps",
+                shareability=Shareability.PUBLIC,
+                time_structure=TimeStructure.REPEATED_CROSS_SECTION,
+                observations=(
+                    EntityObservation(
+                        entity=EntityType.HOUSEHOLD,
+                        key_column="household_id",
+                        variable_names=("state_fips", "tenure"),
+                        weight_column="hh_weight",
+                    ),
+                    EntityObservation(
+                        entity=EntityType.PERSON,
+                        key_column="person_id",
+                        variable_names=(
+                            "household_id",
+                            "age",
+                            "sex",
+                            "education",
+                            "employment_status",
+                            "income",
+                            "has_medicaid",
+                            "public_assistance",
+                            "ssi",
+                            "social_security",
+                        ),
+                    ),
+                ),
+            ),
+            tables={
+                EntityType.HOUSEHOLD: proxy_households,
+                EntityType.PERSON: proxy_persons,
+            },
+            relationships=(
+                EntityRelationship(
+                    parent_entity=EntityType.HOUSEHOLD,
+                    child_entity=EntityType.PERSON,
+                    parent_key="household_id",
+                    child_key="household_id",
+                    cardinality=RelationshipCardinality.ONE_TO_MANY,
+                ),
+            ),
+        )
+        wider_frame = ObservationFrame(
+            source=SourceDescriptor(
+                name="wider_but_proxy_poor",
+                shareability=Shareability.PUBLIC,
+                time_structure=TimeStructure.REPEATED_CROSS_SECTION,
+                observations=(
+                    EntityObservation(
+                        entity=EntityType.HOUSEHOLD,
+                        key_column="household_id",
+                        variable_names=("state_fips", "tenure", "extra_household_var"),
+                        weight_column="hh_weight",
+                    ),
+                    EntityObservation(
+                        entity=EntityType.PERSON,
+                        key_column="person_id",
+                        variable_names=(
+                            "household_id",
+                            "age",
+                            "sex",
+                            "education",
+                            "employment_status",
+                            "income",
+                            "extra_person_var",
+                            "another_extra_var",
+                        ),
+                    ),
+                ),
+            ),
+            tables={
+                EntityType.HOUSEHOLD: wider_households,
+                EntityType.PERSON: wider_persons,
+            },
+            relationships=(
+                EntityRelationship(
+                    parent_entity=EntityType.HOUSEHOLD,
+                    child_entity=EntityType.PERSON,
+                    parent_key="household_id",
+                    child_key="household_id",
+                    cardinality=RelationshipCardinality.ONE_TO_MANY,
+                ),
+            ),
+        )
+        pipeline = USMicroplexPipeline(
+            USMicroplexBuildConfig(
+                n_synthetic=4,
+                synthesis_backend="bootstrap",
+                calibration_backend="entropy",
+            )
+        )
+
+        result = pipeline.build_from_frames([proxy_frame, wider_frame])
+
+        assert result.source_frame is not None
+        assert result.source_frame.source.name == "proxy_rich_cps"
+        assert result.synthesis_metadata["state_program_support_proxies"]["available"] == [
+            "has_medicaid",
+            "public_assistance",
+            "social_security",
+            "ssi",
+        ]
+        assert result.synthesis_metadata["condition_vars"] == [
+            "age",
+            "sex",
+            "education",
+            "employment_status",
+            "state_fips",
+            "tenure",
+            "has_medicaid",
+        ]
+        assert "has_medicaid" not in result.synthesis_metadata["target_vars"]
+        assert "public_assistance" in result.synthesis_metadata["target_vars"]
+        assert "ssi" in result.synthesis_metadata["target_vars"]
+        assert "social_security" in result.synthesis_metadata["target_vars"]
+
+    def test_build_from_source_provider_promotes_state_program_proxies_to_conditions(self):
+        households = pd.DataFrame(
+            {
+                "household_key": [1, 2, 3],
+                "household_weight": [100.0, 120.0, 140.0],
+                "state_fips": [6, 36, 12],
+                "tenure": [1, 2, 1],
+            }
+        )
+        persons = pd.DataFrame(
+            {
+                "person_key": [10, 11, 12],
+                "household_key": [1, 2, 3],
+                "age": [45, 19, 62],
+                "sex": [1, 2, 1],
+                "education": [3, 2, 4],
+                "employment_status": [1, 0, 1],
+                "income": [60_000.0, 12_000.0, 40_000.0],
+                "has_medicaid": [1, 0, 1],
+                "public_assistance": [0.0, 250.0, 0.0],
+                "ssi": [0.0, 0.0, 900.0],
+                "social_security": [0.0, 0.0, 1200.0],
+            }
+        )
+        frame = ObservationFrame(
+            source=SourceDescriptor(
+                name="proxy_rich_single_source",
+                shareability=Shareability.PUBLIC,
+                time_structure=TimeStructure.REPEATED_CROSS_SECTION,
+                observations=(
+                    EntityObservation(
+                        entity=EntityType.HOUSEHOLD,
+                        key_column="household_key",
+                        variable_names=("state_fips", "tenure"),
+                        weight_column="household_weight",
+                    ),
+                    EntityObservation(
+                        entity=EntityType.PERSON,
+                        key_column="person_key",
+                        variable_names=(
+                            "age",
+                            "sex",
+                            "education",
+                            "employment_status",
+                            "income",
+                            "has_medicaid",
+                            "public_assistance",
+                            "ssi",
+                            "social_security",
+                        ),
+                    ),
+                ),
+            ),
+            tables={
+                EntityType.HOUSEHOLD: households,
+                EntityType.PERSON: persons,
+            },
+            relationships=(
+                EntityRelationship(
+                    parent_entity=EntityType.HOUSEHOLD,
+                    child_entity=EntityType.PERSON,
+                    parent_key="household_key",
+                    child_key="household_key",
+                    cardinality=RelationshipCardinality.ONE_TO_MANY,
+                ),
+            ),
+        )
+        pipeline = USMicroplexPipeline(
+            USMicroplexBuildConfig(
+                n_synthetic=4,
+                synthesis_backend="bootstrap",
+                calibration_backend="entropy",
+            )
+        )
+
+        result = pipeline.build_from_source_provider(StaticSourceProvider(frame))
+
+        assert result.synthesis_metadata["condition_vars"] == [
+            "age",
+            "sex",
+            "education",
+            "employment_status",
+            "state_fips",
+            "tenure",
+            "has_medicaid",
+        ]
+        assert result.synthesis_metadata["target_vars"] == [
+            "income",
+            "public_assistance",
+            "ssi",
+            "social_security",
+        ]
 
     def test_build_from_frames_skips_non_numeric_donor_imputation_targets(self):
         cps_households = pd.DataFrame(
@@ -3667,6 +4696,176 @@ class TestUSMicroplexPipeline:
         assert result.synthesis_metadata["condition_vars"] == ["age"]
         assert result.synthesis_metadata["target_vars"] == ["income"]
         assert result.synthesizer is not None
+
+    def test_synthesizer_handles_state_program_proxy_condition_vars(self):
+        households = pd.DataFrame(
+            {
+                "household_key": [1, 2, 3, 4],
+                "household_weight": [100.0, 120.0, 140.0, 160.0],
+                "state_fips": [6, 6, 36, 36],
+                "tenure": [1, 2, 1, 2],
+            }
+        )
+        persons = pd.DataFrame(
+            {
+                "person_key": [10, 11, 12, 13],
+                "household_key": [1, 2, 3, 4],
+                "age": [45, 19, 62, 35],
+                "sex": [1, 2, 1, 2],
+                "education": [4, 2, 3, 1],
+                "employment_status": [1, 0, 1, 1],
+                "income": [60_000.0, 12_000.0, 40_000.0, 22_000.0],
+                "has_medicaid": [1.0, 0.0, 0.0, 1.0],
+                "public_assistance": [0.0, 150.0, 0.0, 0.0],
+                "ssi": [0.0, 0.0, 0.0, 0.0],
+                "social_security": [0.0, 0.0, 900.0, 0.0],
+            }
+        )
+        frame = ObservationFrame(
+            source=SourceDescriptor(
+                name="state_program_proxy_provider",
+                shareability=Shareability.PUBLIC,
+                time_structure=TimeStructure.REPEATED_CROSS_SECTION,
+                observations=(
+                    EntityObservation(
+                        entity=EntityType.HOUSEHOLD,
+                        key_column="household_key",
+                        variable_names=("state_fips", "tenure"),
+                        weight_column="household_weight",
+                    ),
+                    EntityObservation(
+                        entity=EntityType.PERSON,
+                        key_column="person_key",
+                        variable_names=(
+                            "age",
+                            "sex",
+                            "education",
+                            "employment_status",
+                            "income",
+                            "has_medicaid",
+                            "public_assistance",
+                            "ssi",
+                            "social_security",
+                        ),
+                    ),
+                ),
+            ),
+            tables={
+                EntityType.HOUSEHOLD: households,
+                EntityType.PERSON: persons,
+            },
+            relationships=(
+                EntityRelationship(
+                    parent_entity=EntityType.HOUSEHOLD,
+                    child_entity=EntityType.PERSON,
+                    parent_key="household_key",
+                    child_key="household_key",
+                    cardinality=RelationshipCardinality.ONE_TO_MANY,
+                ),
+            ),
+        )
+        provider = StaticSourceProvider(frame)
+        pipeline = USMicroplexPipeline(
+            USMicroplexBuildConfig(
+                n_synthetic=4,
+                synthesis_backend="synthesizer",
+                calibration_backend="entropy",
+                synthesizer_epochs=2,
+                synthesizer_n_layers=2,
+                synthesizer_hidden_dim=8,
+                random_seed=7,
+            )
+        )
+
+        result = pipeline.build_from_source_provider(provider)
+
+        assert result.synthesizer is not None
+        assert result.synthesis_metadata["condition_vars"] == [
+            "age",
+            "sex",
+            "education",
+            "employment_status",
+            "state_fips",
+            "tenure",
+            "has_medicaid",
+        ]
+        assert len(result.synthetic_data) == 4
+
+    def test_constant_has_medicaid_is_not_auto_promoted_to_condition_var(self):
+        frame = pd.DataFrame(
+            {
+                "age": [25, 40, 55, 32],
+                "sex": [1, 2, 1, 2],
+                "education": [2, 3, 4, 1],
+                "employment_status": [1, 1, 0, 1],
+                "state_fips": [6, 6, 36, 36],
+                "tenure": [1, 2, 1, 2],
+                "income": [50_000.0, 30_000.0, 20_000.0, 80_000.0],
+                "has_medicaid": [0.0, 0.0, 0.0, 0.0],
+                "weight": [1.0, 1.0, 1.0, 1.0],
+            }
+        )
+        pipeline = USMicroplexPipeline(
+            USMicroplexBuildConfig(
+                n_synthetic=4,
+                synthesis_backend="bootstrap",
+                calibration_backend="entropy",
+            )
+        )
+
+        condition_vars = pipeline._resolve_synthesis_condition_vars(
+            frame.columns,
+            observed_frame=frame,
+        )
+
+        assert "has_medicaid" not in condition_vars
+
+    def test_ensure_target_support_handles_bool_destination_columns(self):
+        pipeline = USMicroplexPipeline(
+            USMicroplexBuildConfig(
+                n_synthetic=2,
+                synthesis_backend="bootstrap",
+                calibration_backend="entropy",
+            )
+        )
+        synthetic_data = pd.DataFrame(
+            {
+                "person_id": [0, 1],
+                "household_id": [0, 1],
+                "state_fips": [6, 36],
+                "tenure": [1, 2],
+                "age": [40, 50],
+                "sex": [1, 2],
+                "education": [3, 4],
+                "employment_status": [1, 1],
+                "income": [40_000.0, 60_000.0],
+                "has_medicaid": pd.Series([False, False], dtype=bool),
+                "weight": [1.0, 1.0],
+            }
+        )
+        seed_data = pd.DataFrame(
+            {
+                "person_id": [10, 20],
+                "household_id": [10, 20],
+                "state_fips": [6, 36],
+                "tenure": [1, 2],
+                "age": [41, 51],
+                "sex": [1, 2],
+                "education": [3, 4],
+                "employment_status": [1, 1],
+                "income": [42_000.0, 61_000.0],
+                "has_medicaid": [1.0, 0.0],
+                "weight": [1.0, 1.0],
+            }
+        )
+        targets = USMicroplexTargets(
+            marginal={"has_medicaid": ["1.0"]},
+            continuous={},
+        )
+
+        result = pipeline.ensure_target_support(synthetic_data, seed_data, targets)
+
+        assert pd.to_numeric(result["has_medicaid"], errors="coerce").max() == 1.0
 
     def test_build_from_missing_directory_raises(self, tmp_path):
         pipeline = USMicroplexPipeline(USMicroplexBuildConfig())

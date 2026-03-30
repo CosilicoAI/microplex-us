@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Iterable
 from dataclasses import dataclass, field, replace
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from time import perf_counter
 
 import pandas as pd
@@ -12,6 +13,7 @@ from microplex.core import ObservationFrame, SourceProvider, SourceQuery
 from microplex.fusion import FusionPlan
 from microplex.targets import TargetSet
 
+from microplex_us.pipelines.pe_native_scores import compute_us_pe_native_scores
 from microplex_us.pipelines.us import (
     USMicroplexBuildConfig,
     USMicroplexBuildResult,
@@ -75,20 +77,18 @@ class USMicroplexPerformanceHarnessConfig:
     targets_db: str | Path | None = None
     baseline_dataset: str | Path | None = None
     target_period: int = 2024
-    target_variables: tuple[str, ...] = (
-        "adjusted_gross_income",
-        "income_tax",
-        "dividend_income",
-        "taxable_interest_income",
-        "self_employment_income",
-    )
-    target_domains: tuple[str, ...] = ()
-    target_geo_levels: tuple[str, ...] = ("national",)
-    calibration_target_variables: tuple[str, ...] = ()
-    calibration_target_domains: tuple[str, ...] = ()
-    calibration_target_geo_levels: tuple[str, ...] = ()
+    target_variables: tuple[str, ...] | None = None
+    target_domains: tuple[str, ...] | None = None
+    target_geo_levels: tuple[str, ...] | None = None
+    target_profile: str | None = None
+    calibration_target_variables: tuple[str, ...] | None = None
+    calibration_target_domains: tuple[str, ...] | None = None
+    calibration_target_geo_levels: tuple[str, ...] | None = None
+    calibration_target_profile: str | None = None
     build_config: USMicroplexBuildConfig | None = None
     evaluate_parity: bool = True
+    evaluate_pe_native_loss: bool = False
+    policyengine_us_data_repo: str | Path | None = None
     strict_materialization: bool = True
     fast_inner_loop_calibration: bool = False
 
@@ -104,11 +104,20 @@ class USMicroplexPerformanceHarnessResult:
     stage_timings: dict[str, float]
     total_seconds: float
     parity_run: PolicyEngineUSHarnessRun | None = None
+    pe_native_scores: dict[str, object] | None = None
 
     def _parity_run_attr(self, name: str) -> float | None:
         if self.parity_run is None:
             return None
         return getattr(self.parity_run, name)
+
+    def _pe_native_score_attr(self, name: str) -> float | bool | int | None:
+        if self.pe_native_scores is None:
+            return None
+        summary = self.pe_native_scores.get("summary")
+        if not isinstance(summary, dict):
+            return None
+        return summary.get(name)
 
     @property
     def candidate_composite_parity_loss(self) -> float | None:
@@ -125,6 +134,21 @@ class USMicroplexPerformanceHarnessResult:
     @property
     def slice_win_rate(self) -> float | None:
         return self._parity_run_attr("slice_win_rate")
+
+    @property
+    def candidate_enhanced_cps_native_loss(self) -> float | None:
+        value = self._pe_native_score_attr("candidate_enhanced_cps_native_loss")
+        return float(value) if value is not None else None
+
+    @property
+    def baseline_enhanced_cps_native_loss(self) -> float | None:
+        value = self._pe_native_score_attr("baseline_enhanced_cps_native_loss")
+        return float(value) if value is not None else None
+
+    @property
+    def enhanced_cps_native_loss_delta(self) -> float | None:
+        value = self._pe_native_score_attr("enhanced_cps_native_loss_delta")
+        return float(value) if value is not None else None
 
 
 @dataclass
@@ -356,18 +380,43 @@ def _mark_skipped_stages(stage_timings: dict[str, float], stage_names: tuple[str
 
 
 def _resolve_build_config(config: USMicroplexPerformanceHarnessConfig) -> USMicroplexBuildConfig:
-    base = config.build_config or USMicroplexBuildConfig(
-        synthesis_backend="bootstrap",
-        calibration_backend="entropy",
+    default_base_kwargs: dict[str, object] = {
+        "synthesis_backend": "bootstrap",
+        "calibration_backend": "entropy",
+    }
+    if config.target_profile is None and config.calibration_target_profile is None:
+        default_base_kwargs.update(
+            {
+                "policyengine_target_variables": (
+                    "adjusted_gross_income",
+                    "income_tax",
+                    "dividend_income",
+                    "taxable_interest_income",
+                    "self_employment_income",
+                ),
+                "policyengine_target_geo_levels": ("national",),
+            }
+        )
+    base = config.build_config or USMicroplexBuildConfig(**default_base_kwargs)
+    target_variables = (
+        base.policyengine_target_variables
+        if config.target_variables is None
+        else config.target_variables
     )
-    target_variables = config.target_variables or base.policyengine_target_variables
-    target_domains = config.target_domains or base.policyengine_target_domains
+    target_domains = (
+        base.policyengine_target_domains
+        if config.target_domains is None
+        else config.target_domains
+    )
     target_geo_levels = (
-        config.target_geo_levels or base.policyengine_target_geo_levels
+        base.policyengine_target_geo_levels
+        if config.target_geo_levels is None
+        else config.target_geo_levels
     )
     calibration_target_variables = (
         config.calibration_target_variables
-        or base.policyengine_calibration_target_variables
+        if config.calibration_target_variables is not None
+        else base.policyengine_calibration_target_variables
         or (
             default_fast_calibration_target_variables(target_variables)
             if config.fast_inner_loop_calibration and target_variables
@@ -376,13 +425,13 @@ def _resolve_build_config(config: USMicroplexPerformanceHarnessConfig) -> USMicr
     )
     calibration_target_domains = (
         config.calibration_target_domains
-        or base.policyengine_calibration_target_domains
-        or target_domains
+        if config.calibration_target_domains is not None
+        else base.policyengine_calibration_target_domains or target_domains
     )
     calibration_target_geo_levels = (
         config.calibration_target_geo_levels
-        or base.policyengine_calibration_target_geo_levels
-        or target_geo_levels
+        if config.calibration_target_geo_levels is not None
+        else base.policyengine_calibration_target_geo_levels or target_geo_levels
     )
     return replace(
         base,
@@ -402,9 +451,14 @@ def _resolve_build_config(config: USMicroplexPerformanceHarnessConfig) -> USMicr
         policyengine_target_variables=target_variables,
         policyengine_target_domains=target_domains,
         policyengine_target_geo_levels=target_geo_levels,
+        policyengine_target_profile=config.target_profile or base.policyengine_target_profile,
         policyengine_calibration_target_variables=calibration_target_variables,
         policyengine_calibration_target_domains=calibration_target_domains,
         policyengine_calibration_target_geo_levels=calibration_target_geo_levels,
+        policyengine_calibration_target_profile=(
+            config.calibration_target_profile
+            or base.policyengine_calibration_target_profile
+        ),
         policyengine_dataset_year=base.policyengine_dataset_year or config.target_period,
     )
 
@@ -480,9 +534,9 @@ def warm_us_microplex_parity_cache(
     target_provider = PolicyEngineUSDBTargetProvider(str(config.targets_db))
     slices = default_policyengine_us_db_harness_slices(
         period=config.target_period,
-        variables=config.target_variables,
-        domain_variables=config.target_domains,
-        geo_levels=config.target_geo_levels,
+        variables=build_config.policyengine_target_variables,
+        domain_variables=build_config.policyengine_target_domains,
+        geo_levels=build_config.policyengine_target_geo_levels,
         reform_id=build_config.policyengine_target_reform_id,
     )
     slices = filter_nonempty_policyengine_us_harness_slices(
@@ -527,6 +581,10 @@ def run_us_microplex_performance_harness(
     ):
         raise ValueError(
             "USMicroplex performance harness requires both targets_db and baseline_dataset"
+        )
+    if config.evaluate_pe_native_loss and config.baseline_dataset is None:
+        raise ValueError(
+            "USMicroplex performance harness requires baseline_dataset for PE-native loss scoring"
         )
 
     build_config = _resolve_build_config(config)
@@ -686,9 +744,9 @@ def run_us_microplex_performance_harness(
         target_provider = PolicyEngineUSDBTargetProvider(str(config.targets_db))
         slices = default_policyengine_us_db_harness_slices(
             period=config.target_period,
-            variables=config.target_variables,
-            domain_variables=config.target_domains,
-            geo_levels=config.target_geo_levels,
+            variables=build_config.policyengine_target_variables,
+            domain_variables=build_config.policyengine_target_domains,
+            geo_levels=build_config.policyengine_target_geo_levels,
             reform_id=build_config.policyengine_target_reform_id,
         )
         slices = filter_nonempty_policyengine_us_harness_slices(
@@ -707,7 +765,7 @@ def run_us_microplex_performance_harness(
                 "sample_n": config.sample_n,
                 "n_synthetic": config.n_synthetic,
                 "source_names": precalibration.fusion_plan.source_names,
-                "target_variables": list(config.target_variables),
+                "target_variables": list(build_config.policyengine_target_variables),
                 "calibration_target_variables": list(
                     build_config.policyengine_calibration_target_variables
                 ),
@@ -716,6 +774,22 @@ def run_us_microplex_performance_harness(
             cache=comparison_cache,
         )
         _finish_stage(stage_timings, "evaluate_parity_harness", start)
+
+    pe_native_scores = None
+    if config.evaluate_pe_native_loss:
+        start = _stage(stage_timings, "evaluate_pe_native_loss")
+        with TemporaryDirectory(prefix="microplex-us-native-score-") as temp_dir:
+            candidate_dataset_path = pipeline.export_policyengine_dataset(
+                build_result,
+                Path(temp_dir) / "candidate_policyengine_us.h5",
+            )
+            pe_native_scores = compute_us_pe_native_scores(
+                candidate_dataset_path=candidate_dataset_path,
+                baseline_dataset_path=str(config.baseline_dataset),
+                period=build_config.policyengine_dataset_year or config.target_period,
+                policyengine_us_data_repo=config.policyengine_us_data_repo,
+            )
+        _finish_stage(stage_timings, "evaluate_pe_native_loss", start)
 
     total_seconds = perf_counter() - total_start
     return USMicroplexPerformanceHarnessResult(
@@ -726,6 +800,7 @@ def run_us_microplex_performance_harness(
         stage_timings=stage_timings,
         total_seconds=total_seconds,
         parity_run=parity_run,
+        pe_native_scores=pe_native_scores,
     )
 
 

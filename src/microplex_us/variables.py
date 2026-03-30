@@ -105,8 +105,12 @@ VARIABLE_SEMANTIC_SPECS: dict[str, VariableSemanticSpec] = {
     "tenure": VariableSemanticSpec(native_entity=EntityType.HOUSEHOLD),
     "state": VariableSemanticSpec(native_entity=EntityType.HOUSEHOLD),
     "dividend_income": VariableSemanticSpec(
-        native_entity=EntityType.TAX_UNIT,
-        condition_entities=(EntityType.HOUSEHOLD, EntityType.TAX_UNIT),
+        native_entity=EntityType.PERSON,
+        condition_entities=(
+            EntityType.PERSON,
+            EntityType.HOUSEHOLD,
+            EntityType.TAX_UNIT,
+        ),
         support_family=VariableSupportFamily.ZERO_INFLATED_POSITIVE,
         derived_from=(
             "qualified_dividend_income",
@@ -116,8 +120,12 @@ VARIABLE_SEMANTIC_SPECS: dict[str, VariableSemanticSpec] = {
         notes="Dividend totals are derived from the qualified and non-qualified atomic basis.",
     ),
     "ordinary_dividend_income": VariableSemanticSpec(
-        native_entity=EntityType.TAX_UNIT,
-        condition_entities=(EntityType.HOUSEHOLD, EntityType.TAX_UNIT),
+        native_entity=EntityType.PERSON,
+        condition_entities=(
+            EntityType.PERSON,
+            EntityType.HOUSEHOLD,
+            EntityType.TAX_UNIT,
+        ),
         support_family=VariableSupportFamily.ZERO_INFLATED_POSITIVE,
         derived_from=(
             "qualified_dividend_income",
@@ -127,31 +135,47 @@ VARIABLE_SEMANTIC_SPECS: dict[str, VariableSemanticSpec] = {
         notes="Ordinary dividend totals are derived from the qualified and non-qualified atomic basis.",
     ),
     "qualified_dividend_income": VariableSemanticSpec(
-        native_entity=EntityType.TAX_UNIT,
-        condition_entities=(EntityType.HOUSEHOLD, EntityType.TAX_UNIT),
+        native_entity=EntityType.PERSON,
+        condition_entities=(
+            EntityType.PERSON,
+            EntityType.HOUSEHOLD,
+            EntityType.TAX_UNIT,
+        ),
         support_family=VariableSupportFamily.ZERO_INFLATED_POSITIVE,
         donor_match_strategy=DonorMatchStrategy.ZERO_INFLATED_POSITIVE,
     ),
     "non_qualified_dividend_income": VariableSemanticSpec(
-        native_entity=EntityType.TAX_UNIT,
-        condition_entities=(EntityType.HOUSEHOLD, EntityType.TAX_UNIT),
+        native_entity=EntityType.PERSON,
+        condition_entities=(
+            EntityType.PERSON,
+            EntityType.HOUSEHOLD,
+            EntityType.TAX_UNIT,
+        ),
         support_family=VariableSupportFamily.ZERO_INFLATED_POSITIVE,
         donor_match_strategy=DonorMatchStrategy.ZERO_INFLATED_POSITIVE,
     ),
     "taxable_interest_income": VariableSemanticSpec(
-        native_entity=EntityType.TAX_UNIT,
-        condition_entities=(EntityType.HOUSEHOLD, EntityType.TAX_UNIT),
+        native_entity=EntityType.PERSON,
+        condition_entities=(
+            EntityType.PERSON,
+            EntityType.HOUSEHOLD,
+            EntityType.TAX_UNIT,
+        ),
         support_family=VariableSupportFamily.ZERO_INFLATED_POSITIVE,
         donor_match_strategy=DonorMatchStrategy.ZERO_INFLATED_POSITIVE,
     ),
     "tax_exempt_interest_income": VariableSemanticSpec(
-        native_entity=EntityType.TAX_UNIT,
-        condition_entities=(EntityType.HOUSEHOLD, EntityType.TAX_UNIT),
+        native_entity=EntityType.PERSON,
+        condition_entities=(
+            EntityType.PERSON,
+            EntityType.HOUSEHOLD,
+            EntityType.TAX_UNIT,
+        ),
         support_family=VariableSupportFamily.ZERO_INFLATED_POSITIVE,
         donor_match_strategy=DonorMatchStrategy.ZERO_INFLATED_POSITIVE,
     ),
     "taxable_pension_income": VariableSemanticSpec(
-        native_entity=EntityType.TAX_UNIT,
+        native_entity=EntityType.PERSON,
         condition_entities=(
             EntityType.PERSON,
             EntityType.HOUSEHOLD,
@@ -161,7 +185,7 @@ VARIABLE_SEMANTIC_SPECS: dict[str, VariableSemanticSpec] = {
         donor_match_strategy=DonorMatchStrategy.ZERO_INFLATED_POSITIVE,
     ),
     "taxable_social_security": VariableSemanticSpec(
-        native_entity=EntityType.TAX_UNIT,
+        native_entity=EntityType.PERSON,
         condition_entities=(
             EntityType.PERSON,
             EntityType.HOUSEHOLD,
@@ -201,8 +225,12 @@ VARIABLE_SEMANTIC_SPECS: dict[str, VariableSemanticSpec] = {
         donor_match_strategy=DonorMatchStrategy.ZERO_INFLATED_POSITIVE,
     ),
     "student_loan_interest": VariableSemanticSpec(
-        native_entity=EntityType.TAX_UNIT,
-        condition_entities=(EntityType.HOUSEHOLD, EntityType.TAX_UNIT),
+        native_entity=EntityType.PERSON,
+        condition_entities=(
+            EntityType.PERSON,
+            EntityType.HOUSEHOLD,
+            EntityType.TAX_UNIT,
+        ),
         support_family=VariableSupportFamily.ZERO_INFLATED_POSITIVE,
         donor_match_strategy=DonorMatchStrategy.ZERO_INFLATED_POSITIVE,
     ),
@@ -228,7 +256,7 @@ VARIABLE_SEMANTIC_SPECS: dict[str, VariableSemanticSpec] = {
         donor_match_strategy=DonorMatchStrategy.ZERO_INFLATED_POSITIVE,
     ),
     "self_employment_income": VariableSemanticSpec(
-        native_entity=EntityType.TAX_UNIT,
+        native_entity=EntityType.PERSON,
         condition_entities=(
             EntityType.PERSON,
             EntityType.HOUSEHOLD,
@@ -236,6 +264,27 @@ VARIABLE_SEMANTIC_SPECS: dict[str, VariableSemanticSpec] = {
         ),
         support_family=VariableSupportFamily.ZERO_INFLATED_POSITIVE,
         donor_match_strategy=DonorMatchStrategy.ZERO_INFLATED_POSITIVE,
+    ),
+    "has_medicaid": VariableSemanticSpec(
+        projection_aggregation=ProjectionAggregation.MAX,
+        support_family=VariableSupportFamily.ZERO_INFLATED_POSITIVE,
+        donor_match_strategy=DonorMatchStrategy.ZERO_INFLATED_POSITIVE,
+        notes="Binary proxy for Medicaid participation on the CPS scaffold.",
+    ),
+    "public_assistance": VariableSemanticSpec(
+        support_family=VariableSupportFamily.ZERO_INFLATED_POSITIVE,
+        donor_match_strategy=DonorMatchStrategy.ZERO_INFLATED_POSITIVE,
+        notes="Public assistance amounts are sparse and should preserve support.",
+    ),
+    "ssi": VariableSemanticSpec(
+        support_family=VariableSupportFamily.ZERO_INFLATED_POSITIVE,
+        donor_match_strategy=DonorMatchStrategy.ZERO_INFLATED_POSITIVE,
+        notes="SSI amounts are sparse and should preserve support.",
+    ),
+    "social_security": VariableSemanticSpec(
+        support_family=VariableSupportFamily.ZERO_INFLATED_POSITIVE,
+        donor_match_strategy=DonorMatchStrategy.ZERO_INFLATED_POSITIVE,
+        notes="Reported Social Security amounts are sparse and support-sensitive.",
     ),
     "snap": VariableSemanticSpec(
         native_entity=EntityType.SPM_UNIT,
@@ -371,8 +420,12 @@ def restore_dividend_components_from_composition(frame: pd.DataFrame) -> pd.Data
 
 
 DIVIDEND_DONOR_BLOCK_SPEC = DonorImputationBlockSpec(
-    native_entity=EntityType.TAX_UNIT,
-    condition_entities=(EntityType.HOUSEHOLD, EntityType.TAX_UNIT),
+    native_entity=EntityType.PERSON,
+    condition_entities=(
+        EntityType.PERSON,
+        EntityType.HOUSEHOLD,
+        EntityType.TAX_UNIT,
+    ),
     model_variables=DIVIDEND_COMPOSITION_MODEL_COLUMNS,
     restored_variables=DIVIDEND_COMPONENT_COLUMNS,
     match_strategies={

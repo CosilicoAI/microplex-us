@@ -1,0 +1,647 @@
+# _BUILD_LOG.md
+
+Append-only notes for agents working in `microplex-us`.
+
+## 2026-03-28
+
+- The US country pack now consumes more shared core benchmark infrastructure.
+- `benchmark_metrics` in `src/microplex_us/policyengine/comparison.py` now delegates to shared `normalize_metric_payload(...)` instead of hand-building `TargetMetric`.
+- `src/microplex_us/policyengine/harness.py` now builds suites from shared result-oriented core helpers rather than local payload plumbing.
+- `src/microplex_us/pipelines/local_reweighting.py` remains the thin adapter over core reweighting bundles and solver.
+- `_materialize_policyengine_us_variables_one_by_one(...)` in `src/microplex_us/policyengine/us.py` was fixed to chain successful materialized outputs forward, so dependency chains work in fallback mode.
+- US-specific legacy targets DB implementation now lives here instead of core:
+  - `src/microplex_us/targets_database.py`
+- `src/microplex_us/pipelines/experiments.py` now has a first-class `n_synthetic` sweep helper:
+  - `build_us_n_synthetic_sweep_experiments(...)`
+  - `run_us_microplex_n_synthetic_sweep(...)`
+- The performance-session experiment path now respects experiment-level `n_synthetic` and `random_seed` overrides instead of silently using the outer harness defaults.
+- The corrected parity benchmark showed the real local gap is `state_programs_core`, not district slices.
+- Current diagnosis:
+  - `cps_puf_500_auto_conditions_support_match` loses on state Medicaid and SNAP targets.
+  - the larger saved `cps_5000_puf_500_nsynthetic_5000_state_stratified_bootstrap` artifact is not a healthy counterexample; its calibrated weights collapse to near-zero mass, so it should not be used as evidence that scaling fixed the state gap.
+- Worst current `state_programs_core` misses for `cps_puf_500_auto_conditions_support_match` are concentrated in a small set of zero/near-zero states:
+  - Medicaid: GA (`state_fips=13`), WV (`54`), AZ (`4`), OR (`41`), VT (`50`), TX (`48`), AK (`2`), RI (`44`)
+  - SNAP: IA (`19`), OR (`41`), NH (`33`), WI (`55`)
+  - candidate zeros by source: Medicaid `10/51`, SNAP `8/51`
+- The saved `500_best` and `5000_state_stratified` artifacts are not comparable on scaffold richness:
+  - `500_best` seed carries `has_medicaid`, `public_assistance`, and `ssi`
+  - `5000_state_stratified` seed does not
+- `src/microplex_us/pipelines/us.py` now prefers scaffold sources that carry state-program support proxies (`has_medicaid`, `public_assistance`, `ssi`, `social_security`) before falling back to raw observed-column count.
+- `synthesis_metadata` now records `state_program_support_proxies.available/missing` so artifact triage can see whether a run ever had Medicaid/SNAP support proxies in the scaffolded seed.
+- `src/microplex_us/pipelines/us.py` now records explicit household/person weight diagnostics in `calibration_summary`, including effective sample size, tiny-weight share, and a `weight_collapse_suspected` flag so broken calibration runs are obvious in saved manifests.
+- `src/microplex_us/pipelines/registry.py` now carries `calibration_converged` and `weight_collapse_suspected`, and frontier selection ignores runs flagged as weight-collapsed.
+- A direct CPS scaffold A/B on `state_programs_core` confirms scaffold richness matters at fixed `n_synthetic=500`:
+  - stripped parquet CPS scaffold (`cps_asec_parquet`): candidate MARE `1.1675`, composite parity loss `1.0630`
+  - rich cached CPS scaffold (`cps_asec_2023`): candidate MARE `0.7861`, composite parity loss `0.7257`
+  - both compared against the same PE baseline (`0.4682` MARE, `0.4530` composite)
+- The rich cached CPS scaffold is materially better specifically because it carries `has_medicaid`, `public_assistance`, `ssi`, and `social_security`. This is now a confirmed causal lever, not just a suspicion from artifact comparison.
+- The next empirical question is whether that scaffold gain survives once PUF is added back in and `n_synthetic` is increased beyond `500`.
+- PE-US bridge fix landed after that A/B:
+  - `src/microplex_us/policyengine/us.py` now exports `ssi` into temporary PE datasets when available.
+  - `src/microplex_us/pipelines/us.py` no longer lets fallback `employment_income_before_lsr` absorb `ssi` or `public_assistance` when explicit wages are missing.
+- Interpretation: older state-program benchmark runs understate what a rich CPS scaffold can do, because they were dropping a program-relevant PE input (`ssi`) at the export boundary.
+- Direct-override policy alignment:
+  - do not model around `*_reported` variables here
+  - PE rules should remain canonical by default; direct program overrides should be explicit, not automatic
+  - `src/microplex_us/policyengine/us.py` now supports explicit direct-override variable names in `build_policyengine_us_export_variable_maps(...)`, so callers can intentionally short-circuit with values like `snap` or `ssi` when they mean to
+- Slack context for that policy lives in:
+  - `#us-snap` thread on PR `policyengine-us#7858` removing `snap_reported`
+  - `#mfb-policy-engine` thread stating that callers should pass direct values like `snap`/`tanf` when they want to short-circuit, rather than rely on `*_reported`
+- Tonight's post-diagnosis empirical check on `state_programs_core`:
+  - current rich CPS-only run (`n_synthetic=500`, default PE rules): candidate MARE `0.9530`, baseline MARE `0.4682`, candidate composite `0.8616`, baseline composite `0.4530`
+  - explicit `candidate_direct_override_variables=('ssi',)` made no observable difference on that slice
+  - mixed rich CPS + PUF runs are better than current CPS-only:
+    - `n_synthetic=500`: candidate MARE `0.8198`, composite `0.7495`
+    - `n_synthetic=2000`: candidate MARE `0.7808`, composite `0.7129`
+  - but both still lose clearly to the PE baseline on `state_programs_core`
+- Interpretation:
+  - richer scaffold and more rows help
+  - explicit `ssi` short-circuiting is not the lever
+  - the remaining gap still looks like real state-program support / structure, not a simple PE-bridge switch
+- Canonical artifact discipline tightened:
+  - `src/microplex_us/pipelines/site_snapshot.py` now builds a site-facing snapshot directly from one saved artifact bundle (`manifest.json` + `policyengine_harness.json`).
+  - Canonical website input now lives at `artifacts/site_snapshot_us.json`, not in `tmp_*.json` diagnostics.
+  - New blessed version-bump benchmark command:
+    - `uv run microplex-us-version-bump-benchmark --output-root ... --cps-parquet-dir ... --targets-db ... --baseline-dataset ...`
+  - The command can also refresh the canonical site snapshot with `--site-snapshot-path /Users/maxghenis/CosilicoAI/microplex-us/artifacts/site_snapshot_us.json`.
+- Enforcement direction:
+  - scratch diagnostics can still exist, but the website should only read the canonical snapshot file
+  - versioned benchmark runs should emit manifest + harness + registry entry, then optionally refresh the canonical snapshot
+
+## Current review bar
+
+- Prefer pushing reusable benchmark/evaluation abstractions into `microplex`.
+- PE-US materialization changes need focused regression coverage.
+- Be skeptical of any benchmark delta that does not clearly state whether it is common-target or full-set based.
+
+## Known remaining risks
+
+- `src/microplex_us/policyengine/us.py` is still a large concentration of concerns.
+- Composite-loss reporting and generic suite MARE are both present; do not conflate them.
+- Future tax-unit endogeneity work will likely force another boundary review with core.
+
+## 2026-03-29
+
+- US artifact persistence and site snapshot generation now validate saved bundles against the shared core manifest contract before using them.
+- The shared contract is intentionally structural:
+  - top-level manifest keys
+  - required benchmark summary keys for harness-backed bundles
+  - referenced artifact files must exist
+- This means the website snapshot path now fails fast on incomplete saved bundles instead of quietly reading partial manifests.
+- Canonical version-bump benchmarking now refreshes the site snapshot by default.
+  - `uv run microplex-us-version-bump-benchmark ...` writes to `artifacts/site_snapshot_us.json` unless `--site-snapshot-path` overrides it.
+- Added deterministic snapshot freshness check:
+  - `uv run microplex-us-check-site-snapshot artifacts/site_snapshot_us.json`
+- Added GitHub Actions workflow:
+  - `.github/workflows/site-snapshot.yml`
+- CI design is intentionally narrow:
+  - checkout `microplex-us` plus sibling core `microplex`
+  - run focused snapshot/version-benchmark tests
+  - regenerate the canonical snapshot from its source artifact and fail if the committed JSON differs
+
+## 2026-03-29 state-program follow-up
+
+- US `state_programs_core` diagnosis tightened:
+  - the remaining gap is concentrated in repeated low-mass states across both Medicaid and SNAP, not just one program family
+  - on the `n=2000` diagnostic slice, candidate MARE is still materially worse than baseline:
+    - overall `0.8252` vs `0.4682`
+    - Medicaid `0.8766` vs `0.3098`
+    - SNAP `0.7738` vs `0.6265`
+  - current failure mode is severe under-support, not unsupported targets:
+    - `supported_target_rate = 1.0`
+    - `candidate_zero_count = 0` for both domains in the focused diagnostics
+    - worst states are often at `~0.1%` to `~3%` of target mass
+- The pipeline now preserves state-program support proxies through synthesis by default instead of only carrying them implicitly in richer multi-source target sets:
+  - `src/microplex_us/pipelines/us.py` now auto-promotes available `has_medicaid`, `public_assistance`, `ssi`, and `social_security` columns into `condition_vars`
+  - this applies to the normal single-source CPS path as well as multi-source runs
+  - focused regression coverage now pins both paths in `tests/pipelines/test_us.py`
+- The PE-US parity suite semantics were corrected for the state SNAP leg:
+  - `src/microplex_us/policyengine/harness.py` now uses `household_count` with domain `snap` in `state_programs_core`
+  - this matches the slice description (`recipiency`) and aligns with the district SNAP slice instead of treating state SNAP as a dollar-total benchmark
+  - focused regression coverage now pins the slice filters in `tests/policyengine/test_harness.py`
+- Current interpretation:
+  - household-weight-only calibration is not failing to compile these targets
+  - the bigger ceiling is synthetic support expressiveness and source coverage
+  - real CPS/PUF source coverage is still structurally thin for this problem:
+    - real CPS carries proxies like `has_medicaid`, `public_assistance`, `ssi`, `social_security`
+    - real CPS/PUF does not provide real `snap` values for donor integration
+    - Medicaid still enters as proxy support rather than a native target-aligned source variable
+- Likely next move:
+  - rerun the corrected comparable state slice after the proxy-preservation fix
+  - then decide whether the next investment is:
+    - stronger source/backbone support for program participation, or
+    - a richer non-household weight entity path for US local calibration
+- Focused rerun on the saved `n=2000` candidate with the corrected `state_programs_core` semantics:
+  - candidate MARE `0.8492`
+  - PE baseline MARE `0.7298`
+  - delta `+0.1194` (PE still better)
+  - candidate composite parity loss `0.7754`
+  - PE baseline composite parity loss `0.7408`
+  - supported targets `102` for both
+  - target win rate `29.41%`
+- Interpretation of that rerun:
+  - the old state SNAP amount/count mismatch was materially inflating the apparent local gap
+  - correcting the slice semantics narrows the loss substantially
+  - but it does not remove the underlying state-program weakness
+  - next reruns should use the corrected count-based state SNAP slice as canonical
+- Fresh real-source rerun after the proxy-preserving synthesis change:
+  - output saved at `artifacts/tmp_state_programs_corrected_rerun_20260329.json`
+  - source mix: `cps_asec_2023 + irs_soi_puf_2024`
+  - sample size: `500` source households / tax units
+  - corrected state slice only
+  - results:
+    - `n_synthetic=500`: candidate MARE `0.9619`, baseline MARE `0.7298`, delta `+0.2321`, candidate composite `0.8678`
+    - `n_synthetic=2000`: candidate MARE `0.8729`, baseline MARE `0.7298`, delta `+0.1432`, candidate composite `0.7925`
+  - both runs preserved the proxies in synthesis `condition_vars`:
+    - `age`, `sex`, `education`, `employment_status`, `state_fips`, `tenure`, `has_medicaid`, `public_assistance`, `ssi`, `social_security`
+  - both runs were healthy enough numerically:
+    - no weight collapse
+    - all `102` corrected state targets supported
+- Interpretation of the fresh rerun:
+  - preserving the CPS state-program proxies through synthesis is not enough to beat PE on the corrected state slice
+  - scaling from `500` to `2000` still helps, but only modestly
+  - the remaining gap now looks even more like a structural source/backbone problem than a lost-proxy problem
+  - specifically:
+    - real CPS/PUF still lacks true SNAP donor support
+    - Medicaid still enters mostly as proxy support rather than a target-native source variable
+    - household-weight-only calibration can rescale what exists, but cannot create the missing state-program structure
+
+2026-03-29
+- Scope reviewed:
+  - US `state_programs_core` after focused Claude review
+  - DB calibration feasibility vs solver non-convergence
+  - proxy semantics and synthesizer-path safety
+- What changed:
+  - DB calibration now applies a feasibility filter before solving:
+    - config supports `policyengine_calibration_max_constraints`
+    - config supports `policyengine_calibration_max_constraints_per_household`
+    - config supports `policyengine_calibration_min_active_households`
+  - calibration summaries now record:
+    - `n_constraints_before_feasibility_filter`
+    - `n_constraints_after_feasibility_filter`
+    - low-support / over-capacity drops
+  - weight diagnostics now flag low effective-sample-ratio collapse, not just tiny-weight share
+  - registered semantic specs for:
+    - `has_medicaid`
+    - `public_assistance`
+    - `ssi`
+    - `social_security`
+  - fixed a core synthesizer bug where zero-inflated variables with all-zero training support could crash on inverse transform during sampling
+- New canonical bootstrap rerun with the feasibility filter:
+  - output saved at `artifacts/tmp_state_programs_feasible_bootstrap_rerun_20260329.json`
+  - exact calibration DB: `/Users/maxghenis/PolicyEngine/policyengine-us-data/policyengine_us_data/storage/calibration/policy_data.db`
+  - corrected state-only calibration + benchmark scope:
+    - variables: `household_count`, `person_count`
+    - domains: `snap`, `medicaid_enrolled`
+    - geo level: `state`
+  - results:
+    - `n_synthetic=500`
+      - candidate MARE `0.9232`
+      - PE baseline MARE `0.7386`
+      - delta `+0.1846`
+      - candidate composite `0.8358`
+      - PE composite `0.7704`
+      - target win rate `33.33%`
+      - feasibility filter reduced constraints `102 -> 81`
+    - `n_synthetic=2000`
+      - candidate MARE `0.7335`
+      - PE baseline MARE `0.7386`
+      - delta `-0.0051`
+      - candidate composite `0.6770`
+      - PE composite `0.7704`
+      - target win rate `37.25%`
+      - feasibility filter reduced constraints `102 -> 100`
+- Interpretation:
+  - the Claude review was directionally right that calibration feasibility mattered more than the earlier “backbone only” diagnosis
+  - once the state-program solve stops trying to absorb an infeasible flat constraint set, the `n=2000` CPS+PUF bootstrap run slightly beats PE on the corrected state slice
+  - this does not prove the final production architecture is solved, but it does show the immediate local gap was not just a source-support story
+  - remaining open issues:
+    - synthesizer-backed state-program reruns still need a clean end-to-end pass
+    - proxy preservation alone is not the main lever; feasible calibration is
+- Follow-up synthesizer unblock:
+  - fixed core zero-inflated inverse-transform handling when a target has all-zero training support
+  - fixed `ensure_target_support()` to coerce boolean exemplar values before writing back into numeric synthetic columns
+  - added a real synthesizer-path regression with the promoted state-program proxy condition vars
+  - synthesizer rerun output saved at `artifacts/tmp_state_programs_feasible_synth_rerun_20260329.json`
+  - results:
+    - `n_synthetic=500`
+      - candidate MARE `0.8918`
+      - PE baseline MARE `0.7386`
+      - delta `+0.1533`
+      - candidate composite `0.8143`
+      - PE composite `0.7704`
+      - target win rate `29.41%`
+    - `n_synthetic=2000`
+      - candidate MARE `0.6811`
+      - PE baseline MARE `0.7386`
+      - delta `-0.0574`
+      - candidate composite `0.6481`
+      - PE composite `0.7704`
+      - target win rate `42.16%`
+- Updated interpretation:
+  - feasible calibration was the main missing lever
+  - once the solve is narrowed to the corrected state-program target estate, both bootstrap and synthesizer improve sharply
+  - the synthesizer path now also clears PE at `n=2000`, and by a healthier margin than bootstrap
+ - the remaining US state-program work should now focus on:
+    - stabilizing this feasible-target calibration path
+    - deciding whether to keep the default cap at `1.0 * household_count` or tune it lower
+    - then broadening back out carefully instead of returning to the flat 3,611-constraint solve
+
+2026-03-29 — focused code review (Claude agent team)
+- Scope: state-program accuracy work across microplex-us and microplex core
+- Top findings:
+  1. **Critical**: all saved artifacts show `converged: false` — headline n=2000 results are on unconverged weights. The "win" vs PE is narrow and not reliable.
+  2. **High**: `min_active_households=1` lets degenerate single-household constraints through. Raise to 5-10.
+  3. **High**: `has_medicaid` uses `BOUNDED_SHARE` but is binary — should be `ZERO_INFLATED_POSITIVE`.
+  4. **High**: `ensure_target_support()` bool fix is correct but only guarantees 1 exemplar per category — not enough for calibration.
+  5. **Medium**: zero project-level tests in microplex-us; zero direct unit tests for core transform fix.
+- Diagnosis assessment: calibration infeasibility was a real blocker, but the deeper root cause is sparse small-state sample coverage (n=2000 across 51 states). Feasibility filtering delays the reckoning but doesn't resolve it.
+- Benchmark assessment: corrected state-only path is valid as a diagnostic slice but should not replace the full canonical benchmark. Results are directionally encouraging but not credible until calibration converges.
+- Top 3 next fixes:
+  1. Add small-state oversampling floor (min 10 households/state) to bootstrap/synthesis
+  2. Raise `min_active_households` to 5-10, warn when >20% constraints dropped
+  3. Write regression tests for feasibility filter, ensure_target_support, condition var promotion, harness slice stability
+
+2026-03-29
+- Review handoff workflow:
+  - durable pending Claude review request now lives at `reviews/PENDING_CLAUDE_REVIEW.md`
+  - full Claude reviews should be written under `reviews/`
+  - `_BUILD_LOG.md` should keep only concise review summaries
+  - intended short Claude instruction is now just:
+    - `Please execute the pending review request in /Users/maxghenis/CosilicoAI/microplex-us/reviews/PENDING_CLAUDE_REVIEW.md`
+
+2026-03-29
+- Follow-up after focused review findings:
+  - tightened calibration feasibility defaults:
+    - `policyengine_calibration_min_active_households` now defaults to `5`
+    - feasibility diagnostics now record total dropped constraints, drop share, and warning messages
+    - calibration summaries now surface warnings for heavy feasibility dropping and non-convergence
+  - adjusted proxy handling:
+    - `has_medicaid` now uses `ZERO_INFLATED_POSITIVE` semantics
+    - only `has_medicaid` is auto-promoted into synthesis condition vars by default
+    - `public_assistance`, `ssi`, and `social_security` now remain synthesis targets instead of inflating the condition space
+  - core transform fallback now warns when a zero-inflated variable has no positive training support
+- Focused verification:
+  - `microplex-us` focused pipeline tests: `13 passed`
+  - `microplex-us` variable semantics tests: `13 passed`
+  - `microplex` synthesizer tests: `17 passed`
+  - Ruff clean on touched files
+- Updated corrected state-only reruns with stricter defaults:
+  - bootstrap artifact: `artifacts/tmp_state_programs_feasible_bootstrap_rerun_20260329.json`
+    - `n=2000`: candidate MARE `0.8094`, PE MARE `0.7386`
+    - `n=2000`: candidate composite `0.7408`, PE composite `0.7704`
+    - `n=2000`: `converged=false`, feasibility filter dropped `25/102` constraints (`24.5%`)
+    - interpretation: bootstrap no longer beats PE under the stricter floor
+  - synthesizer artifact: `artifacts/tmp_state_programs_feasible_synth_rerun_20260329.json`
+    - `n=2000`: candidate MARE `0.6910`, PE MARE `0.7386`
+    - `n=2000`: candidate composite `0.6537`, PE composite `0.7704`
+    - `n=2000`: `converged=false`, feasibility filter dropped `3/102` constraints (`2.9%`)
+    - interpretation: synthesizer still edges PE on the corrected state slice, but the solve is still unconverged, so this remains directional evidence rather than a settled win
+
+2026-03-29
+- PE-native mission-metric setup:
+  - `microplex-us` now has a real broad PE-native scorer in `src/microplex_us/pipelines/pe_native_scores.py`
+  - saved artifacts can persist `policyengine_native_scores.json` plus a `policyengine_native_scores` summary block in `manifest.json`
+  - `run_registry.jsonl` now understands:
+    - `candidate_enhanced_cps_native_loss`
+    - `baseline_enhanced_cps_native_loss`
+    - `enhanced_cps_native_loss_delta`
+    - unweighted MSRE companions
+  - canonical US version-bump flow now requires native scoring and ranks on `candidate_enhanced_cps_native_loss`
+- Important boundary:
+  - the exact broad `enhanced_cps` native loss is now the primary PE mission metric
+  - PE local validation does not expose one single final scalar; the correct follow-up is a `validate_staging.py` wrapper plus saved `validation_results.csv` / summary JSON, not a fake “local PE loss”
+- Focused verification:
+  - `tests/pipelines/test_pe_native_scores.py`
+  - `tests/pipelines/test_version_benchmark.py`
+  - `tests/pipelines/test_artifacts.py`
+  - `tests/pipelines/test_registry.py`
+  - result: `13 passed`
+  - Ruff clean on scorer/artifact/registry/version-benchmark files
+
+2026-03-29
+- PE-native mission loop tightened:
+  - canonical saved US version-bump flow now ranks frontier runs on `enhanced_cps_native_loss_delta`, not absolute candidate native loss
+  - saved native-score summaries now include an explicit `candidate_beats_baseline` flag
+  - `run_registry.jsonl` carries that boolean as `candidate_beats_baseline_native_loss`
+  - saved artifacts append to the registry even when only PE-native scoring is available and harness scoring is absent
+  - `microplex-us-version-benchmark` now supports `--require-beat-pe-native-loss` to fail fast when a run still loses on PE's own broad native loss
+- Focused verification:
+  - `tests/pipelines/test_pe_native_scores.py`
+  - `tests/pipelines/test_version_benchmark.py`
+  - `tests/pipelines/test_registry.py -k "native_loss_frontier_selection or append_and_load_us_microplex_run_registry"`
+  - `tests/pipelines/test_artifacts.py -k "policyengine_native_scores_when_available"`
+  - Ruff clean on the touched scorer/artifact/registry/version-benchmark files
+
+2026-03-29
+- Historical PE-native backfill support:
+  - added `src/microplex_us/pipelines/backfill_pe_native_scores.py`
+  - new CLI: `microplex-us-backfill-pe-native-scores`
+  - backfill upgrades old bundles by writing `policyengine_native_scores.json`, updating `manifest.json`, and rebuilding `run_registry.jsonl` / `run_index.duckdb` for that artifact root
+- Focused verification:
+  - `tests/pipelines/test_backfill_pe_native_scores.py`
+  - `tests/pipelines/test_pe_native_scores.py`
+  - `tests/pipelines/test_version_benchmark.py`
+  - `tests/pipelines/test_artifacts.py -k "policyengine_native_scores_when_available"`
+  - `tests/pipelines/test_registry.py -k "native_loss_frontier_selection or append_and_load_us_microplex_run_registry"`
+  - Ruff clean on the touched backfill/scorer/artifact/registry/version-benchmark files
+- Important mission finding:
+  - backfilled `/artifacts/live_cps_puf_three_fixes_20260326/20260326T131756Z-4eaab451`
+  - despite beating PE on its own narrow saved harness (`candidate MARE 0.1737` vs baseline `0.1881`), it is catastrophic on PE's true broad native loss:
+    - candidate native loss `27.8382`
+    - PE baseline native loss `0.01748`
+    - delta `+27.8207`
+  - implication: the mission is not “go back to the older narrow tax-target config”; current broad/native-aligned candidates are much closer to PE even when they still lose
+
+2026-03-29
+- PE-native target-estate and local mission-loop wiring:
+  - added named exact-cell target profile support in `src/microplex_us/policyengine/target_profiles.py`
+  - added first mission profile: `pe_native_broad`
+  - provider now accepts exact `target_cells` filters through `TargetQuery.provider_filters`
+  - `USMicroplexBuildConfig` and local performance configs now carry `policyengine_target_profile` / `policyengine_calibration_target_profile`
+  - canonical `microplex-us-version-benchmark` now defaults both target-profile flags to `pe_native_broad`
+  - local performance harness can now optionally export the candidate and score PE-native broad loss directly via `evaluate_pe_native_loss=True`
+- Important finding:
+  - for the current production target DB, `pe_native_broad` is exactly the active `national+state` surface:
+    - all geos: `37,755`
+    - national+state: `4,183`
+    - `pe_native_broad` profile: `4,183`
+  - so the value of the profile today is not a smaller target estate; it is making the mission surface explicit and future-stable, while excluding district/local drift from the canonical version-bump path
+- Focused verification:
+  - targeted provider/pipeline/profile/version-benchmark/performance tests: `22 passed`
+  - `tests/pipelines/test_performance.py`: `13 passed`
+  - Ruff clean on touched target-profile/provider/pipeline/performance/version-benchmark files
+
+2026-03-29
+- Mission-loop throughput fix:
+  - `run_us_microplex_performance_harness()` was already computing PE-native scores, but `save_us_microplex_artifacts()` ignored them and recomputed the full PE-native scorer again while writing the bundle
+  - added `precomputed_policyengine_harness_payload` / `precomputed_policyengine_native_scores` passthrough support to artifact saving
+  - `run_us_microplex_source_experiments()` now forwards `performance_result.parity_run.to_dict()` and `performance_result.pe_native_scores` into the artifact saver
+  - implication: future sweeps stop paying the PE-native scorer twice per candidate
+- PE-native broad target mix (from current scorer outputs + `policyengine-us-data` calibration targets):
+  - kept targets: `2,853`
+  - split: `677 national` / `2,176 state`
+  - state-heavy families are the real mission surface:
+    - age by state: `900`
+    - AGI bins by state: `918`
+    - SNAP state cost/households: `102`
+    - ACA spending/enrollment: `102`
+    - Medicaid enrollment: `51`
+    - real estate taxes by state: `51`
+    - state population: `51`
+  - implication: beating PE on the broad native loss requires state age/AGI structure, not just fixing SNAP/Medicaid
+- Focused verification:
+  - `tests/pipelines/test_artifacts.py -k "precomputed_policyengine_native_scores or writes_policyengine_native_scores_when_available"`: `2 passed`
+  - `tests/pipelines/test_experiments.py -k "performance_session"`: `1 passed`
+  - Ruff clean on touched artifact/experiment files
+
+2026-03-29
+- Performance-harness scope fix for PE-native broad runs:
+  - found a real mission-loop bug: `USMicroplexPerformanceHarnessConfig` had hardcoded default target filters for five national tax variables, and those defaults were still applied even when `target_profile='pe_native_broad'`
+  - effect: the first live `cps+puf-rich` "broad" run under `/artifacts/live_pe_native_cps_puf_rich_sweep_20260329` was not actually broad; it calibrated only 5 national targets and produced a misleading PE-native score (`candidate native loss 1.1437` vs baseline `0.02024`)
+  - fixed `src/microplex_us/pipelines/performance.py` so named target profiles can own the scope unless the caller explicitly overrides variables/domains/geo levels
+  - parity/cache paths now read the resolved build scope, not stale config defaults
+  - relaunched the true broad mission run at `/artifacts/live_pe_native_cps_puf_rich_broad_fixed_20260329`
+- Focused verification:
+  - `tests/pipelines/test_performance.py -k "preserves_target_profiles or warm_us_microplex_parity_cache"`: `3 passed`
+  - Ruff clean on touched performance/test files
+
+2026-03-29
+- Corrected broad PE-native result (`cps+puf-rich`, `sample_n=500`, `n_synthetic=2000`):
+  - artifact: `/Users/maxghenis/CosilicoAI/microplex-us/artifacts/live_pe_native_cps_puf_rich_broad_fixed_20260329/20260329T175330Z-057066af`
+  - the scope is now correct: `policyengine_target_profile='pe_native_broad'` with no extra variable/geo filters
+  - PE-native broad loss is still far from PE:
+    - candidate native loss `0.95856`
+    - PE baseline native loss `0.02024`
+    - delta `+0.93832`
+    - kept targets `2,817` (`641 national`, `2,176 state`)
+  - calibration remains the dominant failure mode on the broad mission surface:
+    - `converged=false`
+    - `1,413` supported constraints out of `4,183` loaded targets
+    - feasibility filter dropped `2,198 / 3,611` candidate constraints (`60.9%`)
+    - mean error `0.9234`
+  - implication: the PE-native mission is still primarily a scale/support problem; fixing the profile bug was necessary, but not enough
+- Next live run:
+  - launched a larger broad mission candidate at `/Users/maxghenis/CosilicoAI/microplex-us/artifacts/live_pe_native_cps_puf_rich_broad_scaled_20260329`
+  - config: `sample_n=5000`, `n_synthetic=10000`, `target_profile='pe_native_broad'`, native loss only
+
+2026-03-29
+- PE-native scorer instrumentation:
+  - `src/microplex_us/pipelines/pe_native_scores.py` now supports `family_breakdown` in both single-candidate and batch native-loss scoring
+  - current family classifier covers the broad PE-native estate at the level we care about operationally:
+    - `state_age_distribution`
+    - `state_agi_distribution`
+    - `state_snap_cost`
+    - `state_snap_households`
+    - `state_medicaid_enrollment`
+    - `state_aca_spending`
+    - `state_aca_enrollment`
+    - `state_population`
+    - `state_population_under_5`
+    - `state_real_estate_taxes`
+    - plus national census / IRS / JCT / SSA / net-worth families
+  - goal: stop treating PE-native broad loss as one opaque scalar and identify which families dominate the mission gap
+- Focused verification:
+  - `tests/pipelines/test_pe_native_scores.py`: `3 passed`
+  - Ruff clean on touched native-score files
+
+2026-03-29
+- Wired sparse/L0-style calibration into the actual PE-backed DB solve path:
+  - `src/microplex/calibration.py` now lets `SparseCalibrator` and `HardConcreteCalibrator` accept explicit `LinearConstraint` rows and report `linear_errors` / `converged` in the same shape as the classical calibrator
+  - `src/microplex_us/pipelines/us.py` now builds calibrators through one shared backend factory, so `policyengine_targets_db` calibration can use `sparse` and `hardconcrete` instead of hard-rejecting everything except `entropy/ipf/chi2`
+  - added focused regressions in:
+    - `microplex/tests/test_sparse_calibrator.py`
+    - `microplex/tests/test_sparse_calibration_comparison.py`
+    - `microplex-us/tests/pipelines/test_us.py`
+- Focused verification:
+  - `microplex/tests/test_sparse_calibrator.py`, `microplex/tests/test_sparse_calibration_comparison.py`, `microplex/tests/test_calibration.py`: `48 passed`
+  - `microplex-us/tests/pipelines/test_us.py -k calibrate_policyengine_tables_from_db`: `4 passed`
+  - Ruff clean on touched core + US files
+- Mission follow-up:
+  - attempted a broad sparse-vs-entropy sweep at `sample_n=5000`, `n_synthetic=10000`, but the first broad PE-native score alone was slow enough that it is not a practical overnight tuning loop yet
+  - replaced it with a smaller first broad sparse diagnostic at `sample_n=1000`, `n_synthetic=2000`, `target_sparsity=0.1`; result pending in `/Users/maxghenis/CosilicoAI/microplex-us/artifacts/tmp_pe_native_broad_sparse_n2000_20260329.json`
+
+2026-03-29
+- First broad sparse PE-native diagnostic landed:
+  - artifact: `/Users/maxghenis/CosilicoAI/microplex-us/artifacts/tmp_pe_native_broad_sparse_n2000_20260329.json`
+  - result is much worse than entropy on the mission surface:
+    - candidate native loss `633.9884`
+    - PE baseline native loss `0.0202`
+    - delta `+633.9681`
+  - calibration summary:
+    - backend `policyengine_db_sparse`
+    - supported constraints `1,314 / 4,183`
+    - feasibility filter dropped `2,297 / 3,611` candidate constraints (`63.6%`)
+  - the dominant family blowups are not just Medicaid/SNAP:
+    - `state_agi_distribution`
+    - `state_age_distribution`
+    - `state_aca_spending`
+    - `state_aca_enrollment`
+    - `state_medicaid_enrollment`
+  - implication: the current sparse/L0-style solve path is not ready for the broad PE-native mission loop; it is a diagnostic branch, not a candidate frontier path
+- Throughput fix for future mission sweeps:
+  - `src/microplex_us/pipelines/artifacts.py` now supports deferring native scoring when saving a batch of experiment bundles
+  - `src/microplex_us/pipelines/backfill_pe_native_scores.py` now has grouped batch backfill via `compute_batch_us_pe_native_scores(...)`
+  - `src/microplex_us/pipelines/experiments.py` now saves multi-experiment performance batches first, batch-scores native loss once per baseline, rebuilds the registry, and refreshes experiment results/frontier entries from the rebuilt registry
+  - goal: stop paying the fixed PE-native baseline/scorer cost candidate-by-candidate in experiment sweeps
+- Focused verification:
+  - `tests/pipelines/test_experiments.py`, `tests/pipelines/test_backfill_pe_native_scores.py`: `10 passed`
+  - Ruff clean on touched artifact/backfill/experiment files
+
+2026-03-29
+- Native-only experiment throughput fix:
+  - the first batched `pe_native_broad` source/synthesis compare showed that `save_us_microplex_artifacts(...)` was still generating full `policyengine_harness.json` sidecars even when the performance run had `evaluate_parity=False`
+  - that was wasted work for the PE-native mission loop and produced huge harness files (`~100MB`) before native batch scoring even started
+  - fixed by threading `defer_policyengine_harness` through:
+    - `src/microplex_us/pipelines/artifacts.py`
+    - `src/microplex_us/pipelines/experiments.py`
+  - performance-session experiment batches now skip harness generation when there is no precomputed parity payload, while still deferring native scoring and backfilling it in batch
+- Focused verification:
+  - `tests/pipelines/test_experiments.py::test_run_us_microplex_source_experiments_can_use_performance_session`
+  - `tests/pipelines/test_artifacts.py::TestSaveUSMicroplexArtifacts::test_can_defer_policyengine_harness_generation`
+  - Ruff clean on touched artifact/experiment files
+ - Current live run:
+   - relaunched the four-way PE-native broad compare on the no-harness path at `/Users/maxghenis/CosilicoAI/microplex-us/artifacts/live_pe_native_broad_entropy_batch_noharness_20260329`
+   - matrix:
+     - `cps-only-bootstrap`
+     - `cps-only-synthesizer`
+     - `cps-puf-bootstrap`
+     - `cps-puf-synthesizer`
+   - shared config:
+     - `sample_n=1000`
+     - `n_synthetic=2000`
+     - `calibration_backend='entropy'`
+     - `target_profile='pe_native_broad'`
+
+2026-03-29
+- First live donor-imputer A/B on the real PE-native broad mission path:
+  - added explicit donor-imputer backend switching in `src/microplex_us/pipelines/us.py`
+    - runtime now supports `donor_imputer_backend='maf' | 'qrf' | 'zi_qrf'`
+    - `qrf` / `zi_qrf` use a new columnwise forest-based donor imputer rather than the existing flow-based `Synthesizer`
+  - added focused route coverage in `tests/pipelines/test_us.py`
+- Smoke-test result on `cps_asec_2023 + puf_2024`, `sample_n=500`, `n_synthetic=2000`, `target_profile='pe_native_broad'`, `calibration_backend='entropy'`:
+  - artifact: `/Users/maxghenis/CosilicoAI/microplex-us/artifacts/tmp_donor_backend_ab_pe_native_broad_20260329.json`
+  - `maf`:
+    - candidate native loss `0.8958`
+    - baseline native loss `0.02024`
+    - delta `+0.8755`
+    - calibration `converged=false`
+    - supported constraints `1,391`
+    - feasibility filter dropped `2,220 / 3,611` constraints (`61.5%`)
+  - `zi_qrf`:
+    - candidate native loss `0.9278`
+    - baseline native loss `0.02024`
+    - delta `+0.9076`
+    - calibration `converged=false`
+    - supported constraints `1,459`
+    - feasibility filter dropped `2,152 / 3,611` constraints (`59.6%`)
+- Immediate read:
+  - the widened imputation eval winner (`zi_qrf`) did not improve total PE-native broad loss on the live runtime path; it made the smoke-test result slightly worse than `maf`
+  - translation caveat is likely real: the runtime donor-imputed variables on this path are mostly PUF tax variables (`capital_gains`, `dividends`, `interest`, `pension`, etc.), not the broader survey-support surfaces emphasized by the widened eval
+  - next control is plain `qrf` on the same path to see whether the miss is the zero-inflated gate or the whole forest donor-imputer branch
+- Plain `qrf` control on the same config:
+  - artifact: `/Users/maxghenis/CosilicoAI/microplex-us/artifacts/tmp_donor_backend_qrf_pe_native_broad_20260329.json`
+  - candidate native loss `0.8931`
+  - baseline native loss `0.02024`
+  - delta `+0.8728`
+  - calibration `converged=false`
+  - supported constraints `1,398`
+  - feasibility filter dropped `2,213 / 3,611` constraints (`61.3%`)
+- Current runtime read:
+  - `qrf` is slightly better than `maf` on PE-native broad total loss in this smoke test (`0.8931` vs `0.8958`)
+  - `zi_qrf` is worse than both (`0.9278`)
+  - none of these are remotely close to PE yet, so this is only a runtime-direction result, not a candidate-frontier change
+- QRF control on the same live path:
+  - artifact: `/Users/maxghenis/CosilicoAI/microplex-us/artifacts/tmp_donor_backend_qrf_pe_native_broad_20260329.json`
+  - `qrf`:
+    - candidate native loss `0.8931`
+    - baseline native loss `0.02024`
+    - delta `+0.8728`
+    - calibration `converged=false`
+    - supported constraints `1,398`
+    - feasibility filter dropped `2,213 / 3,611` constraints (`61.3%`)
+- Updated read:
+  - on the current live PE-native broad smoke test, plain `qrf` slightly beat the existing `maf` runtime donor path, while `zi_qrf` was worse
+  - ordering on this path was `qrf` (`0.8931`) better than `maf` (`0.8958`) better than `zi_qrf` (`0.9278`)
+  - the `qrf` vs `maf` gap is tiny and all three runs remain `converged=false`, so this is not enough to justify a production switch
+  - the widened eval is still useful, but it should not directly drive the PE-native production switch without a closer mission-surface benchmark
+
+2026-03-29
+- Broad PE-native family diagnosis:
+  - the huge broad-loss gap is not primarily a donor-imputer issue
+  - in `/Users/maxghenis/CosilicoAI/microplex-us/artifacts/live_pe_native_broad_entropy_batch_noharness_20260329/20260329T210427Z-057066af/policyengine_native_scores.json`, the top loss contributors are:
+    - `national_irs_other` `+0.2839`
+    - `state_agi_distribution` `+0.1893`
+    - `state_age_distribution` `+0.1860`
+    - `national_population_by_age` `+0.0605`
+    - `national_census_other` `+0.0445`
+    - `state_aca_spending` `+0.0333`
+  - donor-imputer choice only moves total broad loss by about `0.035` end-to-end (`0.8931` to `0.9278`), while the gap to PE is still about `0.87`
+  - current live donor-imputation only affects a 31-variable PUF tax block, so most of the broad native-loss delta is coming from seams outside the donor-imputer switch
+- Failed bootstrap-target-scope experiments:
+  - tried auto-inferencing profile-driven bootstrap strata from `pe_native_broad`
+  - full profile strata (`state_fips`, `age_group`, `income_bracket`) made broad loss worse:
+    - artifact: `/Users/maxghenis/CosilicoAI/microplex-us/artifacts/tmp_qrf_profile_strata_pe_native_broad_20260329.json`
+    - candidate native loss `0.9371`
+    - delta `+0.9169`
+  - narrower state-only profile strata also made broad loss worse:
+    - artifact: `/Users/maxghenis/CosilicoAI/microplex-us/artifacts/tmp_qrf_state_strata_pe_native_broad_20260329.json`
+    - candidate native loss `0.9373`
+    - delta `+0.9170`
+ - conclusion: bootstrap stratification is not the missing broad-native lever here; the attempted default inference was reverted after the smoke tests
+
+2026-03-29
+- Broad PE-native structural export diagnosis:
+  - found a real upstream household-structure bug on the broad path: saved calibrated rows still carried healthy `family_relationship`, but `relationship_to_head` had already collapsed to mostly `{0,3}`, and `build_policyengine_entity_tables()` was preserving that bad column
+  - first fix: when `family_relationship` is richer than `relationship_to_head`, prefer it during PE-entity construction
+  - second fix: repair incoherent household relationship patterns before tax-unit construction so each household has exactly one head and at most one spouse
+  - before the repair on the saved broad artifact (`20260329T210427Z-057066af`):
+    - `4774` tax units for `4774` people
+    - filing status all `SINGLE`
+    - `1170 / 2000` households had no head at all
+  - after the repair on the same saved artifact:
+    - `4650` tax units for `4774` people
+    - filing status distribution `{'SINGLE': 4529, 'JOINT': 119, 'HEAD_OF_HOUSEHOLD': 2}`
+    - `0 / 2000` households with no head
+    - `0 / 2000` households with multiple heads
+  - quick PE probe on the repaired `cps+puf` broad export:
+    - `income_tax_sum` moved from `105.41B` to `104.01B`
+    - `tax_unit_is_filer_sum` moved from `4.889M` to `4.793M`
+    - raw IRS person-income sums like `qualified_dividend_income`, `taxable_interest_income`, and `taxable_pension_income` were unchanged, so this fix primarily affects filing/tax-unit structure rather than person-level donor values
+- Broad donor/entity semantics diagnosis:
+  - several IRS donor-integrated inputs in `variables.py` were still marked tax-unit-native even though current `policyengine_us` defines them as person variables
+  - patched the confirmed person-native set:
+    - `dividend_income`
+    - `ordinary_dividend_income`
+    - `qualified_dividend_income`
+    - `non_qualified_dividend_income`
+    - `taxable_interest_income`
+    - `tax_exempt_interest_income`
+    - `taxable_pension_income`
+    - `taxable_social_security`
+    - `self_employment_income`
+    - `student_loan_interest`
+  - also moved `DIVIDEND_DONOR_BLOCK_SPEC` to `native_entity=PERSON`
+  - this stops the donor path from projecting those inputs onto tax units with default `FIRST`
+- Verification:
+  - focused relationship tests in `tests/pipelines/test_us.py`: passed (`4`)
+  - focused variable-semantics tests in `tests/test_variables.py`: passed (`4`)
+  - Ruff clean on touched files
+- Next step:
+  - clean PE-native broad rescoring is still running on the repaired `cps+puf` export to quantify how much the broad loss actually moves from these two structural fixes
+
+2026-03-29
+- Broad PE-native rescore on repaired `cps+puf` export:
+  - persisted repaired export:
+    - `/Users/maxghenis/CosilicoAI/microplex-us/artifacts/tmp_cps_puf_broad_relationship_entity_fix_20260329.h5`
+  - direct PE-native broad scoring under `policyengine-us-data` showed:
+    - candidate loss `0.9386384097643049`
+    - same kept-target surface as before (`2817` = `641` national + `2176` state)
+  - comparison to the saved pre-fix `cps+puf` broad artifact (`20260329T210540Z-057066af`):
+    - pre-fix candidate loss `0.9369853544124408`
+    - post-fix candidate loss `0.9386384097643049`
+    - change `+0.0016530553518641` (slightly worse)
+  - interpretation:
+    - the relationship/head repair and confirmed person-native IRS semantic fixes corrected real structural bugs
+    - but on this saved `cps+puf` broad candidate they did not improve the mission metric
+    - broad PE-native loss is still dominated by seams outside this export-structure fix, especially the already-identified `national_irs_other`, `state_agi_distribution`, and `state_age_distribution` families

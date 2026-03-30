@@ -6,8 +6,10 @@ import pandas as pd
 from microplex.core import EntityType
 
 from microplex_us.variables import (
+    ConditionScoreMode,
     DonorMatchStrategy,
     ProjectionAggregation,
+    VariableSupportFamily,
     add_dividend_composition_features,
     donor_imputation_block_specs,
     donor_imputation_blocks,
@@ -122,12 +124,20 @@ def test_donor_imputation_block_specs_include_match_strategies_and_restored_vari
         specs[0].strategy_for("dividend_income")
         is DonorMatchStrategy.ZERO_INFLATED_POSITIVE
     )
-    assert specs[0].native_entity is EntityType.TAX_UNIT
-    assert specs[0].condition_entities == (EntityType.HOUSEHOLD, EntityType.TAX_UNIT)
+    assert specs[0].native_entity is EntityType.PERSON
+    assert specs[0].condition_entities == (
+        EntityType.PERSON,
+        EntityType.HOUSEHOLD,
+        EntityType.TAX_UNIT,
+    )
     assert specs[0].strategy_for("qualified_dividend_share") is DonorMatchStrategy.RANK
     assert specs[1].model_variables == ("taxable_interest_income",)
-    assert specs[1].native_entity is EntityType.TAX_UNIT
-    assert specs[1].condition_entities == (EntityType.HOUSEHOLD, EntityType.TAX_UNIT)
+    assert specs[1].native_entity is EntityType.PERSON
+    assert specs[1].condition_entities == (
+        EntityType.PERSON,
+        EntityType.HOUSEHOLD,
+        EntityType.TAX_UNIT,
+    )
     assert (
         specs[1].strategy_for("taxable_interest_income")
         is DonorMatchStrategy.ZERO_INFLATED_POSITIVE
@@ -151,6 +161,7 @@ def test_condition_var_compatibility_allows_household_controls_for_tax_unit_targ
 
 def test_resolve_condition_entities_uses_variable_family_policy():
     assert resolve_condition_entities_for_targets(("taxable_interest_income",)) == (
+        EntityType.PERSON,
         EntityType.HOUSEHOLD,
         EntityType.TAX_UNIT,
     )
@@ -162,7 +173,7 @@ def test_resolve_condition_entities_uses_variable_family_policy():
 
 
 def test_condition_var_compatibility_with_targets_distinguishes_asset_and_labor_tax_vars():
-    assert not is_condition_var_compatible_with_targets(
+    assert is_condition_var_compatible_with_targets(
         "age",
         target_variables=("taxable_interest_income",),
     )
@@ -217,3 +228,36 @@ def test_variable_semantics_define_projection_aggregation_for_person_controls():
         variable_semantic_spec_for("income").projection_aggregation
         is ProjectionAggregation.SUM
     )
+
+
+def test_state_program_proxy_semantics_are_registered():
+    from microplex_us.variables import variable_semantic_spec_for
+
+    has_medicaid = variable_semantic_spec_for("has_medicaid")
+    assert has_medicaid.support_family is VariableSupportFamily.ZERO_INFLATED_POSITIVE
+    assert has_medicaid.donor_match_strategy is DonorMatchStrategy.ZERO_INFLATED_POSITIVE
+    assert has_medicaid.condition_score_mode is ConditionScoreMode.VALUE_AND_SUPPORT
+    assert has_medicaid.projection_aggregation is ProjectionAggregation.MAX
+
+    for variable_name in ("public_assistance", "ssi", "social_security"):
+        spec = variable_semantic_spec_for(variable_name)
+        assert spec.support_family is VariableSupportFamily.ZERO_INFLATED_POSITIVE
+        assert spec.donor_match_strategy is DonorMatchStrategy.ZERO_INFLATED_POSITIVE
+
+
+def test_person_native_irs_semantics_match_current_policyengine_entities():
+    from microplex_us.variables import variable_semantic_spec_for
+
+    for variable_name in (
+        "dividend_income",
+        "ordinary_dividend_income",
+        "qualified_dividend_income",
+        "non_qualified_dividend_income",
+        "taxable_interest_income",
+        "tax_exempt_interest_income",
+        "taxable_pension_income",
+        "taxable_social_security",
+        "student_loan_interest",
+        "self_employment_income",
+    ):
+        assert variable_semantic_spec_for(variable_name).native_entity is EntityType.PERSON

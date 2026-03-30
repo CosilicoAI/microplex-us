@@ -10,10 +10,16 @@ from pathlib import Path
 from typing import Any
 
 from microplex.core import SourceProvider, SourceQuery
-from microplex.targets import TargetProvider
+from microplex.targets import (
+    TargetProvider,
+    assert_valid_benchmark_artifact_manifest,
+)
 
 from microplex_us.pipelines.index_db import (
     append_us_microplex_run_index_entry,
+)
+from microplex_us.pipelines.pe_native_scores import (
+    compute_us_pe_native_scores,
 )
 from microplex_us.pipelines.registry import (
     FrontierMetric,
@@ -55,6 +61,7 @@ class USMicroplexArtifactPaths:
     synthesizer: Path | None = None
     policyengine_dataset: Path | None = None
     policyengine_harness: Path | None = None
+    policyengine_native_scores: Path | None = None
     run_registry: Path | None = None
     run_index_db: Path | None = None
 
@@ -81,6 +88,12 @@ def save_us_microplex_artifacts(
         tuple[PolicyEngineUSHarnessSlice, ...] | list[PolicyEngineUSHarnessSlice] | None
     ) = None,
     policyengine_harness_metadata: dict[str, Any] | None = None,
+    policyengine_us_data_repo: str | Path | None = None,
+    defer_policyengine_harness: bool = False,
+    require_policyengine_native_score: bool = False,
+    defer_policyengine_native_score: bool = False,
+    precomputed_policyengine_harness_payload: dict[str, Any] | None = None,
+    precomputed_policyengine_native_scores: dict[str, Any] | None = None,
     run_registry_path: str | Path | None = None,
     run_index_path: str | Path | None = None,
     run_registry_metadata: dict[str, Any] | None = None,
@@ -99,6 +112,7 @@ def save_us_microplex_artifacts(
         output_dir / "policyengine_us.h5" if result.policyengine_tables is not None else None
     )
     policyengine_harness_path = None
+    policyengine_native_scores_path = None
     resolved_run_registry_path = None
     resolved_run_index_path = None
     harness_payload = None
@@ -143,8 +157,21 @@ def save_us_microplex_artifacts(
     )
 
     harness_summary = None
-    if (
-        result.policyengine_tables is not None
+    native_scores_payload = (
+        dict(precomputed_policyengine_native_scores)
+        if precomputed_policyengine_native_scores is not None
+        else None
+    )
+    if precomputed_policyengine_harness_payload is not None:
+        harness_payload = dict(precomputed_policyengine_harness_payload)
+        policyengine_harness_path = output_dir / "policyengine_harness.json"
+        policyengine_harness_path.write_text(
+            json.dumps(harness_payload, indent=2, sort_keys=True)
+        )
+        harness_summary = harness_payload.get("summary")
+    elif (
+        not defer_policyengine_harness
+        and result.policyengine_tables is not None
         and resolved_target_provider is not None
         and resolved_baseline_dataset is not None
         and resolved_harness_slices
@@ -166,6 +193,33 @@ def save_us_microplex_artifacts(
         harness_run.save(policyengine_harness_path)
         harness_payload = harness_run.to_dict()
         harness_summary = harness_payload["summary"]
+
+    if native_scores_payload is not None:
+        policyengine_native_scores_path = output_dir / "policyengine_native_scores.json"
+        policyengine_native_scores_path.write_text(
+            json.dumps(native_scores_payload, indent=2, sort_keys=True)
+        )
+    elif (
+        not defer_policyengine_native_score
+        and policyengine_dataset_path is not None
+        and resolved_baseline_dataset is not None
+    ):
+        try:
+            native_scores_payload = compute_us_pe_native_scores(
+                candidate_dataset_path=policyengine_dataset_path,
+                baseline_dataset_path=resolved_baseline_dataset,
+                period=result.config.policyengine_dataset_year or 2024,
+                policyengine_us_data_repo=policyengine_us_data_repo,
+            )
+            policyengine_native_scores_path = (
+                output_dir / "policyengine_native_scores.json"
+            )
+            policyengine_native_scores_path.write_text(
+                json.dumps(native_scores_payload, indent=2, sort_keys=True)
+            )
+        except Exception:
+            if require_policyengine_native_score:
+                raise
 
     manifest = {
         "created_at": datetime.now(UTC).isoformat(),
@@ -197,11 +251,48 @@ def save_us_microplex_artifacts(
             "policyengine_harness": (
                 policyengine_harness_path.name if policyengine_harness_path else None
             ),
+            "policyengine_native_scores": (
+                policyengine_native_scores_path.name
+                if policyengine_native_scores_path is not None
+                else None
+            ),
         },
     }
     if harness_summary is not None:
         manifest["policyengine_harness"] = harness_summary
-    if harness_summary is not None:
+    if native_scores_payload is not None:
+        manifest["policyengine_native_scores"] = dict(
+            native_scores_payload.get("summary", {})
+        )
+    assert_valid_benchmark_artifact_manifest(
+        manifest,
+        artifact_dir=output_dir,
+        manifest_path=manifest_path,
+        summary_section=(
+            "policyengine_harness" if harness_summary is not None else None
+        ),
+        required_artifact_keys=(
+            "seed_data",
+            "synthetic_data",
+            "calibrated_data",
+            "targets",
+            *(
+                ("policyengine_native_scores",)
+                if native_scores_payload is not None
+                else ()
+            ),
+        ),
+        required_summary_keys=(
+            (
+                "candidate_mean_abs_relative_error",
+                "baseline_mean_abs_relative_error",
+                "mean_abs_relative_error_delta",
+            )
+            if harness_summary is not None
+            else ()
+        ),
+    )
+    if harness_summary is not None or native_scores_payload is not None:
         resolved_run_registry_path = Path(run_registry_path or output_dir.parent / "run_registry.jsonl")
         run_entry = build_us_microplex_run_registry_entry(
             artifact_dir=output_dir,
@@ -226,7 +317,12 @@ def save_us_microplex_artifacts(
             "improved_candidate_frontier": recorded_entry.improved_candidate_frontier,
             "improved_delta_frontier": recorded_entry.improved_delta_frontier,
             "improved_composite_frontier": recorded_entry.improved_composite_frontier,
-            "default_frontier_metric": "candidate_composite_parity_loss",
+            "improved_native_frontier": recorded_entry.improved_native_frontier,
+            "default_frontier_metric": (
+                "enhanced_cps_native_loss_delta"
+                if native_scores_payload is not None
+                else "candidate_composite_parity_loss"
+            ),
         }
         manifest["run_index"] = {
             "path": str(resolved_run_index_path),
@@ -245,6 +341,7 @@ def save_us_microplex_artifacts(
         synthesizer=synthesizer_path,
         policyengine_dataset=policyengine_dataset_path,
         policyengine_harness=policyengine_harness_path,
+        policyengine_native_scores=policyengine_native_scores_path,
         run_registry=resolved_run_registry_path,
         run_index_db=resolved_run_index_path,
     )
@@ -262,6 +359,12 @@ def save_versioned_us_microplex_artifacts(
         tuple[PolicyEngineUSHarnessSlice, ...] | list[PolicyEngineUSHarnessSlice] | None
     ) = None,
     policyengine_harness_metadata: dict[str, Any] | None = None,
+    policyengine_us_data_repo: str | Path | None = None,
+    defer_policyengine_harness: bool = False,
+    require_policyengine_native_score: bool = False,
+    defer_policyengine_native_score: bool = False,
+    precomputed_policyengine_harness_payload: dict[str, Any] | None = None,
+    precomputed_policyengine_native_scores: dict[str, Any] | None = None,
     run_registry_path: str | Path | None = None,
     run_index_path: str | Path | None = None,
     run_registry_metadata: dict[str, Any] | None = None,
@@ -282,6 +385,12 @@ def save_versioned_us_microplex_artifacts(
         policyengine_baseline_dataset=policyengine_baseline_dataset,
         policyengine_harness_slices=policyengine_harness_slices,
         policyengine_harness_metadata=policyengine_harness_metadata,
+        policyengine_us_data_repo=policyengine_us_data_repo,
+        defer_policyengine_harness=defer_policyengine_harness,
+        require_policyengine_native_score=require_policyengine_native_score,
+        defer_policyengine_native_score=defer_policyengine_native_score,
+        precomputed_policyengine_harness_payload=precomputed_policyengine_harness_payload,
+        precomputed_policyengine_native_scores=precomputed_policyengine_native_scores,
         run_registry_path=run_registry_path or output_root / "run_registry.jsonl",
         run_index_path=run_index_path or output_root,
         run_registry_metadata=run_registry_metadata,
@@ -297,6 +406,7 @@ def save_versioned_us_microplex_artifacts(
         synthesizer=paths.synthesizer,
         policyengine_dataset=paths.policyengine_dataset,
         policyengine_harness=paths.policyengine_harness,
+        policyengine_native_scores=paths.policyengine_native_scores,
         run_registry=paths.run_registry,
         run_index_db=paths.run_index_db,
     )
@@ -317,6 +427,12 @@ def build_and_save_versioned_us_microplex(
         tuple[PolicyEngineUSHarnessSlice, ...] | list[PolicyEngineUSHarnessSlice] | None
     ) = None,
     policyengine_harness_metadata: dict[str, Any] | None = None,
+    policyengine_us_data_repo: str | Path | None = None,
+    defer_policyengine_harness: bool = False,
+    require_policyengine_native_score: bool = False,
+    defer_policyengine_native_score: bool = False,
+    precomputed_policyengine_harness_payload: dict[str, Any] | None = None,
+    precomputed_policyengine_native_scores: dict[str, Any] | None = None,
     run_registry_path: str | Path | None = None,
     run_index_path: str | Path | None = None,
     run_registry_metadata: dict[str, Any] | None = None,
@@ -333,6 +449,12 @@ def build_and_save_versioned_us_microplex(
         policyengine_baseline_dataset=policyengine_baseline_dataset,
         policyengine_harness_slices=policyengine_harness_slices,
         policyengine_harness_metadata=policyengine_harness_metadata,
+        policyengine_us_data_repo=policyengine_us_data_repo,
+        defer_policyengine_harness=defer_policyengine_harness,
+        require_policyengine_native_score=require_policyengine_native_score,
+        defer_policyengine_native_score=defer_policyengine_native_score,
+        precomputed_policyengine_harness_payload=precomputed_policyengine_harness_payload,
+        precomputed_policyengine_native_scores=precomputed_policyengine_native_scores,
         run_registry_path=run_registry_path,
         run_index_path=run_index_path,
         run_registry_metadata=run_registry_metadata,
@@ -352,6 +474,12 @@ def save_versioned_us_microplex_build_result(
         tuple[PolicyEngineUSHarnessSlice, ...] | list[PolicyEngineUSHarnessSlice] | None
     ) = None,
     policyengine_harness_metadata: dict[str, Any] | None = None,
+    policyengine_us_data_repo: str | Path | None = None,
+    defer_policyengine_harness: bool = False,
+    require_policyengine_native_score: bool = False,
+    defer_policyengine_native_score: bool = False,
+    precomputed_policyengine_harness_payload: dict[str, Any] | None = None,
+    precomputed_policyengine_native_scores: dict[str, Any] | None = None,
     run_registry_path: str | Path | None = None,
     run_index_path: str | Path | None = None,
     run_registry_metadata: dict[str, Any] | None = None,
@@ -367,6 +495,12 @@ def save_versioned_us_microplex_build_result(
         policyengine_baseline_dataset=policyengine_baseline_dataset,
         policyengine_harness_slices=policyengine_harness_slices,
         policyengine_harness_metadata=policyengine_harness_metadata,
+        policyengine_us_data_repo=policyengine_us_data_repo,
+        defer_policyengine_harness=defer_policyengine_harness,
+        require_policyengine_native_score=require_policyengine_native_score,
+        defer_policyengine_native_score=defer_policyengine_native_score,
+        precomputed_policyengine_harness_payload=precomputed_policyengine_harness_payload,
+        precomputed_policyengine_native_scores=precomputed_policyengine_native_scores,
         run_registry_path=run_registry_path,
         run_index_path=run_index_path,
         run_registry_metadata=run_registry_metadata,
@@ -388,6 +522,12 @@ def build_and_save_versioned_us_microplex_from_source_provider(
         tuple[PolicyEngineUSHarnessSlice, ...] | list[PolicyEngineUSHarnessSlice] | None
     ) = None,
     policyengine_harness_metadata: dict[str, Any] | None = None,
+    policyengine_us_data_repo: str | Path | None = None,
+    defer_policyengine_harness: bool = False,
+    require_policyengine_native_score: bool = False,
+    defer_policyengine_native_score: bool = False,
+    precomputed_policyengine_harness_payload: dict[str, Any] | None = None,
+    precomputed_policyengine_native_scores: dict[str, Any] | None = None,
     run_registry_path: str | Path | None = None,
     run_index_path: str | Path | None = None,
     run_registry_metadata: dict[str, Any] | None = None,
@@ -405,6 +545,12 @@ def build_and_save_versioned_us_microplex_from_source_provider(
         policyengine_baseline_dataset=policyengine_baseline_dataset,
         policyengine_harness_slices=policyengine_harness_slices,
         policyengine_harness_metadata=policyengine_harness_metadata,
+        policyengine_us_data_repo=policyengine_us_data_repo,
+        defer_policyengine_harness=defer_policyengine_harness,
+        require_policyengine_native_score=require_policyengine_native_score,
+        defer_policyengine_native_score=defer_policyengine_native_score,
+        precomputed_policyengine_harness_payload=precomputed_policyengine_harness_payload,
+        precomputed_policyengine_native_scores=precomputed_policyengine_native_scores,
         run_registry_path=run_registry_path,
         run_index_path=run_index_path,
         run_registry_metadata=run_registry_metadata,
@@ -426,6 +572,12 @@ def build_and_save_versioned_us_microplex_from_source_providers(
         tuple[PolicyEngineUSHarnessSlice, ...] | list[PolicyEngineUSHarnessSlice] | None
     ) = None,
     policyengine_harness_metadata: dict[str, Any] | None = None,
+    policyengine_us_data_repo: str | Path | None = None,
+    defer_policyengine_harness: bool = False,
+    require_policyengine_native_score: bool = False,
+    defer_policyengine_native_score: bool = False,
+    precomputed_policyengine_harness_payload: dict[str, Any] | None = None,
+    precomputed_policyengine_native_scores: dict[str, Any] | None = None,
     run_registry_path: str | Path | None = None,
     run_index_path: str | Path | None = None,
     run_registry_metadata: dict[str, Any] | None = None,
@@ -443,6 +595,12 @@ def build_and_save_versioned_us_microplex_from_source_providers(
         policyengine_baseline_dataset=policyengine_baseline_dataset,
         policyengine_harness_slices=policyengine_harness_slices,
         policyengine_harness_metadata=policyengine_harness_metadata,
+        policyengine_us_data_repo=policyengine_us_data_repo,
+        defer_policyengine_harness=defer_policyengine_harness,
+        require_policyengine_native_score=require_policyengine_native_score,
+        defer_policyengine_native_score=defer_policyengine_native_score,
+        precomputed_policyengine_harness_payload=precomputed_policyengine_harness_payload,
+        precomputed_policyengine_native_scores=precomputed_policyengine_native_scores,
         run_registry_path=run_registry_path,
         run_index_path=run_index_path,
         run_registry_metadata=run_registry_metadata,
@@ -463,6 +621,12 @@ def build_and_save_versioned_us_microplex_from_data_dir(
         tuple[PolicyEngineUSHarnessSlice, ...] | list[PolicyEngineUSHarnessSlice] | None
     ) = None,
     policyengine_harness_metadata: dict[str, Any] | None = None,
+    policyengine_us_data_repo: str | Path | None = None,
+    defer_policyengine_harness: bool = False,
+    require_policyengine_native_score: bool = False,
+    defer_policyengine_native_score: bool = False,
+    precomputed_policyengine_harness_payload: dict[str, Any] | None = None,
+    precomputed_policyengine_native_scores: dict[str, Any] | None = None,
     run_registry_path: str | Path | None = None,
     run_index_path: str | Path | None = None,
     run_registry_metadata: dict[str, Any] | None = None,
@@ -480,6 +644,12 @@ def build_and_save_versioned_us_microplex_from_data_dir(
         policyengine_baseline_dataset=policyengine_baseline_dataset,
         policyengine_harness_slices=policyengine_harness_slices,
         policyengine_harness_metadata=policyengine_harness_metadata,
+        policyengine_us_data_repo=policyengine_us_data_repo,
+        defer_policyengine_harness=defer_policyengine_harness,
+        require_policyengine_native_score=require_policyengine_native_score,
+        defer_policyengine_native_score=defer_policyengine_native_score,
+        precomputed_policyengine_harness_payload=precomputed_policyengine_harness_payload,
+        precomputed_policyengine_native_scores=precomputed_policyengine_native_scores,
         run_registry_path=run_registry_path,
         run_index_path=run_index_path,
         run_registry_metadata=run_registry_metadata,
@@ -499,6 +669,12 @@ def _finalize_versioned_build_artifacts(
         tuple[PolicyEngineUSHarnessSlice, ...] | list[PolicyEngineUSHarnessSlice] | None
     ),
     policyengine_harness_metadata: dict[str, Any] | None,
+    policyengine_us_data_repo: str | Path | None,
+    defer_policyengine_harness: bool,
+    require_policyengine_native_score: bool,
+    defer_policyengine_native_score: bool,
+    precomputed_policyengine_harness_payload: dict[str, Any] | None,
+    precomputed_policyengine_native_scores: dict[str, Any] | None,
     run_registry_path: str | Path | None,
     run_index_path: str | Path | None,
     run_registry_metadata: dict[str, Any] | None,
@@ -512,6 +688,12 @@ def _finalize_versioned_build_artifacts(
         policyengine_baseline_dataset=policyengine_baseline_dataset,
         policyengine_harness_slices=policyengine_harness_slices,
         policyengine_harness_metadata=policyengine_harness_metadata,
+        policyengine_us_data_repo=policyengine_us_data_repo,
+        defer_policyengine_harness=defer_policyengine_harness,
+        require_policyengine_native_score=require_policyengine_native_score,
+        defer_policyengine_native_score=defer_policyengine_native_score,
+        precomputed_policyengine_harness_payload=precomputed_policyengine_harness_payload,
+        precomputed_policyengine_native_scores=precomputed_policyengine_native_scores,
         run_registry_path=run_registry_path,
         run_index_path=run_index_path,
         run_registry_metadata=run_registry_metadata,
@@ -606,6 +788,10 @@ def _resolve_policyengine_harness_context(
         "target_variables": list(result.config.policyengine_target_variables),
         "target_domains": list(result.config.policyengine_target_domains),
         "target_geo_levels": list(result.config.policyengine_target_geo_levels),
+        "target_profile": result.config.policyengine_target_profile,
+        "calibration_target_profile": (
+            result.config.policyengine_calibration_target_profile
+        ),
         "target_reform_id": result.config.policyengine_target_reform_id,
         "harness_slice_names": [slice_spec.name for slice_spec in resolved_harness_slices],
         "policyengine_us_runtime_version": _resolve_policyengine_us_runtime_version(),

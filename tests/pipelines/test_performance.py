@@ -16,6 +16,7 @@ from microplex_us.pipelines.performance import (
     run_us_microplex_performance_harness,
     warm_us_microplex_parity_cache,
 )
+from microplex_us.pipelines.us import USMicroplexBuildConfig
 from microplex_us.policyengine import (
     PolicyEngineUSComparisonCache,
     PolicyEngineUSEntityTableBundle,
@@ -157,6 +158,13 @@ class _FakePipeline:
             pd.DataFrame({"weight": [1.0]}),
             {"backend": "policyengine_db_entropy"},
         )
+
+    def export_policyengine_dataset(self, result, path, *, period=None):
+        _ = result
+        _ = period
+        self._log("export_policyengine_dataset")
+        path.write_text("stub")
+        return path
 
 
 def _patch_fake_harness(
@@ -328,6 +336,56 @@ def test_run_us_microplex_performance_harness_can_keep_exact_calibration_targets
     )
 
 
+def test_run_us_microplex_performance_harness_preserves_target_profiles(monkeypatch):
+    _patch_fake_harness(monkeypatch)
+
+    result = run_us_microplex_performance_harness(
+        providers=[_DummyProvider("cps")],
+        config=USMicroplexPerformanceHarnessConfig(
+            evaluate_parity=False,
+            target_profile="pe_native_broad",
+            calibration_target_profile="pe_native_broad",
+        ),
+    )
+
+    assert result.build_config.policyengine_target_profile == "pe_native_broad"
+    assert result.build_config.policyengine_calibration_target_profile == "pe_native_broad"
+    assert result.build_config.policyengine_target_variables == ()
+    assert result.build_config.policyengine_target_geo_levels == ()
+    assert result.build_config.policyengine_calibration_target_variables == ()
+    assert result.build_config.policyengine_calibration_target_geo_levels == ()
+
+
+def test_run_us_microplex_performance_harness_can_evaluate_native_loss(monkeypatch):
+    _patch_fake_harness(monkeypatch)
+    monkeypatch.setattr(
+        "microplex_us.pipelines.performance.compute_us_pe_native_scores",
+        lambda **kwargs: {
+            "summary": {
+                "candidate_enhanced_cps_native_loss": 0.2,
+                "baseline_enhanced_cps_native_loss": 0.3,
+                "enhanced_cps_native_loss_delta": -0.1,
+            },
+            "kwargs": kwargs,
+        },
+    )
+
+    result = run_us_microplex_performance_harness(
+        providers=[_DummyProvider("cps")],
+        config=USMicroplexPerformanceHarnessConfig(
+            evaluate_parity=False,
+            evaluate_pe_native_loss=True,
+            baseline_dataset="/tmp/enhanced_cps.h5",
+            policyengine_us_data_repo="/tmp/policyengine-us-data",
+        ),
+    )
+
+    assert result.candidate_enhanced_cps_native_loss == 0.2
+    assert result.baseline_enhanced_cps_native_loss == 0.3
+    assert result.enhanced_cps_native_loss_delta == -0.1
+    assert "evaluate_pe_native_loss" in result.stage_timings
+
+
 def test_warm_us_microplex_parity_cache_preloads_baseline(monkeypatch):
     cache = PolicyEngineUSComparisonCache()
     load_target_set_calls: list[tuple[int, tuple[str, ...] | None]] = []
@@ -380,6 +438,65 @@ def test_warm_us_microplex_parity_cache_preloads_baseline(monkeypatch):
     assert load_target_set_calls == [(2024, None)]
     assert baseline_calls
     assert baseline_calls[0]["baseline_dataset"] == "/tmp/enhanced_cps.h5"
+
+
+def test_warm_us_microplex_parity_cache_uses_resolved_scope_for_named_profile(monkeypatch):
+    cache = PolicyEngineUSComparisonCache()
+    slice_kwargs: dict[str, object] = {}
+    baseline_calls: list[dict[str, object]] = []
+
+    class FakeProvider:
+        def load_target_set(self, query=None):
+            period = query.period if query is not None else 2024
+            return TargetSet(
+                [
+                    TargetSpec(
+                        name="policyengine_us_target_1",
+                        entity=EntityType.HOUSEHOLD,
+                        value=1.0,
+                        period=period,
+                        aggregation="count",
+                    )
+                ]
+            )
+
+    monkeypatch.setattr(
+        "microplex_us.pipelines.performance.PolicyEngineUSDBTargetProvider",
+        lambda path: FakeProvider(),
+    )
+    monkeypatch.setattr(
+        "microplex_us.pipelines.performance.default_policyengine_us_db_harness_slices",
+        lambda **kwargs: slice_kwargs.update(kwargs)
+        or (
+            SimpleNamespace(
+                name="all_targets",
+                query=TargetQuery(period=kwargs["period"]),
+            ),
+        ),
+    )
+    monkeypatch.setattr(
+        "microplex_us.pipelines.performance.PolicyEngineUSComparisonCache.load_baseline_report",
+        lambda self, **kwargs: baseline_calls.append(kwargs) or SimpleNamespace(),
+    )
+
+    warm_us_microplex_parity_cache(
+        config=USMicroplexPerformanceHarnessConfig(
+            targets_db="/tmp/policy_data.db",
+            baseline_dataset="/tmp/enhanced_cps.h5",
+            target_profile="pe_native_broad",
+            calibration_target_profile="pe_native_broad",
+            build_config=USMicroplexBuildConfig(
+                policyengine_target_profile="pe_native_broad",
+                policyengine_calibration_target_profile="pe_native_broad",
+            ),
+        ),
+        comparison_cache=cache,
+    )
+
+    assert slice_kwargs["variables"] == ()
+    assert slice_kwargs["domain_variables"] == ()
+    assert slice_kwargs["geo_levels"] == ()
+    assert baseline_calls
 
 
 def test_us_microplex_performance_session_reuses_comparison_cache(monkeypatch):

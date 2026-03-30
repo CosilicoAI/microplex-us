@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "microplex-us"
-version = "0.1.0"
+version = "0.2.0"
 description = "US-specific adapters, pipelines, and PolicyEngine integration for microplex"
 readme = "README.md"
 license = "MIT"
@@ -29,8 +29,17 @@ policyengine = [
 [project.urls]
 Repository = "https://github.com/CosilicoAI/microplex-us"
 
+[project.scripts]
+microplex-us-backfill-pe-native-scores = "microplex_us.pipelines.backfill_pe_native_scores:main"
+microplex-us-check-site-snapshot = "microplex_us.pipelines.check_site_snapshot:main"
+microplex-us-score-pe-native-loss = "microplex_us.pipelines.pe_native_scores:main"
+microplex-us-version-bump-benchmark = "microplex_us.pipelines.version_benchmark:main"
+
 [tool.hatch.build.targets.wheel]
 packages = ["src/microplex_us"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"src/microplex_us/pipelines/pe_native_scores.py" = "microplex_us/pipelines/pe_native_scores.py"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

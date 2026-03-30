@@ -15,7 +15,9 @@ from microplex_us.pipelines.experiments import (
     USMicroplexExperimentReport,
     USMicroplexExperimentResult,
     USMicroplexSourceExperimentSpec,
+    build_us_n_synthetic_sweep_experiments,
     default_us_source_mix_experiments,
+    run_us_microplex_n_synthetic_sweep,
     run_us_microplex_source_experiments,
 )
 from microplex_us.pipelines.index_db import (
@@ -25,6 +27,20 @@ from microplex_us.pipelines.index_db import (
     rebuild_us_microplex_run_index,
     resolve_us_microplex_run_index_path,
     select_us_microplex_frontier_index_row,
+)
+from microplex_us.pipelines.local_reweighting import (
+    USHouseholdTargetReweightingResult,
+    reweight_us_household_targets,
+)
+from microplex_us.pipelines.pe_native_scores import (
+    PolicyEngineUSEnhancedCPSNativeScores,
+    compute_batch_us_pe_native_scores,
+    compute_policyengine_us_enhanced_cps_native_scores,
+    compute_us_pe_native_scores,
+    resolve_policyengine_us_data_python,
+    resolve_policyengine_us_data_repo_root,
+    score_policyengine_us_native_broad_loss,
+    write_us_pe_native_scores,
 )
 from microplex_us.pipelines.performance import (
     USMicroplexPerformanceHarnessConfig,
@@ -42,6 +58,10 @@ from microplex_us.pipelines.registry import (
     resolve_us_microplex_frontier_artifact_dir,
     select_us_microplex_frontier_entry,
 )
+from microplex_us.pipelines.site_snapshot import (
+    build_us_microplex_site_snapshot,
+    write_us_microplex_site_snapshot,
+)
 from microplex_us.pipelines.us import (
     USMicroplexBuildConfig,
     USMicroplexBuildResult,
@@ -58,17 +78,21 @@ __all__ = [
     "USMicroplexExperimentReport",
     "USMicroplexExperimentResult",
     "USMicroplexSourceExperimentSpec",
+    "build_us_n_synthetic_sweep_experiments",
     "USMicroplexPerformanceHarnessConfig",
     "USMicroplexPerformanceHarnessResult",
     "USMicroplexPerformanceSession",
+    "USHouseholdTargetReweightingResult",
     "default_us_source_mix_experiments",
     "build_and_save_versioned_us_microplex",
     "build_and_save_versioned_us_microplex_from_data_dir",
     "build_and_save_versioned_us_microplex_from_source_provider",
     "build_and_save_versioned_us_microplex_from_source_providers",
     "save_versioned_us_microplex_build_result",
+    "reweight_us_household_targets",
     "run_us_microplex_performance_harness",
     "warm_us_microplex_parity_cache",
+    "run_us_microplex_n_synthetic_sweep",
     "run_us_microplex_source_experiments",
     "list_us_microplex_target_delta_rows",
     "save_us_microplex_artifacts",
@@ -79,10 +103,20 @@ __all__ = [
     "USMicroplexRunRegistryEntry",
     "append_us_microplex_run_registry_entry",
     "build_us_microplex_run_registry_entry",
+    "PolicyEngineUSEnhancedCPSNativeScores",
+    "compute_batch_us_pe_native_scores",
+    "compute_policyengine_us_enhanced_cps_native_scores",
+    "compute_us_pe_native_scores",
     "load_us_microplex_run_registry",
+    "resolve_policyengine_us_data_python",
+    "resolve_policyengine_us_data_repo_root",
     "resolve_us_microplex_frontier_artifact_dir",
+    "score_policyengine_us_native_broad_loss",
     "select_us_microplex_frontier_index_row",
     "select_us_microplex_frontier_entry",
+    "build_us_microplex_site_snapshot",
+    "write_us_pe_native_scores",
+    "write_us_microplex_site_snapshot",
     "USMicroplexBuildConfig",
     "USMicroplexBuildResult",
     "USMicroplexPipeline",
