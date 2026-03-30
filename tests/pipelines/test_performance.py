@@ -385,6 +385,45 @@ def test_calibration_cache_key_includes_iteration_and_tolerance_settings():
     )
 
 
+def test_calibration_cache_key_includes_household_budget_selection():
+    base = USMicroplexBuildConfig(
+        calibration_backend="entropy",
+        policyengine_selection_household_budget=None,
+    )
+    updated = USMicroplexBuildConfig(
+        calibration_backend="entropy",
+        policyengine_selection_household_budget=29_999,
+    )
+
+    assert _precalibration_build_config_key(base) == _precalibration_build_config_key(
+        updated
+    )
+    assert _calibration_build_config_key(base) != _calibration_build_config_key(
+        updated
+    )
+
+
+def test_run_us_microplex_performance_harness_allows_full_source_queries(monkeypatch):
+    captured_queries: list[dict[str, object]] = []
+    _patch_fake_harness(monkeypatch)
+
+    class CapturingProvider(_DummyProvider):
+        def load_frame(self, query=None):
+            provider_filters = dict(getattr(query, "provider_filters", {}) or {})
+            captured_queries.append(provider_filters)
+            return super().load_frame(query)
+
+    run_us_microplex_performance_harness(
+        providers=[CapturingProvider("cps")],
+        config=USMicroplexPerformanceHarnessConfig(
+            sample_n=None,
+            evaluate_parity=False,
+        ),
+    )
+
+    assert captured_queries == [{"sample_n": None, "random_seed": 42}]
+
+
 def test_run_us_microplex_performance_harness_can_evaluate_native_loss(monkeypatch):
     _patch_fake_harness(monkeypatch)
     monkeypatch.setattr(

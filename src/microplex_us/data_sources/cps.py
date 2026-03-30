@@ -366,12 +366,23 @@ def _sample_households_and_persons(
         )
         if candidate_weights.sum() > 0.0 and int((candidate_weights > 0.0).sum()) >= sample_n:
             sample_weights = candidate_weights
-    sampled_households = households.sample(
-        n=sample_n,
-        random_state=random_seed,
-        replace=False,
-        weights=sample_weights,
-    ).copy()
+    try:
+        sampled_households = households.sample(
+            n=sample_n,
+            random_state=random_seed,
+            replace=False,
+            weights=sample_weights,
+        ).copy()
+    except ValueError:
+        # Pandas can reject weighted sampling without replacement at large n
+        # even when the positive-weight count looks sufficient. Fall back to
+        # deterministic uniform sampling rather than failing the whole build.
+        sampled_households = households.sample(
+            n=sample_n,
+            random_state=random_seed,
+            replace=False,
+            weights=None,
+        ).copy()
     sampled_keys = set(sampled_households["household_id"])
     sampled_persons = persons[persons["household_id"].isin(sampled_keys)].copy()
     if household_sort_columns:

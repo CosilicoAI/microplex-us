@@ -71,7 +71,7 @@ def default_fast_calibration_target_variables(
 class USMicroplexPerformanceHarnessConfig:
     """Configuration for a repeatable local optimization harness."""
 
-    sample_n: int = 100
+    sample_n: int | None = 100
     n_synthetic: int = 100
     random_seed: int = 42
     targets_db: str | Path | None = None
@@ -231,6 +231,7 @@ PRECALIBRATION_EXCLUDED_BUILD_CONFIG_FIELDS = frozenset(
         "policyengine_calibration_target_variables",
         "policyengine_calibration_target_domains",
         "policyengine_calibration_target_geo_levels",
+        "policyengine_selection_household_budget",
         "policyengine_target_reform_id",
         "policyengine_simulation_cls",
     }
@@ -251,6 +252,7 @@ CALIBRATION_INCLUDED_BUILD_CONFIG_FIELDS = frozenset(
         "policyengine_calibration_target_variables",
         "policyengine_calibration_target_domains",
         "policyengine_calibration_target_geo_levels",
+        "policyengine_selection_household_budget",
         "policyengine_target_reform_id",
         "policyengine_simulation_cls",
         "policyengine_dataset_year",

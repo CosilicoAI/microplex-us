@@ -9,6 +9,7 @@ from microplex.core import EntityType, SourceArchetype, SourceProvider, SourceQu
 from microplex_us.data_sources import CPSASECParquetSourceProvider
 from microplex_us.data_sources.cps import (
     CPSASECSourceProvider,
+    _sample_households_and_persons,
     load_cps_asec,
     processed_cps_asec_cache_path,
 )
@@ -384,3 +385,47 @@ def test_load_cps_asec_rebuilds_stale_processed_cache_without_pe_presim_inputs(t
     assert dataset.persons["other_medical_expenses"].to_list() == [450, 0, 0]
     assert dataset.persons["over_the_counter_health_expenses"].to_list() == [120, 0, 0]
     assert dataset.persons["medicare_part_b_premiums"].to_list() == [600, 0, 0]
+
+
+def test_cps_sampling_falls_back_to_uniform_when_weighted_sampling_is_infeasible(
+    monkeypatch,
+):
+    households = pd.DataFrame(
+        {
+            "household_id": [1, 2, 3],
+            "year": [2023, 2023, 2023],
+            "household_weight": [10.0, 20.0, 30.0],
+        }
+    )
+    persons = pd.DataFrame(
+        {
+            "household_id": [1, 2, 3],
+            "person_id": ["1:1", "2:1", "3:1"],
+            "person_number": [1, 1, 1],
+            "year": [2023, 2023, 2023],
+        }
+    )
+
+    original_sample = pd.DataFrame.sample
+
+    def flaky_sample(self, *args, **kwargs):
+        if kwargs.get("weights") is not None:
+            raise ValueError(
+                "Weighted sampling cannot be achieved with replace=False."
+            )
+        return original_sample(self, *args, **kwargs)
+
+    monkeypatch.setattr(pd.DataFrame, "sample", flaky_sample)
+
+    sampled_households, sampled_persons = _sample_households_and_persons(
+        households=households,
+        persons=persons,
+        sample_n=2,
+        random_seed=42,
+    )
+
+    assert len(sampled_households) == 2
+    assert len(sampled_persons) == 2
+    assert set(sampled_persons["household_id"]) == set(
+        sampled_households["household_id"]
+    )

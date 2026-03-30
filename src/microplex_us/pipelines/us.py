@@ -15,6 +15,7 @@ import pandas as pd
 from microplex.calibration import (
     Calibrator,
     HardConcreteCalibrator,
+    LinearConstraint,
     SparseCalibrator,
 )
 from microplex.core import (
@@ -334,6 +335,63 @@ def _state_program_support_proxy_summary(available_columns: set[str]) -> dict[st
     }
 
 
+def _subset_policyengine_linear_constraints(
+    constraints: tuple[LinearConstraint, ...] | list[LinearConstraint],
+    household_mask: np.ndarray,
+) -> tuple[LinearConstraint, ...]:
+    mask = np.asarray(household_mask, dtype=bool)
+    subset: list[LinearConstraint] = []
+    for constraint in constraints:
+        coefficients = np.asarray(constraint.coefficients, dtype=float)
+        if len(coefficients) != len(mask):
+            raise ValueError(
+                "PolicyEngine linear constraint coefficients do not match household mask length"
+            )
+        subset.append(
+            LinearConstraint(
+                name=constraint.name,
+                coefficients=coefficients[mask],
+                target=float(constraint.target),
+            )
+        )
+    return tuple(subset)
+
+
+def _subset_policyengine_tables_by_households(
+    tables: PolicyEngineUSEntityTableBundle,
+    household_ids: pd.Index,
+) -> PolicyEngineUSEntityTableBundle:
+    selected_ids = pd.Index(household_ids, name="household_id")
+    household_order = pd.Series(np.arange(len(selected_ids)), index=selected_ids)
+
+    households = tables.households.loc[
+        tables.households["household_id"].isin(selected_ids)
+    ].copy()
+    households = (
+        households.assign(
+            _household_order=households["household_id"].map(household_order)
+        )
+        .sort_values("_household_order")
+        .drop(columns="_household_order")
+        .reset_index(drop=True)
+    )
+
+    def _subset_related(table: pd.DataFrame | None) -> pd.DataFrame | None:
+        if table is None:
+            return None
+        subset = table.loc[table["household_id"].isin(selected_ids)].copy()
+        return subset.reset_index(drop=True)
+
+    return PolicyEngineUSEntityTableBundle(
+        households=households,
+        persons=_subset_related(tables.persons),
+        tax_units=_subset_related(tables.tax_units),
+        spm_units=_subset_related(tables.spm_units),
+        families=_subset_related(tables.families),
+        marital_units=_subset_related(tables.marital_units),
+    )
+
+
 def _policyengine_target_geo_priority(target: TargetSpec) -> int:
     geo_level = str(target.metadata.get("geo_level", "")).lower()
     return {
@@ -451,7 +509,7 @@ class USMicroplexBuildConfig:
     """Configuration for the US microplex build pipeline."""
 
     n_synthetic: int = 100_000
-    synthesis_backend: Literal["bootstrap", "synthesizer"] = "synthesizer"
+    synthesis_backend: Literal["bootstrap", "synthesizer", "seed"] = "synthesizer"
     calibration_backend: Literal["entropy", "ipf", "chi2", "sparse", "hardconcrete"] = (
         "entropy"
     )
@@ -506,6 +564,7 @@ class USMicroplexBuildConfig:
     policyengine_calibration_target_domains: tuple[str, ...] = ()
     policyengine_calibration_target_geo_levels: tuple[str, ...] = ()
     policyengine_calibration_target_profile: str | None = None
+    policyengine_selection_household_budget: int | None = None
     policyengine_calibration_max_constraints: int | None = None
     policyengine_calibration_max_constraints_per_household: float | None = (
         DEFAULT_POLICYENGINE_CALIBRATION_MAX_CONSTRAINTS_PER_HOUSEHOLD
@@ -1122,7 +1181,12 @@ class USMicroplexPipeline:
         synthesis_variables: USMicroplexSynthesisVariables | None = None,
     ) -> tuple[pd.DataFrame, Synthesizer | None, dict[str, Any]]:
         """Generate synthetic records from the seed data."""
-        initial_weight = float(seed_data["hh_weight"].sum()) / max(self.config.n_synthetic, 1)
+        if "hh_weight" in seed_data.columns:
+            initial_weight = float(seed_data["hh_weight"].sum()) / max(
+                self.config.n_synthetic, 1
+            )
+        else:
+            initial_weight = 1.0
         synthesis_variables = synthesis_variables or USMicroplexSynthesisVariables(
             condition_vars=self._resolve_synthesis_condition_vars(
                 seed_data.columns,
@@ -1134,6 +1198,30 @@ class USMicroplexPipeline:
                 if column in seed_data.columns
             ),
         )
+
+        if self.config.synthesis_backend == "seed":
+            synthetic = seed_data.copy()
+            if "hh_weight" in synthetic.columns and "weight" not in synthetic.columns:
+                synthetic["weight"] = (
+                    pd.to_numeric(synthetic["hh_weight"], errors="coerce")
+                    .fillna(initial_weight)
+                    .astype(float)
+                )
+            synthetic = self._finalize_synthetic_population(
+                synthetic,
+                initial_weight=float(
+                    pd.to_numeric(
+                        synthetic.get("weight", pd.Series([initial_weight])),
+                        errors="coerce",
+                    )
+                    .fillna(initial_weight)
+                    .mean()
+                ),
+            )
+            return synthetic, None, {
+                "backend": "seed",
+                "n_seed_records": int(len(seed_data)),
+            }
 
         if self.config.synthesis_backend == "bootstrap":
             bootstrap_strata_columns = self._resolve_bootstrap_strata_columns(seed_data)
@@ -1230,6 +1318,95 @@ class USMicroplexPipeline:
             f"Unsupported calibration backend: {self.config.calibration_backend}"
         )
 
+    def _select_policyengine_household_budget(
+        self,
+        tables: PolicyEngineUSEntityTableBundle,
+        supported_targets: list[TargetSpec],
+        constraints: tuple[LinearConstraint, ...],
+    ) -> tuple[
+        PolicyEngineUSEntityTableBundle,
+        list[TargetSpec],
+        tuple[LinearConstraint, ...],
+        dict[str, Any],
+    ]:
+        requested_budget = self.config.policyengine_selection_household_budget
+        household_count = len(tables.households)
+        if requested_budget is None or requested_budget >= household_count:
+            return (
+                tables,
+                supported_targets,
+                constraints,
+                {
+                    "applied": False,
+                    "requested_household_budget": requested_budget,
+                    "input_household_count": household_count,
+                },
+            )
+        if requested_budget <= 0:
+            raise ValueError("policyengine_selection_household_budget must be positive")
+        if not constraints:
+            return (
+                tables,
+                supported_targets,
+                constraints,
+                {
+                    "applied": False,
+                    "requested_household_budget": requested_budget,
+                    "input_household_count": household_count,
+                    "reason": "no_constraints",
+                },
+            )
+
+        target_sparsity = max(0.0, 1.0 - (requested_budget / household_count))
+        selector = SparseCalibrator(
+            target_sparsity=target_sparsity,
+            tol=self.config.calibration_tol,
+            max_iter=max(self.config.calibration_max_iter, 1_000),
+        )
+        selector_result = selector.fit_transform(
+            tables.households.copy(),
+            {},
+            weight_col="household_weight",
+            linear_constraints=constraints,
+        )
+        selector_validation = selector.validate(selector_result)
+        selector_weights = (
+            pd.to_numeric(selector_result["household_weight"], errors="coerce")
+            .fillna(0.0)
+            .to_numpy(dtype=float)
+        )
+        household_ids = tables.households["household_id"].to_numpy(dtype=np.int64)
+        ranking = np.lexsort((household_ids, -selector_weights))
+        selected_positions = np.sort(ranking[:requested_budget])
+        household_mask = np.zeros(household_count, dtype=bool)
+        household_mask[selected_positions] = True
+        selected_ids = pd.Index(household_ids[household_mask], name="household_id")
+
+        return (
+            _subset_policyengine_tables_by_households(tables, selected_ids),
+            supported_targets,
+            _subset_policyengine_linear_constraints(constraints, household_mask),
+            {
+                "applied": True,
+                "backend": "sparse",
+                "requested_household_budget": int(requested_budget),
+                "input_household_count": int(household_count),
+                "selected_household_count": int(household_mask.sum()),
+                "target_sparsity": float(target_sparsity),
+                "selector_converged": bool(selector_validation.get("converged", False)),
+                "selector_max_error": float(selector_validation.get("max_error", 0.0)),
+                "selector_mean_error": float(selector_validation.get("mean_error", 0.0)),
+                "selector_sparsity": float(selector_validation.get("sparsity", 0.0)),
+                "selector_nonzero_count": int((selector_weights > 0.0).sum()),
+                "selector_positive_selected_count": int(
+                    (selector_weights[household_mask] > 0.0).sum()
+                ),
+                "selector_weight_diagnostics": _summarize_weight_diagnostics(
+                    selector_weights
+                ),
+            },
+        )
+
     def calibrate_policyengine_tables(
         self,
         tables: PolicyEngineUSEntityTableBundle,
@@ -1261,6 +1438,43 @@ class USMicroplexPipeline:
         )
         if not supported_targets:
             raise ValueError("No supported PolicyEngine DB targets matched current tables")
+        selection_summary: dict[str, Any] | None = None
+        if self.config.policyengine_selection_household_budget is not None:
+            (
+                tables,
+                supported_targets,
+                constraints,
+                selection_summary,
+            ) = self._select_policyengine_household_budget(
+                tables,
+                supported_targets,
+                tuple(constraints),
+            )
+            if selection_summary.get("applied"):
+                (
+                    supported_targets,
+                    constraints,
+                    post_selection_feasibility_summary,
+                ) = _select_feasible_policyengine_calibration_constraints(
+                    supported_targets,
+                    constraints,
+                    household_count=len(tables.households),
+                    max_constraints=self.config.policyengine_calibration_max_constraints,
+                    max_constraints_per_household=(
+                        self.config.policyengine_calibration_max_constraints_per_household
+                    ),
+                    min_active_households=(
+                        self.config.policyengine_calibration_min_active_households
+                    ),
+                )
+                feasibility_filter_summary = {
+                    **post_selection_feasibility_summary,
+                    "pre_selection": feasibility_filter_summary,
+                }
+                if not supported_targets:
+                    raise ValueError(
+                        "No supported PolicyEngine DB targets remained after household-budget selection"
+                    )
         calibrator = self._build_weight_calibrator()
         calibrated_households = calibrator.fit_transform(
             tables.households.copy(),
@@ -1327,6 +1541,8 @@ class USMicroplexPipeline:
             "household_weight_diagnostics": household_weight_diagnostics,
             "person_weight_diagnostics": person_weight_diagnostics,
         }
+        if selection_summary is not None:
+            summary["selection"] = selection_summary
         warning_messages = list(feasibility_filter_summary.get("warning_messages", ()))
         if not summary["converged"]:
             warning_messages.append(

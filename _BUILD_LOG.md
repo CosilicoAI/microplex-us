@@ -1419,3 +1419,55 @@ Append-only notes for agents working in `microplex-us`.
     - `calibration_max_iter=1000`
   - output target:
     - `/Users/maxghenis/CosilicoAI/microplex-us/artifacts/tmp_qrf_weighted_sample2000_iter1000_pe_native_broad_20260330.json`
+- Result:
+  - `/Users/maxghenis/CosilicoAI/microplex-us/artifacts/tmp_qrf_weighted_sample2000_iter1000_pe_native_broad_20260330.json`
+  - candidate PE-native broad loss: `0.8830832791543215`
+  - PE baseline: `0.020243908529428433`
+  - delta: `+0.862839370624893`
+  - calibration still did not converge:
+    - `converged=false`
+    - `mean_error=0.8053911891798184`
+    - `max_error=1.5450053947105458`
+    - `n_constraints=1263`
+  - feasibility filter still dropped `2348 / 3611` constraints (`65.0%`)
+  - conclusion:
+    - increasing entropy solve effort from `100` to `1000` iterations on the current deterministic `sample_n=2000 / n_synthetic=2000` path did not help the mission metric
+    - next lever should stay on source support (`sample_n=3000`) rather than more entropy iterations
+
+## 2026-03-30 full-support PE-scale path
+
+- Code:
+  - `src/microplex_us/pipelines/us.py`
+    - added `synthesis_backend='seed'` to preserve the full donor-integrated support surface instead of resampling it before PE-table calibration
+    - added `policyengine_selection_household_budget` and a sparse household selector that prunes PE tables to a fixed household budget before the final calibration pass
+  - `src/microplex_us/pipelines/performance.py`
+    - `sample_n` can now be `None` for full-source runs
+    - calibration cache keys now include `policyengine_selection_household_budget`, while precalibration cache keys still do not
+- Focused verification:
+  - `pytest -q tests/pipelines/test_us.py -k 'synthesize_seed_backend_preserves_seed_support or household_budget or sparse_backend or calibrate_policyengine_tables_from_db'` -> `6 passed`
+  - `pytest -q tests/pipelines/test_performance.py -k 'household_budget_selection or full_source_queries or preserves_target_profiles or native_loss'` -> `4 passed`
+  - `ruff check src/microplex_us/pipelines/us.py src/microplex_us/pipelines/performance.py tests/pipelines/test_us.py tests/pipelines/test_performance.py` -> clean
+- PE-scale source-subsampled comparison point:
+  - `/Users/maxghenis/CosilicoAI/microplex-us/artifacts/tmp_qrf_weighted_sample29999_n29999_pe_native_broad_20260330.json`
+  - config:
+    - `sample_n=29999`
+    - `n_synthetic=29999`
+    - `bootstrap + qrf + entropy`
+    - `donor_imputer_excluded_variables=('filing_status_code',)`
+  - result:
+    - candidate PE-native broad loss: `0.9547853569761191`
+    - PE baseline: `0.020243908529428433`
+    - delta: `+0.9345414484466906`
+    - `converged=false`
+    - `n_constraints=3300`
+  - read:
+    - matching PE's row count by source-side weighted subsampling is worse than the smaller deterministic broad path
+    - the better next experiment is full CPS + full PUF support, then prune to `29,999` households with the new sparse selection stage
+- Running now:
+  - `/Users/maxghenis/CosilicoAI/microplex-us/artifacts/tmp_fullsource_seed_sparse29999_pe_native_broad_20260330.json`
+  - config:
+    - `sample_n=None` (full sources)
+    - `synthesis_backend='seed'`
+    - `policyengine_selection_household_budget=29999`
+    - `donor_imputer_backend='qrf'`
+    - `donor_imputer_excluded_variables=('filing_status_code',)`

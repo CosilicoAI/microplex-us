@@ -505,12 +505,23 @@ def _sample_tax_units(
         )
         if candidate_weights.sum() > 0.0 and int((candidate_weights > 0.0).sum()) >= sample_n:
             sample_weights = candidate_weights
-    return tax_units.sample(
-        n=sample_n,
-        random_state=random_seed,
-        replace=False,
-        weights=sample_weights,
-    ).reset_index(drop=True)
+    try:
+        return tax_units.sample(
+            n=sample_n,
+            random_state=random_seed,
+            replace=False,
+            weights=sample_weights,
+        ).reset_index(drop=True)
+    except ValueError:
+        # Match CPS behavior: if weighted sampling without replacement is
+        # infeasible at high sample sizes, fall back to deterministic uniform
+        # sampling instead of failing the run.
+        return tax_units.sample(
+            n=sample_n,
+            random_state=random_seed,
+            replace=False,
+            weights=None,
+        ).reset_index(drop=True)
 
 
 def _build_puf_tax_units(

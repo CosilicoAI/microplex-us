@@ -233,15 +233,17 @@ class TestUSMicroplexBuildConfig:
     def test_custom_values(self):
         config = USMicroplexBuildConfig(
             n_synthetic=250,
-            synthesis_backend="bootstrap",
+            synthesis_backend="seed",
             calibration_backend="ipf",
             synthesizer_epochs=12,
+            policyengine_selection_household_budget=500,
         )
 
         assert config.n_synthetic == 250
-        assert config.synthesis_backend == "bootstrap"
+        assert config.synthesis_backend == "seed"
         assert config.calibration_backend == "ipf"
         assert config.synthesizer_epochs == 12
+        assert config.policyengine_selection_household_budget == 500
 
 
 class TestUSMicroplexPipeline:
@@ -1637,6 +1639,96 @@ class TestUSMicroplexPipeline:
             450.0,
             rel=1e-5,
         )
+
+    def test_synthesize_seed_backend_preserves_seed_support(self, persons, households):
+        config = USMicroplexBuildConfig(
+            synthesis_backend="seed",
+            n_synthetic=1,
+        )
+        pipeline = USMicroplexPipeline(config)
+        seed = pipeline.prepare_seed_data(persons, households)
+
+        synthetic, synthesizer, metadata = pipeline.synthesize(seed)
+
+        assert synthesizer is None
+        assert metadata["backend"] == "seed"
+        assert metadata["n_seed_records"] == len(seed)
+        assert len(synthetic) == len(seed)
+        assert synthetic["household_id"].nunique() == seed["household_id"].nunique()
+        assert synthetic["weight"].tolist() == pytest.approx(seed["hh_weight"].tolist())
+
+    def test_calibrate_policyengine_tables_can_prune_to_household_budget(
+        self,
+        persons,
+        households,
+        tmp_path,
+        monkeypatch,
+    ):
+        db_path = tmp_path / "policyengine_targets.db"
+        _create_policyengine_calibration_db(db_path)
+
+        class StubSparseSelector:
+            def __init__(self, **_kwargs):
+                pass
+
+            def fit_transform(
+                self,
+                frame,
+                *_args,
+                weight_col,
+                linear_constraints=None,
+                **_kwargs,
+            ):
+                result = frame.copy()
+                result[weight_col] = np.array([10.0, 8.0, 0.0])
+                self._constraints = tuple(linear_constraints or ())
+                return result
+
+            def validate(self, _frame):
+                return {
+                    "max_error": 0.1,
+                    "mean_error": 0.05,
+                    "converged": True,
+                    "sparsity": 1 / 3,
+                    "linear_errors": {
+                        constraint.name: {
+                            "actual": float(constraint.target),
+                            "target": float(constraint.target),
+                            "relative_error": 0.0,
+                        }
+                        for constraint in getattr(self, "_constraints", ())
+                    },
+                }
+
+        monkeypatch.setattr(
+            "microplex_us.pipelines.us.SparseCalibrator",
+            StubSparseSelector,
+        )
+        config = USMicroplexBuildConfig(
+            calibration_backend="entropy",
+            policyengine_targets_db=str(db_path),
+            policyengine_target_variables=("household_count",),
+            policyengine_target_period=2024,
+            policyengine_calibration_min_active_households=1,
+            policyengine_selection_household_budget=2,
+        )
+        pipeline = USMicroplexPipeline(config)
+        seed = pipeline.prepare_seed_data(persons, households).rename(
+            columns={"hh_weight": "weight"}
+        )
+        tables = pipeline.build_policyengine_entity_tables(seed)
+
+        calibrated_tables, calibrated_persons, summary = (
+            pipeline.calibrate_policyengine_tables(tables)
+        )
+
+        assert len(calibrated_tables.households) == 2
+        assert set(calibrated_tables.households["household_id"]) == {1, 2}
+        assert set(calibrated_persons["household_id"]) == {1, 2}
+        assert summary["selection"]["applied"] is True
+        assert summary["selection"]["selected_household_count"] == 2
+        assert summary["selection"]["selector_positive_selected_count"] == 2
+        assert "pre_selection" in summary["feasibility_filter"]
 
     def test_calibrate_policyengine_tables_from_db_with_hardconcrete_backend(
         self,

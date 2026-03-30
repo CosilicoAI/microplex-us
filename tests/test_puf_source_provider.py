@@ -7,6 +7,7 @@ from microplex.core import EntityType, SourceArchetype, SourceProvider, SourceQu
 
 import microplex_us.data_sources.puf as puf_module
 from microplex_us.data_sources import PUFSourceProvider, expand_to_persons
+from microplex_us.data_sources.puf import _sample_tax_units
 
 
 def test_expand_to_persons_preserves_joint_tax_unit_monetary_totals():
@@ -318,3 +319,33 @@ def test_puf_source_provider_age_imputation_is_reproducible_with_same_seed(tmp_p
     second_persons = second.tables[EntityType.PERSON].sort_values("person_id").reset_index(drop=True)
 
     assert first_persons["age"].tolist() == second_persons["age"].tolist()
+
+
+def test_puf_sampling_falls_back_to_uniform_when_weighted_sampling_is_infeasible(
+    monkeypatch,
+):
+    tax_units = pd.DataFrame(
+        {
+            "household_id": [1, 2, 3],
+            "weight": [10.0, 20.0, 30.0],
+        }
+    )
+
+    original_sample = pd.DataFrame.sample
+
+    def flaky_sample(self, *args, **kwargs):
+        if kwargs.get("weights") is not None:
+            raise ValueError(
+                "Weighted sampling cannot be achieved with replace=False."
+            )
+        return original_sample(self, *args, **kwargs)
+
+    monkeypatch.setattr(pd.DataFrame, "sample", flaky_sample)
+
+    sampled = _sample_tax_units(
+        tax_units,
+        sample_n=2,
+        random_seed=42,
+    )
+
+    assert len(sampled) == 2
