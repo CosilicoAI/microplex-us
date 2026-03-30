@@ -12,6 +12,8 @@ from microplex.targets import TargetQuery, TargetSet, TargetSpec
 from microplex_us.pipelines.performance import (
     USMicroplexPerformanceHarnessConfig,
     USMicroplexPerformanceSession,
+    _calibration_build_config_key,
+    _precalibration_build_config_key,
     default_fast_calibration_target_variables,
     run_us_microplex_performance_harness,
     warm_us_microplex_parity_cache,
@@ -361,6 +363,26 @@ def test_run_us_microplex_performance_harness_preserves_target_profiles(monkeypa
     assert result.build_config.policyengine_target_geo_levels == ()
     assert result.build_config.policyengine_calibration_target_variables == ()
     assert result.build_config.policyengine_calibration_target_geo_levels == ()
+
+
+def test_calibration_cache_key_includes_iteration_and_tolerance_settings():
+    base = USMicroplexBuildConfig(
+        calibration_backend="entropy",
+        calibration_tol=1e-6,
+        calibration_max_iter=100,
+    )
+    updated = USMicroplexBuildConfig(
+        calibration_backend="entropy",
+        calibration_tol=1e-5,
+        calibration_max_iter=500,
+    )
+
+    assert _precalibration_build_config_key(base) == _precalibration_build_config_key(
+        updated
+    )
+    assert _calibration_build_config_key(base) != _calibration_build_config_key(
+        updated
+    )
 
 
 def test_run_us_microplex_performance_harness_can_evaluate_native_loss(monkeypatch):

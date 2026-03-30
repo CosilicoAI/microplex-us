@@ -455,6 +455,8 @@ class USMicroplexBuildConfig:
     calibration_backend: Literal["entropy", "ipf", "chi2", "sparse", "hardconcrete"] = (
         "entropy"
     )
+    calibration_tol: float = 1e-6
+    calibration_max_iter: int = 100
     random_seed: int = 42
     target_sparsity: float = 0.9
     device: str = "cpu"
@@ -1205,13 +1207,21 @@ class USMicroplexPipeline:
         self,
     ) -> Calibrator | SparseCalibrator | HardConcreteCalibrator:
         if self.config.calibration_backend in {"entropy", "ipf", "chi2"}:
-            return Calibrator(method=self.config.calibration_backend)
+            return Calibrator(
+                method=self.config.calibration_backend,
+                tol=self.config.calibration_tol,
+                max_iter=self.config.calibration_max_iter,
+            )
         if self.config.calibration_backend == "sparse":
-            return SparseCalibrator(target_sparsity=self.config.target_sparsity)
+            return SparseCalibrator(
+                target_sparsity=self.config.target_sparsity,
+                tol=self.config.calibration_tol,
+                max_iter=max(self.config.calibration_max_iter, 1_000),
+            )
         if self.config.calibration_backend == "hardconcrete":
             return HardConcreteCalibrator(
                 lambda_l0=1e-4,
-                epochs=500,
+                epochs=max(self.config.calibration_max_iter, 500),
                 lr=0.1,
                 device=self.config.device,
                 verbose=False,

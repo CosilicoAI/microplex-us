@@ -2532,6 +2532,19 @@ class TestUSMicroplexPipeline:
         assert len(result.synthetic_data) > 8
         assert result.seed_data["hh_weight"].sum() == pytest.approx(900.0)
 
+    def test_build_weight_calibrator_respects_iteration_and_tolerance_config(self):
+        config = USMicroplexBuildConfig(
+            calibration_backend="entropy",
+            calibration_tol=1e-4,
+            calibration_max_iter=777,
+        )
+        pipeline = USMicroplexPipeline(config)
+
+        calibrator = pipeline._build_weight_calibrator()
+
+        assert calibrator.tol == pytest.approx(1e-4)
+        assert calibrator.max_iter == 777
+
     def test_build_from_data_dir_can_prefer_cached_cps_asec_source(
         self,
         persons,

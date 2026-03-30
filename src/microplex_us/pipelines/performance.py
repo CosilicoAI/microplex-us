@@ -218,6 +218,8 @@ def _sorted_normalized_items(
 PRECALIBRATION_EXCLUDED_BUILD_CONFIG_FIELDS = frozenset(
     {
         "calibration_backend",
+        "calibration_tol",
+        "calibration_max_iter",
         "target_sparsity",
         "device",
         "policyengine_baseline_dataset",
@@ -237,6 +239,8 @@ PRECALIBRATION_EXCLUDED_BUILD_CONFIG_FIELDS = frozenset(
 CALIBRATION_INCLUDED_BUILD_CONFIG_FIELDS = frozenset(
     {
         "calibration_backend",
+        "calibration_tol",
+        "calibration_max_iter",
         "target_sparsity",
         "device",
         "policyengine_targets_db",

@@ -7,7 +7,11 @@ import polars as pl
 from microplex.core import EntityType, SourceArchetype, SourceProvider, SourceQuery
 
 from microplex_us.data_sources import CPSASECParquetSourceProvider
-from microplex_us.data_sources.cps import CPSASECSourceProvider, load_cps_asec
+from microplex_us.data_sources.cps import (
+    CPSASECSourceProvider,
+    load_cps_asec,
+    processed_cps_asec_cache_path,
+)
 
 
 def test_cps_parquet_source_provider_loads_observation_frame(tmp_path):
@@ -198,7 +202,9 @@ def test_load_cps_asec_caches_household_geography_on_persons(tmp_path):
         archive.writestr("hhpub23.csv", household_rows.to_csv(index=False))
 
     first = load_cps_asec(year=2023, cache_dir=tmp_path, download=False)
-    cached_persons = pl.read_parquet(tmp_path / "cps_asec_2023_processed.parquet")
+    cached_persons = pl.read_parquet(
+        processed_cps_asec_cache_path(year=2023, cache_dir=tmp_path)
+    )
     second = load_cps_asec(year=2023, cache_dir=tmp_path, download=False)
 
     assert "state_fips" in first.persons.columns
@@ -215,7 +221,7 @@ def test_load_cps_asec_caches_household_geography_on_persons(tmp_path):
     assert cached_persons["is_disabled"].to_list() == [False, True, False]
     assert cached_persons["has_marketplace_health_coverage"].to_list() == [True, False, False]
     assert cached_persons["has_esi"].to_list() == [False, True, False]
-    assert second.source.endswith("cps_asec_2023_processed.parquet")
+    assert second.source.endswith("cps_asec_2023_processed_v20260330.parquet")
     assert sorted(second.households["state_fips"].to_list()) == [6, 36]
     assert sorted(second.households["county_fips"].to_list()) == [1, 61]
 
@@ -282,7 +288,9 @@ def test_cps_source_provider_repeat_loads_are_deterministic_for_cached_processed
             "year": [2023, 2023, 2023, 2023, 2023],
         }
     )
-    cached_persons.write_parquet(tmp_path / "cps_asec_2023_processed.parquet")
+    cached_persons.write_parquet(
+        processed_cps_asec_cache_path(year=2023, cache_dir=tmp_path)
+    )
 
     provider = CPSASECSourceProvider(year=2023, cache_dir=tmp_path, download=False)
     query = SourceQuery(provider_filters={"sample_n": 2, "random_seed": 42})

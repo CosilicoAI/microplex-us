@@ -1381,3 +1381,41 @@ Append-only notes for agents working in `microplex-us`.
   2. Diagnose calibration convergence with 10x solver iterations
   3. Add cache derivation version to prevent stale-cache class bugs
   4. Split `national_irs_other` in the family classifier for sub-family diagnosis
+
+## 2026-03-30 follow-up to Claude broad-loss review
+
+- Landed the two most direct correctness/investigation fixes from the review:
+  - `src/microplex_us/data_sources/cps.py`
+    - added a versioned processed-cache path:
+      - `cps_asec_{year}_processed_v20260330.parquet`
+    - legacy unversioned processed caches are now ignored and rebuilt from raw source
+    - minimal CPS inputs now still materialize the PE-facing value leaves as zero columns:
+      - `alimony_income`
+      - `child_support_received`
+      - `disability_benefits`
+      - `health_insurance_premiums_without_medicare_part_b`
+      - `other_medical_expenses`
+      - `over_the_counter_health_expenses`
+      - `medicare_part_b_premiums`
+  - `src/microplex_us/pipelines/us.py`
+    - `USMicroplexBuildConfig` now carries:
+      - `calibration_tol`
+      - `calibration_max_iter`
+    - entropy / IPF / chi2 calibrators now honor those settings
+  - `src/microplex_us/pipelines/performance.py`
+    - calibration cache keys now include `calibration_tol` and `calibration_max_iter`
+    - precalibration cache keys exclude them so only the calibration stage reruns when these change
+- Focused verification:
+  - `pytest -q tests/test_cps_source_provider.py tests/pipelines/test_us.py -k 'cache or deterministic or tolerance_config or stale_processed_cache or derives_policyengine_value_inputs or build_weight_calibrator'` -> `7 passed`
+  - `pytest -q tests/pipelines/test_performance.py -k 'calibration_cache_key_includes_iteration_and_tolerance_settings or preserves_target_profiles or can_evaluate_native_loss'` -> `3 passed`
+  - `ruff check src/microplex_us/data_sources/cps.py src/microplex_us/pipelines/us.py src/microplex_us/pipelines/performance.py tests/test_cps_source_provider.py tests/pipelines/test_us.py tests/pipelines/test_performance.py` -> clean
+- Running now:
+  - deterministic broad PE-native smoke on the current path with:
+    - `sample_n=2000`
+    - `n_synthetic=2000`
+    - `donor_imputer_backend='qrf'`
+    - `donor_imputer_excluded_variables=('filing_status_code',)`
+    - `calibration_backend='entropy'`
+    - `calibration_max_iter=1000`
+  - output target:
+    - `/Users/maxghenis/CosilicoAI/microplex-us/artifacts/tmp_qrf_weighted_sample2000_iter1000_pe_native_broad_20260330.json`

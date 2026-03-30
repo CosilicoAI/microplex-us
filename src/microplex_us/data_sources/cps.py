@@ -33,6 +33,7 @@ from microplex_us.source_registry import resolve_source_variable_capabilities
 
 # Default cache directory
 DEFAULT_CACHE_DIR = Path.home() / ".cache" / "microplex"
+CPS_ASEC_PROCESSED_CACHE_VERSION = "20260330"
 
 # CPS ASEC data URLs by year
 CPS_URLS = {
@@ -145,6 +146,16 @@ PERSON_NONNEGATIVE_VALUE_COLUMNS = (
     "medicare_part_b_premiums",
 )
 
+PERSON_ZERO_DEFAULT_VALUE_COLUMNS = (
+    "alimony_income",
+    "child_support_received",
+    "disability_benefits",
+    "health_insurance_premiums_without_medicare_part_b",
+    "over_the_counter_health_expenses",
+    "other_medical_expenses",
+    "medicare_part_b_premiums",
+)
+
 PERSON_CACHE_REQUIRED_COLUMNS = (
     "state_fips",
     "county_fips",
@@ -173,6 +184,18 @@ PERSON_CPS_DISABILITY_COLUMNS = (
 
 WORKERS_COMP_DISABILITY_CODE = 1
 ALIMONY_OTHER_INCOME_CODE = 20
+
+
+def processed_cps_asec_cache_path(*, year: int, cache_dir: Path) -> Path:
+    """Return the versioned processed-cache path for one CPS ASEC year."""
+    return cache_dir / (
+        f"cps_asec_{year}_processed_v{CPS_ASEC_PROCESSED_CACHE_VERSION}.parquet"
+    )
+
+
+def legacy_processed_cps_asec_cache_path(*, year: int, cache_dir: Path) -> Path:
+    """Return the legacy unversioned processed-cache path for one CPS ASEC year."""
+    return cache_dir / f"cps_asec_{year}_processed.parquet"
 
 
 @dataclass
@@ -564,8 +587,13 @@ def load_cps_asec(
     if cache_dir is None:
         cache_dir = DEFAULT_CACHE_DIR
 
-    # Check for processed parquet first
-    processed_path = cache_dir / f"cps_asec_{year}_processed.parquet"
+    # Prefer a versioned processed cache so derivation-logic changes do not
+    # silently reuse stale pre-sim columns.
+    processed_path = processed_cps_asec_cache_path(year=year, cache_dir=cache_dir)
+    legacy_processed_path = legacy_processed_cps_asec_cache_path(
+        year=year,
+        cache_dir=cache_dir,
+    )
     if processed_path.exists():
         print(f"Loading processed CPS ASEC {year} from {processed_path}")
         persons = pl.read_parquet(processed_path)
@@ -579,6 +607,12 @@ def load_cps_asec(
             )
         print(
             f"Cached processed CPS ASEC {year} is missing state_fips; rebuilding from raw source"
+        )
+    elif legacy_processed_path.exists():
+        print(
+            "Ignoring legacy CPS ASEC processed cache "
+            f"{legacy_processed_path} because cache version "
+            f"{CPS_ASEC_PROCESSED_CACHE_VERSION} is required; rebuilding from raw source"
         )
 
     # Download if needed
@@ -765,6 +799,9 @@ def _process_persons(df: pl.DataFrame, year: int) -> pl.DataFrame:
         ]
         if drop_columns:
             result = result.drop(drop_columns)
+    for value_column in PERSON_ZERO_DEFAULT_VALUE_COLUMNS:
+        if value_column not in result.columns:
+            result = result.with_columns(pl.lit(0.0).alias(value_column))
     for bool_column in ("has_esi", "has_marketplace_health_coverage"):
         if bool_column in result.columns:
             result = result.with_columns((pl.col(bool_column) == 1).alias(bool_column))
