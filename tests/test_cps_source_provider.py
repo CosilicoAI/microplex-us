@@ -7,7 +7,7 @@ import polars as pl
 from microplex.core import EntityType, SourceArchetype, SourceProvider, SourceQuery
 
 from microplex_us.data_sources import CPSASECParquetSourceProvider
-from microplex_us.data_sources.cps import load_cps_asec
+from microplex_us.data_sources.cps import CPSASECSourceProvider, load_cps_asec
 
 
 def test_cps_parquet_source_provider_loads_observation_frame(tmp_path):
@@ -253,6 +253,45 @@ def test_load_cps_asec_derives_policyengine_value_inputs(tmp_path):
     assert persons["over_the_counter_health_expenses"].tolist() == [120, 0]
     assert persons["other_medical_expenses"].tolist() == [450, 0]
     assert persons["medicare_part_b_premiums"].tolist() == [600, 0]
+
+
+def test_cps_source_provider_repeat_loads_are_deterministic_for_cached_processed_data(
+    tmp_path,
+):
+    cached_persons = pl.DataFrame(
+        {
+            "household_id": [2, 1, 2, 3, 1],
+            "person_number": [1, 2, 2, 1, 1],
+            "person_id": ["2:1", "1:2", "2:2", "3:1", "1:1"],
+            "age": [52, 12, 49, 40, 34],
+            "weight": [200.0, 100.0, 200.0, 300.0, 100.0],
+            "state_fips": [36, 6, 36, 48, 6],
+            "county_fips": [61, 1, 61, 201, 1],
+            "cps_race": [1, 4, 1, 2, 4],
+            "is_hispanic": [False, True, False, False, True],
+            "is_disabled": [False, False, False, True, False],
+            "has_esi": [True, False, True, False, False],
+            "has_marketplace_health_coverage": [False, True, False, False, True],
+            "year": [2023, 2023, 2023, 2023, 2023],
+        }
+    )
+    cached_persons.write_parquet(tmp_path / "cps_asec_2023_processed.parquet")
+
+    provider = CPSASECSourceProvider(year=2023, cache_dir=tmp_path, download=False)
+    query = SourceQuery(provider_filters={"sample_n": 2, "random_seed": 42})
+
+    first = provider.load_frame(query)
+    second = provider.load_frame(query)
+
+    first_households = first.tables[EntityType.HOUSEHOLD]
+    second_households = second.tables[EntityType.HOUSEHOLD]
+    first_persons = first.tables[EntityType.PERSON]
+    second_persons = second.tables[EntityType.PERSON]
+
+    assert first_households["household_id"].tolist() == second_households["household_id"].tolist()
+    assert first_persons["person_id"].tolist() == second_persons["person_id"].tolist()
+    assert first_households["household_weight"].tolist() == second_households["household_weight"].tolist()
+    assert first_persons["weight"].tolist() == second_persons["weight"].tolist()
 
 
 def test_load_cps_asec_rebuilds_stale_processed_cache_without_pe_presim_inputs(tmp_path):

@@ -1295,3 +1295,29 @@ Append-only notes for agents working in `microplex-us`.
 - current pending mission run:
   - `/Users/maxghenis/CosilicoAI/microplex-us/artifacts/tmp_parity_inputs_broad_pe_native_20260330.json`
   - same broad config as the current best path, but with the new CPS/PUF parity inputs on the runtime surface
+
+## 2026-03-30 CPS repeatability fix
+
+- isolated the remaining same-seed drift to the CPS provider rather than PUF or the PE-native scorer
+  - repeated `CPSASECSourceProvider(year=2023)` loads with `sample_n=1000`, `random_seed=42` were producing different household/person samples from the same cached processed parquet
+  - root cause: household sampling depended on unstable row order from derived CPS households; same `random_state` on different row order yields different samples
+- fixed `/Users/maxghenis/CosilicoAI/microplex-us/src/microplex_us/data_sources/cps.py`
+  - canonicalize household order by `household_id` before sampling
+  - canonicalize person order by `household_id`, `person_id`, `person_number` before sampling
+  - sort sampled household/person outputs before returning
+- added regression coverage in `/Users/maxghenis/CosilicoAI/microplex-us/tests/test_cps_source_provider.py`
+  - repeated same-seed loads from cached processed CPS data now return identical household/person selections
+- direct repeatability check after the patch:
+  - provider repeatability artifact `/Users/maxghenis/CosilicoAI/microplex-us/artifacts/tmp_provider_repeatability_20260330.json`
+    - CPS: `same_households=true`, `same_persons=true`
+    - PUF: `same_households=true`, `same_persons=true`
+  - pre-calibration repeatability artifact `/Users/maxghenis/CosilicoAI/microplex-us/artifacts/tmp_qrf_repeatability_precal_20260330.json`
+    - `same_seed_same_seed_data=true`
+    - `same_seed_same_integrated_seed=true`
+    - `same_seed_same_synthetic=true`
+- focused verification:
+  - `pytest -q tests/test_cps_source_provider.py -k 'sampling or deterministic or derives_policyengine_value_inputs'` -> `4 passed`
+  - `ruff check src/microplex_us/data_sources/cps.py tests/test_cps_source_provider.py` -> clean
+- current pending mission rerun:
+  - `/Users/maxghenis/CosilicoAI/microplex-us/artifacts/tmp_parity_inputs_broad_pe_native_20260330.json`
+  - this is the first broad PE-native rerun on a deterministic `cps+puf + qrf + bootstrap + entropy` path after the parity-input patch

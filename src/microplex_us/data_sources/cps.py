@@ -301,6 +301,30 @@ def _sample_households_and_persons(
     random_seed: int,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Sample households and keep all linked person records."""
+    household_sort_columns = [
+        column
+        for column in ("household_id", "year")
+        if column in households.columns
+    ]
+    person_sort_columns = [
+        column
+        for column in ("household_id", "person_id", "person_number", "year")
+        if column in persons.columns
+    ]
+    if household_sort_columns:
+        households = households.sort_values(
+            household_sort_columns,
+            kind="mergesort",
+        ).reset_index(drop=True)
+    else:
+        households = households.reset_index(drop=True)
+    if person_sort_columns:
+        persons = persons.sort_values(
+            person_sort_columns,
+            kind="mergesort",
+        ).reset_index(drop=True)
+    else:
+        persons = persons.reset_index(drop=True)
     if sample_n is None or sample_n >= len(households):
         return households, persons
     sample_weights: pd.Series | None = None
@@ -320,6 +344,16 @@ def _sample_households_and_persons(
     ).copy()
     sampled_keys = set(sampled_households["household_id"])
     sampled_persons = persons[persons["household_id"].isin(sampled_keys)].copy()
+    if household_sort_columns:
+        sampled_households = sampled_households.sort_values(
+            household_sort_columns,
+            kind="mergesort",
+        )
+    if person_sort_columns:
+        sampled_persons = sampled_persons.sort_values(
+            person_sort_columns,
+            kind="mergesort",
+        )
     return sampled_households.reset_index(drop=True), sampled_persons.reset_index(drop=True)
 
 
