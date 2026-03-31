@@ -261,3 +261,12 @@ def test_person_native_irs_semantics_match_current_policyengine_entities():
         "self_employment_income",
     ):
         assert variable_semantic_spec_for(variable_name).native_entity is EntityType.PERSON
+
+
+def test_self_employment_income_semantics_preserve_signed_support():
+    from microplex_us.variables import variable_semantic_spec_for
+
+    spec = variable_semantic_spec_for("self_employment_income")
+
+    assert spec.support_family is VariableSupportFamily.CONTINUOUS
+    assert spec.donor_match_strategy is DonorMatchStrategy.RANK

@@ -1662,3 +1662,25 @@ Append-only notes for agents working in `microplex-us`.
 - Read:
   - the filing-status seam is real, but these two fixes are not the right fix
   - next work should shift back to the larger `national_irs_other`, `state_agi_distribution`, and `state_age_distribution` support problems
+
+## 2026-03-31 signed IRS surface repair
+
+- Scope: repair signed-income and missing-leaf seams that were still zeroing major IRS loss terms on the `29,999` full-support selector path
+- Root cause:
+  - raw mapped PUF `self_employment_income` is signed, but Microplex marked it as `ZERO_INFLATED_POSITIVE`, so donor matching could never emit losses
+  - raw mapped PUF `rental_income_negative` is a positive loss amount, and `map_puf_variables()` was adding it instead of subtracting it
+  - `capital_gains_distributions` existed in PUF but never reached PE because the export surface omitted the correct PE input alias `non_sch_d_capital_gains`
+- Code:
+  - `src/microplex_us/data_sources/puf.py`
+    - preserve rental losses as negative values when combining positive and negative rental components
+  - `src/microplex_us/variables.py`
+    - stop treating `self_employment_income` as a positive-only donor target; preserve signed support
+  - `src/microplex_us/policyengine/us.py`
+    - export `capital_gains_distributions` through the PE input alias `non_sch_d_capital_gains`
+- Focused verification:
+  - `pytest -q tests/test_puf_source_provider.py -k 'rental_loss_sign or preserve_joint_tax_unit_monetary_totals or splits_negative_joint_self_employment_losses or maps_policyengine_medical_and_alimony_inputs'` -> `3 passed`
+  - `pytest -q tests/policyengine/test_us.py -k 'default_policyengine_us_export_surface_avoids_formula_aggregates or supports_pre_sim_aliases'` -> `2 passed`
+  - `pytest -q tests/test_variables.py -k 'self_employment_income_semantics_preserve_signed_support or person_native_irs_semantics_match_current_policyengine_entities or donor_imputation_block_specs_include_match_strategies'` -> `3 passed`
+  - `ruff check src/microplex_us/data_sources/puf.py src/microplex_us/policyengine/us.py src/microplex_us/variables.py tests/test_puf_source_provider.py tests/policyengine/test_us.py tests/test_variables.py` -> clean
+- Read:
+  - the remaining IRS gap is not just “more support”; several high-loss cells were impossible to hit because losses or leaves were being structurally erased before PE saw them

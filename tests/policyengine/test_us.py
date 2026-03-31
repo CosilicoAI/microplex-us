@@ -1821,6 +1821,7 @@ class TestPolicyEngineUSProjection:
 
         assert overlaps == []
         assert "estate_income" in SAFE_POLICYENGINE_US_EXPORT_VARIABLES
+        assert "non_sch_d_capital_gains" in SAFE_POLICYENGINE_US_EXPORT_VARIABLES
         assert "receives_wic" in SAFE_POLICYENGINE_US_EXPORT_VARIABLES
         assert "is_separated" not in SAFE_POLICYENGINE_US_EXPORT_VARIABLES
         assert "is_surviving_spouse" not in SAFE_POLICYENGINE_US_EXPORT_VARIABLES
@@ -1837,6 +1838,7 @@ class TestPolicyEngineUSProjection:
         class FakeSystem:
             variables = {
                 "cps_race": FakeVariable("person"),
+                "non_sch_d_capital_gains": FakeVariable("person"),
             }
 
         tables = PolicyEngineUSEntityTableBundle(
@@ -1851,6 +1853,7 @@ class TestPolicyEngineUSProjection:
                     "person_id": [1],
                     "household_id": [10],
                     "race": [4],
+                    "capital_gains_distributions": [250.0],
                 }
             ),
         )
@@ -1862,6 +1865,7 @@ class TestPolicyEngineUSProjection:
 
         assert export_maps["person"] == {
             "race": "cps_race",
+            "capital_gains_distributions": "non_sch_d_capital_gains",
         }
 
     def test_build_policyengine_us_export_variable_maps_prefers_exact_pre_sim_names(self):

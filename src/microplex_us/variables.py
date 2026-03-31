@@ -262,8 +262,7 @@ VARIABLE_SEMANTIC_SPECS: dict[str, VariableSemanticSpec] = {
             EntityType.HOUSEHOLD,
             EntityType.TAX_UNIT,
         ),
-        support_family=VariableSupportFamily.ZERO_INFLATED_POSITIVE,
-        donor_match_strategy=DonorMatchStrategy.ZERO_INFLATED_POSITIVE,
+        notes="Self-employment income is signed and must preserve losses.",
     ),
     "has_medicaid": VariableSemanticSpec(
         projection_aggregation=ProjectionAggregation.MAX,

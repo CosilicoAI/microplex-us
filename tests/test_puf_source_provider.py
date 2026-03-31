@@ -7,7 +7,7 @@ from microplex.core import EntityType, SourceArchetype, SourceProvider, SourceQu
 
 import microplex_us.data_sources.puf as puf_module
 from microplex_us.data_sources import PUFSourceProvider, expand_to_persons
-from microplex_us.data_sources.puf import _sample_tax_units
+from microplex_us.data_sources.puf import _sample_tax_units, map_puf_variables
 
 
 def test_expand_to_persons_preserves_joint_tax_unit_monetary_totals():
@@ -251,6 +251,25 @@ def test_puf_source_provider_maps_policyengine_medical_and_alimony_inputs(tmp_pa
     assert persons["over_the_counter_health_expenses"].sum() == 85.0
     assert persons["estate_income"].sum() == 500.0
     assert persons["income"].sum() == 52_000.0
+
+
+def test_map_puf_variables_preserves_rental_loss_sign():
+    raw = pd.DataFrame(
+        {
+            "RECID": [101],
+            "MARS": [1],
+            "XTOT": [1],
+            "S006": [100.0],
+            "E25850": [200.0],
+            "E25860": [500.0],
+        }
+    )
+
+    mapped = map_puf_variables(raw)
+
+    assert mapped.loc[0, "rental_income_positive"] == 200.0
+    assert mapped.loc[0, "rental_income_negative"] == 500.0
+    assert mapped.loc[0, "rental_income"] == -300.0
 
 
 def test_download_puf_prefers_existing_local_files_without_hub_lookup(tmp_path, monkeypatch):

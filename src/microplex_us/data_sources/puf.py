@@ -196,10 +196,11 @@ def map_puf_variables(
     if "weight" in result.columns:
         result["weight"] = result["weight"] / 100
 
-    # Combine rental income (positive and negative)
+    # Preserve rental losses as negative values so downstream PE targets can
+    # recover rent-and-royalty loss cells.
     result["rental_income"] = (
         result.get("rental_income_positive", 0).fillna(0) +
-        result.get("rental_income_negative", 0).fillna(0)
+        -result.get("rental_income_negative", 0).fillna(0)
     )
     if {"E26390", "E26400"}.issubset(set(puf.columns)):
         result["estate_income"] = puf["E26390"].fillna(0) - puf["E26400"].fillna(0)
