@@ -51,10 +51,35 @@ US should not keep local if it generalizes:
 
 US tax filing units may eventually be policy-endogenous. Avoid hard-baking tax-unit structure too deeply into shared abstractions.
 
+## Current mission metric
+
+- The real US mission is no longer generic parity improvement. It is to beat PolicyEngine on the PE-native broad loss frontier.
+- The main comparator should be matched-size PE baselines:
+  - `Microplex@N` vs `PE@N`
+  - ideally `PE@N` should be reweighted/recalibrated after sampling
+- Full `enhanced_cps_2024` remains the stretch reference, not the only pass/fail bar.
+
 ## Current benchmark guidance
 
 - Use common-target comparisons when claiming candidate vs baseline wins.
-- Composite parity loss remains useful for US frontier work, but it is not interchangeable with suite-level mean absolute relative error.
+- Composite parity loss remains useful as a diagnostic, but it is not the US mission metric.
+- PE-native broad loss is the canonical mission score for US frontier work.
+- Do not assume larger `N` should help automatically on the current path; non-monotonicity has already shown that record support and optimizer alignment are still imperfect.
+
+## Current diagnostic read
+
+- Post-export direct optimization on the exact PE-native broad objective is now available.
+- On a fixed `2000`-household exported candidate, direct PE-native optimization improved loss only trivially (`0.92334 -> 0.92290`).
+- Current read: objective mismatch is real, but the larger bottleneck is still record construction/support, not just the final weight objective.
+- The next high-leverage path is full-support candidate construction plus budgeted household selection, not more small-candidate entropy or donor A/B loops.
+
+## Selection backends
+
+- Household-budgeted selection now has two backends in the US pipeline:
+  - `sparse`
+  - `pe_native_loss`
+- `pe_native_loss` is the cleaner experimental backend because it ranks/selects households using the actual PE-native loss surface on an exported candidate.
+- Until the full-support `pe_native_loss` selector run lands, do not port this architecture to UK.
 
 ## High-signal tests
 

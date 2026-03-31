@@ -21,6 +21,21 @@ This repo is the US country pack for `microplex`. Keep it thin where possible an
   - benchmark metrics/comparisons/suites
   - shared result-based benchmark builders
 
+## Current mission notes
+
+- For US, the canonical mission metric is the PE-native broad loss frontier, not composite parity.
+- When evaluating progress, prefer:
+  - matched-size `Microplex@N` vs `PE@N`
+  - full `enhanced_cps_2024` only as a stretch reference
+- Recent direct-objective testing showed that changing only the post-export weight objective moves loss very little on the same fixed candidate.
+- Bias effort toward:
+  - better candidate records
+  - fuller support coverage
+  - budgeted selection on larger candidates
+- Bias away from:
+  - repeated small-candidate donor-backend A/Bs
+  - more entropy tuning without evidence that the candidate population itself improved
+
 ## Review checklist
 
 When reviewing recent changes here, check:
@@ -28,8 +43,9 @@ When reviewing recent changes here, check:
 1. Is this still duplicating something that should now live in core?
 2. Is the US harness using shared core benchmarking helpers instead of rebuilding them inline?
 3. Are any benchmark claims relying on non-common-target comparisons?
-4. Does PE-US materialization handle dependency chains and partial failures safely?
-5. Is this baking in fixed tax-unit structure more deeply than necessary?
+4. Is the work using PE-native broad loss when it claims mission progress?
+5. Does PE-US materialization handle dependency chains and partial failures safely?
+6. Is this baking in fixed tax-unit structure more deeply than necessary?
 
 ## Be careful around
 
