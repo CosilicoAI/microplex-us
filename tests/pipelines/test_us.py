@@ -690,6 +690,52 @@ class TestUSMicroplexPipeline:
         assert tax_units.iloc[0]["filing_status"] == "JOINT"
         assert tax_units.iloc[0]["n_dependents"] == 1
 
+    def test_build_policyengine_entity_tables_marks_spouse_absent_head_as_separate(self):
+        pipeline = USMicroplexPipeline(USMicroplexBuildConfig())
+        population = pd.DataFrame(
+            {
+                "person_id": [1, 2],
+                "household_id": [10, 10],
+                "weight": [1.0, 1.0],
+                "age": [45, 12],
+                "income": [60_000.0, 0.0],
+                "relationship_to_head": [0, 2],
+                "marital_status": [3, 7],
+                "state_fips": [6, 6],
+                "tenure": [1, 1],
+            }
+        )
+
+        tables = pipeline.build_policyengine_entity_tables(population)
+        tax_units = tables.tax_units.sort_values("tax_unit_id").reset_index(drop=True)
+
+        assert len(tax_units) == 1
+        assert tax_units.iloc[0]["filing_status"] == "SEPARATE"
+        assert tax_units.iloc[0]["n_dependents"] == 1
+
+    def test_build_policyengine_entity_tables_marks_widowed_head_with_child_as_surviving_spouse(self):
+        pipeline = USMicroplexPipeline(USMicroplexBuildConfig())
+        population = pd.DataFrame(
+            {
+                "person_id": [1, 2],
+                "household_id": [10, 10],
+                "weight": [1.0, 1.0],
+                "age": [45, 12],
+                "income": [60_000.0, 0.0],
+                "relationship_to_head": [0, 2],
+                "marital_status": [4, 7],
+                "state_fips": [6, 6],
+                "tenure": [1, 1],
+            }
+        )
+
+        tables = pipeline.build_policyengine_entity_tables(population)
+        tax_units = tables.tax_units.sort_values("tax_unit_id").reset_index(drop=True)
+
+        assert len(tax_units) == 1
+        assert tax_units.iloc[0]["filing_status"] == "SURVIVING_SPOUSE"
+        assert tax_units.iloc[0]["n_dependents"] == 1
+
     def test_build_from_source_providers_accepts_year_specific_query_keys(self):
         households = pd.DataFrame(
             {

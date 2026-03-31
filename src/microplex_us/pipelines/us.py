@@ -2965,6 +2965,10 @@ class USMicroplexPipeline:
             if hh_persons.empty:
                 continue
             optimized_units = optimizer.optimize_household(int(household_id), hh_persons)
+            optimized_units = self._apply_tax_unit_filing_status_hints(
+                hh_persons,
+                optimized_units,
+            )
             if not optimized_units:
                 optimized_units = [
                     {
@@ -3033,6 +3037,70 @@ class USMicroplexPipeline:
         person_rows["tax_unit_id"] = person_rows["person_id"].map(person_to_tax_unit)
         tax_units = pd.DataFrame(tax_unit_rows)
         return tax_units, person_rows
+
+    def _apply_tax_unit_filing_status_hints(
+        self,
+        household_persons: pd.DataFrame,
+        optimized_units: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        if not optimized_units or "person_id" not in household_persons.columns:
+            return optimized_units
+
+        person_lookup = household_persons.set_index("person_id", drop=False)
+        updated_units: list[dict[str, Any]] = []
+        for unit in optimized_units:
+            unit_copy = dict(unit)
+            filer_ids = [int(person_id) for person_id in unit_copy.get("filer_ids", [])]
+            dependent_ids = [
+                int(person_id) for person_id in unit_copy.get("dependent_ids", [])
+            ]
+            if len(filer_ids) != 1:
+                updated_units.append(unit_copy)
+                continue
+            filer_id = filer_ids[0]
+            if filer_id not in person_lookup.index:
+                updated_units.append(unit_copy)
+                continue
+            filer_row = person_lookup.loc[filer_id]
+            hinted_status = self._infer_single_filer_filing_status(
+                filer_row,
+                has_dependents=bool(dependent_ids),
+            )
+            if hinted_status is not None:
+                unit_copy["filing_status"] = hinted_status
+            updated_units.append(unit_copy)
+        return updated_units
+
+    def _infer_single_filer_filing_status(
+        self,
+        filer_row: pd.Series,
+        *,
+        has_dependents: bool,
+    ) -> str | None:
+        filing_status_code = self._coerce_policyengine_status_code(
+            filer_row.get("filing_status_code")
+        )
+        if filing_status_code == 3:
+            return "SEPARATE"
+        if filing_status_code == 4:
+            return "HEAD_OF_HOUSEHOLD"
+        if filing_status_code == 5 and has_dependents:
+            return "SURVIVING_SPOUSE"
+
+        marital_status = self._coerce_policyengine_status_code(
+            filer_row.get("marital_status")
+        )
+        if marital_status in {3, 6}:
+            return "SEPARATE"
+        if marital_status == 4 and has_dependents:
+            return "SURVIVING_SPOUSE"
+        return None
+
+    def _coerce_policyengine_status_code(self, value: Any) -> int | None:
+        numeric = pd.to_numeric(pd.Series([value]), errors="coerce").iloc[0]
+        if pd.isna(numeric):
+            return None
+        return int(numeric)
 
     def _assign_family_and_spm_units(self, persons: pd.DataFrame) -> pd.DataFrame:
         result = persons.copy()
