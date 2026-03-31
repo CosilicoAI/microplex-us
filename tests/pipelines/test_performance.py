@@ -21,6 +21,7 @@ from microplex_us.pipelines.performance import (
     USMicroplexPerformanceSession,
     _calibration_build_config_key,
     _precalibration_build_config_key,
+    _write_matched_policyengine_us_baseline_dataset,
     default_fast_calibration_target_variables,
     run_us_microplex_performance_harness,
     warm_us_microplex_parity_cache,
@@ -29,6 +30,8 @@ from microplex_us.pipelines.us import USMicroplexBuildConfig
 from microplex_us.policyengine import (
     PolicyEngineUSComparisonCache,
     PolicyEngineUSEntityTableBundle,
+    load_policyengine_us_entity_tables,
+    write_policyengine_us_time_period_dataset,
 )
 
 
@@ -665,6 +668,52 @@ def test_run_us_microplex_performance_harness_can_reweight_matched_native_loss(
     assert score_calls[0]["baseline_dataset_path"] == str(baseline_output.resolve())
     assert result.matched_baseline_dataset_path == str(baseline_output.resolve())
     assert "reweight_matched_baseline_dataset" in result.stage_timings
+
+
+def test_write_matched_policyengine_us_baseline_dataset_preserves_variables(
+    tmp_path,
+):
+    baseline_path = tmp_path / "baseline.h5"
+    matched_path = tmp_path / "matched.h5"
+    full_copy_path = tmp_path / "matched_full.h5"
+
+    write_policyengine_us_time_period_dataset(
+        {
+            "household_id": {"2024": [10, 20]},
+            "household_weight": {"2024": [1.5, 2.5]},
+            "person_id": {"2024": [1, 2, 3]},
+            "person_household_id": {"2024": [10, 10, 20]},
+            "person_weight": {"2024": [1.5, 1.5, 2.5]},
+            "tax_unit_id": {"2024": [100, 200]},
+            "person_tax_unit_id": {"2024": [100, 100, 200]},
+            "tax_unit_weight": {"2024": [1.5, 2.5]},
+            "state_code": {"2024": [1, 2]},
+            "age": {"2024": [34, 12, 45]},
+            "employment_income": {"2024": [100.0, 0.0, 55.0]},
+        },
+        baseline_path,
+    )
+
+    matched_dataset_path = _write_matched_policyengine_us_baseline_dataset(
+        baseline_path,
+        matched_path,
+        period=2024,
+        household_count=1,
+        random_seed=42,
+    )
+    matched_tables = load_policyengine_us_entity_tables(matched_dataset_path, period=2024)
+    assert "state_code" in matched_tables.households.columns
+    assert "age" in matched_tables.persons.columns
+    assert "employment_income" in matched_tables.persons.columns
+
+    copied_dataset_path = _write_matched_policyengine_us_baseline_dataset(
+        baseline_path,
+        full_copy_path,
+        period=2024,
+        household_count=2,
+        random_seed=42,
+    )
+    assert Path(copied_dataset_path).read_bytes() == baseline_path.read_bytes()
 
 
 def test_run_us_microplex_performance_harness_can_write_output_bundle(monkeypatch, tmp_path):

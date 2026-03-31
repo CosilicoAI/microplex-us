@@ -11,9 +11,10 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from time import perf_counter
 
+import h5py
 import numpy as np
 import pandas as pd
-from microplex.core import ObservationFrame, SourceProvider, SourceQuery
+from microplex.core import EntityType, ObservationFrame, SourceProvider, SourceQuery
 from microplex.fusion import FusionPlan
 from microplex.targets import TargetSet
 
@@ -45,8 +46,9 @@ from microplex_us.policyengine.harness import (
 from microplex_us.policyengine.us import (
     PolicyEngineUSDBTargetProvider,
     PolicyEngineUSEntityTableBundle,
-    build_policyengine_us_time_period_arrays,
-    load_policyengine_us_entity_tables,
+    _infer_policyengine_array_entity,
+    _load_policyengine_us_period_arrays,
+    _resolve_policyengine_us_tax_benefit_system,
     write_policyengine_us_time_period_dataset,
 )
 
@@ -568,44 +570,151 @@ def _write_matched_policyengine_us_baseline_dataset(
     household_count: int,
     random_seed: int,
 ) -> str:
-    tables = load_policyengine_us_entity_tables(
+    period_key = str(period)
+    arrays = _load_policyengine_us_period_arrays(
         baseline_dataset_path,
-        period=period,
+        period_key=period_key,
+        variables=None,
     )
-    households = tables.households.copy()
+    required_structural = {
+        "household_id",
+        "household_weight",
+        "person_id",
+        "person_household_id",
+    }
+    missing = sorted(required_structural - set(arrays))
+    if missing:
+        raise ValueError(
+            "matched baseline dataset is missing required structural arrays: "
+            + ", ".join(missing)
+        )
+
+    household_ids = np.asarray(arrays["household_id"])
+    household_weights = np.asarray(arrays["household_weight"], dtype=np.float64)
     if household_count <= 0:
         raise ValueError("matched baseline household_count must be positive")
-    if household_count > len(households):
+    if household_count > len(household_ids):
         raise ValueError(
             "matched baseline household_count cannot exceed baseline household rows"
         )
 
-    rng = pd.Series(households["household_id"]).sample(
+    resolved_baseline_path = Path(baseline_dataset_path).expanduser().resolve()
+    resolved_output_path = Path(output_dataset_path).expanduser().resolve()
+    if household_count == len(household_ids):
+        if resolved_baseline_path != resolved_output_path:
+            resolved_output_path.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(resolved_baseline_path, resolved_output_path)
+        return str(resolved_output_path)
+
+    sampled_household_ids = pd.Series(household_ids).sample(
         n=household_count,
         replace=False,
         random_state=random_seed,
-    )
-    sampled_household_ids = pd.Index(rng.to_numpy())
-    sampled_tables = _filter_policyengine_tables_to_households(
-        tables,
+    ).to_numpy()
+    household_mask = np.isin(household_ids, sampled_household_ids)
+    person_mask = np.isin(
+        np.asarray(arrays["person_household_id"]),
         sampled_household_ids,
     )
-    original_weight_sum = float(households["household_weight"].sum())
-    sampled_weight_sum = float(sampled_tables.households["household_weight"].sum())
+
+    entity_masks: dict[object, np.ndarray] = {
+        EntityType.HOUSEHOLD: household_mask,
+        EntityType.PERSON: person_mask,
+    }
+    entity_lengths: dict[EntityType, int] = {
+        EntityType.HOUSEHOLD: len(household_ids),
+        EntityType.PERSON: len(np.asarray(arrays["person_id"])),
+    }
+    for entity_type, id_name, person_membership_name in (
+        (EntityType.TAX_UNIT, "tax_unit_id", "person_tax_unit_id"),
+        (EntityType.SPM_UNIT, "spm_unit_id", "person_spm_unit_id"),
+        (EntityType.FAMILY, "family_id", "person_family_id"),
+        ("marital_unit", "marital_unit_id", "person_marital_unit_id"),
+    ):
+        entity_ids = arrays.get(id_name)
+        person_entity_ids = arrays.get(person_membership_name)
+        if entity_ids is None or person_entity_ids is None:
+            continue
+        entity_ids = np.asarray(entity_ids)
+        person_entity_ids = np.asarray(person_entity_ids)
+        selected_entity_ids = np.unique(person_entity_ids[person_mask])
+        entity_masks[entity_type] = np.isin(entity_ids, selected_entity_ids)
+        entity_lengths[entity_type] = len(entity_ids)
+
+    original_weight_sum = float(household_weights.sum())
+    sampled_weight_sum = float(household_weights[household_mask].sum())
     if sampled_weight_sum <= 0.0:
         raise ValueError("matched baseline sample produced nonpositive household weight sum")
-    sampled_tables.households["household_weight"] = (
-        sampled_tables.households["household_weight"]
-        * (original_weight_sum / sampled_weight_sum)
-    )
+    weight_scale = original_weight_sum / sampled_weight_sum
 
-    arrays = build_policyengine_us_time_period_arrays(
-        sampled_tables,
-        period=period,
-    )
+    structural_entities: dict[str, object] = {
+        "household_id": EntityType.HOUSEHOLD,
+        "household_weight": EntityType.HOUSEHOLD,
+        "person_id": EntityType.PERSON,
+        "person_household_id": EntityType.PERSON,
+        "person_weight": EntityType.PERSON,
+        "tax_unit_id": EntityType.TAX_UNIT,
+        "person_tax_unit_id": EntityType.PERSON,
+        "tax_unit_weight": EntityType.TAX_UNIT,
+        "spm_unit_id": EntityType.SPM_UNIT,
+        "person_spm_unit_id": EntityType.PERSON,
+        "spm_unit_weight": EntityType.SPM_UNIT,
+        "family_id": EntityType.FAMILY,
+        "person_family_id": EntityType.PERSON,
+        "family_weight": EntityType.FAMILY,
+        "marital_unit_id": "marital_unit",
+        "person_marital_unit_id": EntityType.PERSON,
+        "marital_unit_weight": "marital_unit",
+    }
+    scaled_weight_variables = {
+        "household_weight",
+        "person_weight",
+        "tax_unit_weight",
+        "spm_unit_weight",
+        "family_weight",
+        "marital_unit_weight",
+    }
+    try:
+        tax_benefit_system = _resolve_policyengine_us_tax_benefit_system(None)
+    except (ImportError, ValueError):
+        tax_benefit_system = None
+
+    sampled_arrays: dict[str, dict[str, np.ndarray]] = {}
+    with h5py.File(resolved_baseline_path, "r") as handle:
+        for variable_name, group in handle.items():
+            if not isinstance(group, h5py.Group):
+                continue
+            period_values = {
+                stored_period: np.asarray(dataset)
+                for stored_period, dataset in group.items()
+            }
+            if not period_values:
+                continue
+
+            representative_values = next(iter(period_values.values()))
+            entity = structural_entities.get(variable_name)
+            if entity is None:
+                entity = _infer_policyengine_array_entity(
+                    variable_name=variable_name,
+                    values=representative_values,
+                    entity_lengths=entity_lengths,
+                    tax_benefit_system=tax_benefit_system,
+                )
+            mask = entity_masks.get(entity)
+            if mask is None:
+                continue
+
+            sampled_periods: dict[str, np.ndarray] = {}
+            for stored_period, values in period_values.items():
+                sampled_values = values[mask]
+                if variable_name in scaled_weight_variables:
+                    sampled_values = sampled_values.astype(np.float64) * weight_scale
+                sampled_periods[stored_period] = sampled_values
+            sampled_arrays[variable_name] = sampled_periods
+
     return str(
         write_policyengine_us_time_period_dataset(
-            arrays,
+            sampled_arrays,
             output_dataset_path,
         ).resolve()
     )

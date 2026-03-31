@@ -1623,3 +1623,20 @@ Append-only notes for agents working in `microplex-us`.
   - `ruff check src/microplex_us/pipelines/performance.py tests/pipelines/test_performance.py` -> clean
 - Read:
   - the local harness can now emit `Microplex@N`, raw `PE@N`, and reweighted `PE@N` from one comparable evaluation surface
+
+## 2026-03-31 matched PE baseline fidelity fix
+
+- Scope: repaired matched-`N` PE baseline generation in `src/microplex_us/pipelines/performance.py`
+- Root cause:
+  - the harness matched-baseline writer was lossy
+  - full-count `PE@29999` collapsed to `17` variables instead of `167`
+  - smaller matched baselines silently dropped non-annual variables such as `is_household_head` (`ETERNITY`) and `receives_wic` (monthly)
+- Fix:
+  - `N == full_N` now short-circuits to a byte-for-byte copy of the original PE baseline H5
+  - smaller matched baselines are now sampled directly at the H5 array level, preserving all variables and all stored periods
+- Focused verification:
+  - `pytest -q tests/pipelines/test_performance.py -k 'matched_native_loss or write_matched_policyengine_us_baseline_dataset_preserves_variables'` -> `3 passed`
+  - `ruff check src/microplex_us/pipelines/performance.py tests/pipelines/test_performance.py` -> clean
+  - direct schema diff now matches full PE exactly at `N=2000`, `N=3000`, and `N=29999` (`167` vars, no missing, no extra)
+- Consequence:
+  - the earlier harness-produced raw `PE@29999` comparator was invalid and should not be used
