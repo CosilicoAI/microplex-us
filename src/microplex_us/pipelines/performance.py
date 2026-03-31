@@ -224,6 +224,16 @@ def _sorted_normalized_items(
     )
 
 
+_POLICYENGINE_SELECTION_CACHE_FIELDS = frozenset(
+    {
+        "policyengine_selection_backend",
+        "policyengine_selection_household_budget",
+        "policyengine_selection_max_iter",
+        "policyengine_selection_tol",
+        "policyengine_selection_l2_penalty",
+    }
+)
+
 PRECALIBRATION_EXCLUDED_BUILD_CONFIG_FIELDS = frozenset(
     {
         "calibration_backend",
@@ -240,15 +250,10 @@ PRECALIBRATION_EXCLUDED_BUILD_CONFIG_FIELDS = frozenset(
         "policyengine_calibration_target_variables",
         "policyengine_calibration_target_domains",
         "policyengine_calibration_target_geo_levels",
-        "policyengine_selection_backend",
-        "policyengine_selection_household_budget",
-        "policyengine_selection_max_iter",
-        "policyengine_selection_tol",
-        "policyengine_selection_l2_penalty",
         "policyengine_target_reform_id",
         "policyengine_simulation_cls",
     }
-)
+) | _POLICYENGINE_SELECTION_CACHE_FIELDS
 
 CALIBRATION_INCLUDED_BUILD_CONFIG_FIELDS = frozenset(
     {
@@ -265,16 +270,11 @@ CALIBRATION_INCLUDED_BUILD_CONFIG_FIELDS = frozenset(
         "policyengine_calibration_target_variables",
         "policyengine_calibration_target_domains",
         "policyengine_calibration_target_geo_levels",
-        "policyengine_selection_backend",
-        "policyengine_selection_household_budget",
-        "policyengine_selection_max_iter",
-        "policyengine_selection_tol",
-        "policyengine_selection_l2_penalty",
         "policyengine_target_reform_id",
         "policyengine_simulation_cls",
         "policyengine_dataset_year",
     }
-)
+) | _POLICYENGINE_SELECTION_CACHE_FIELDS
 
 
 def _provider_cache_identity(provider: SourceProvider) -> tuple[str, tuple[tuple[str, object], ...]]:

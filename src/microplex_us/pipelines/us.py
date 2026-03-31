@@ -1483,10 +1483,9 @@ class USMicroplexPipeline:
                 input_dataset_path=selection_input_path,
                 output_dataset_path=selection_output_path,
                 period=period,
-                budget=requested_budget,
-                max_iter=max(self.config.policyengine_selection_max_iter, 1),
-                l2_penalty=float(self.config.policyengine_selection_l2_penalty),
-                tol=float(self.config.policyengine_selection_tol),
+                **self._policyengine_selection_optimizer_kwargs(
+                    requested_budget=requested_budget
+                ),
             )
             with h5py.File(selection_output_path, "r") as handle:
                 period_key = str(period)
@@ -1513,6 +1512,18 @@ class USMicroplexPipeline:
         optimization_summary = optimization_result.to_dict()
         optimization_summary.pop("target_names", None)
         return selector_weights, optimization_summary
+
+    def _policyengine_selection_optimizer_kwargs(
+        self,
+        *,
+        requested_budget: int,
+    ) -> dict[str, int | float]:
+        return {
+            "budget": requested_budget,
+            "max_iter": max(self.config.policyengine_selection_max_iter, 1),
+            "l2_penalty": float(self.config.policyengine_selection_l2_penalty),
+            "tol": float(self.config.policyengine_selection_tol),
+        }
 
     def calibrate_policyengine_tables(
         self,
