@@ -1584,3 +1584,16 @@ Append-only notes for agents working in `microplex-us`.
   - `ruff check src/microplex_us/pipelines/performance.py tests/pipelines/test_performance.py` -> clean
 - Read:
   - the ad hoc exact-target analysis wrapper can now be replaced by a first-class harness output
+
+## 2026-03-31 harness batch native scoring
+
+- Code:
+  - `src/microplex_us/pipelines/performance.py`
+    - added `USMicroplexPerformanceHarnessRequest` and `USMicroplexPerformanceSession.run_batch(...)`
+    - shared-session batch runs now export candidates once, group compatible requests by baseline/repo/period, and score PE-native loss through `compute_batch_us_pe_native_scores(...)`
+    - keeps direct PE-native optimizer runs on the single-candidate path, but removes repeated scorer subprocess overhead for normal multi-candidate native-loss A/Bs
+- Focused verification:
+  - `pytest -q tests/pipelines/test_performance.py -k 'run_batch_uses_native_batch_scorer or write_pe_native_target_delta_output or rejects_nonpositive_target_delta_top_k or write_output_bundle or writes_optimized_dataset_output or can_optimize_native_loss or can_evaluate_native_loss or reuses_comparison_cache or reuses_loaded_frames or reuses_precalibration_state or reuses_calibration_state'` -> `11 passed`
+  - `ruff check src/microplex_us/pipelines/performance.py src/microplex_us/pipelines/__init__.py src/microplex_us/__init__.py tests/pipelines/test_performance.py` -> clean
+- Read:
+  - the local performance harness now has a real multi-candidate PE-native path instead of relying on separate experiment/backfill machinery

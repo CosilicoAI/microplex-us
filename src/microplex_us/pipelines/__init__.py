@@ -51,6 +51,7 @@ from microplex_us.pipelines.pe_native_scores import (
 )
 from microplex_us.pipelines.performance import (
     USMicroplexPerformanceHarnessConfig,
+    USMicroplexPerformanceHarnessRequest,
     USMicroplexPerformanceHarnessResult,
     USMicroplexPerformanceSession,
     run_us_microplex_performance_harness,
@@ -91,6 +92,7 @@ __all__ = [
     "USMicroplexSourceExperimentSpec",
     "build_us_n_synthetic_sweep_experiments",
     "USMicroplexPerformanceHarnessConfig",
+    "USMicroplexPerformanceHarnessRequest",
     "USMicroplexPerformanceHarnessResult",
     "USMicroplexPerformanceSession",
     "USHouseholdTargetReweightingResult",

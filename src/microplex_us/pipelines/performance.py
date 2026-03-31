@@ -20,6 +20,7 @@ from microplex_us.pipelines.pe_native_optimization import (
 )
 from microplex_us.pipelines.pe_native_scores import (
     compare_us_pe_native_target_deltas,
+    compute_batch_us_pe_native_scores,
     compute_us_pe_native_scores,
 )
 from microplex_us.pipelines.us import (
@@ -199,6 +200,15 @@ class USMicroplexPerformanceHarnessResult:
         destination.parent.mkdir(parents=True, exist_ok=True)
         destination.write_text(json.dumps(self.to_dict(), indent=2, sort_keys=True))
         return destination
+
+
+@dataclass(frozen=True)
+class USMicroplexPerformanceHarnessRequest:
+    """One performance-harness request for shared-session batch execution."""
+
+    providers: tuple[SourceProvider, ...]
+    config: USMicroplexPerformanceHarnessConfig
+    queries: dict[str, SourceQuery] | None = None
 
 
 @dataclass
@@ -596,6 +606,148 @@ class USMicroplexPerformanceSession:
             precalibration_cache=self.precalibration_cache,
             calibration_cache=self.calibration_cache,
         )
+
+    def run_batch(
+        self,
+        requests: list[USMicroplexPerformanceHarnessRequest]
+        | tuple[USMicroplexPerformanceHarnessRequest, ...],
+    ) -> tuple[USMicroplexPerformanceHarnessResult, ...]:
+        """Run multiple requests with shared caches and grouped PE-native batch scoring."""
+
+        if not requests:
+            return ()
+
+        indexed_results: list[USMicroplexPerformanceHarnessResult] = []
+        batch_groups: dict[
+            tuple[str, int, str | None],
+            list[tuple[int, str, USMicroplexPerformanceHarnessConfig]],
+        ] = {}
+        pending_target_deltas: list[tuple[int, str, USMicroplexPerformanceHarnessConfig]] = []
+
+        with TemporaryDirectory(prefix="microplex-us-harness-batch-") as temp_dir:
+            temp_root = Path(temp_dir)
+            for index, request in enumerate(requests):
+                original_config = request.config
+                should_batch_native_loss = (
+                    original_config.evaluate_pe_native_loss
+                    and not original_config.optimize_pe_native_loss
+                    and original_config.baseline_dataset is not None
+                )
+                dataset_output_path = original_config.output_policyengine_dataset_path
+                if should_batch_native_loss and dataset_output_path is None:
+                    dataset_output_path = temp_root / f"candidate_{index}.h5"
+
+                run_config = original_config
+                if should_batch_native_loss:
+                    run_config = replace(
+                        original_config,
+                        evaluate_pe_native_loss=False,
+                        output_json_path=None,
+                        output_pe_native_target_delta_path=None,
+                        output_policyengine_dataset_path=dataset_output_path,
+                    )
+
+                result = self.run(
+                    list(request.providers),
+                    config=run_config,
+                    queries=request.queries,
+                )
+                if should_batch_native_loss:
+                    if result.policyengine_dataset_path is None:
+                        raise ValueError(
+                            "Batched PE-native scoring requires an exported policyengine dataset path"
+                        )
+                    result = replace(result, config=original_config)
+                    group_key = (
+                        str(original_config.baseline_dataset),
+                        (
+                            result.build_config.policyengine_dataset_year
+                            or original_config.target_period
+                        ),
+                        (
+                            str(original_config.policyengine_us_data_repo)
+                            if original_config.policyengine_us_data_repo is not None
+                            else None
+                        ),
+                    )
+                    batch_groups.setdefault(group_key, []).append(
+                        (index, result.policyengine_dataset_path, original_config)
+                    )
+                    if original_config.output_pe_native_target_delta_path is not None:
+                        pending_target_deltas.append(
+                            (index, result.policyengine_dataset_path, original_config)
+                        )
+                indexed_results.append(result)
+
+            for group_key, group_items in batch_groups.items():
+                baseline_dataset, period, policyengine_us_data_repo = group_key
+                payloads = compute_batch_us_pe_native_scores(
+                    candidate_dataset_paths=[
+                        candidate_path for _, candidate_path, _ in group_items
+                    ],
+                    baseline_dataset_path=baseline_dataset,
+                    period=period,
+                    policyengine_us_data_repo=policyengine_us_data_repo,
+                )
+                if len(payloads) != len(group_items):
+                    raise ValueError(
+                        "PE-native batch scorer returned a different number of payloads than requests"
+                    )
+                for (result_index, _candidate_path, original_config), payload in zip(
+                    group_items,
+                    payloads,
+                    strict=True,
+                ):
+                    stage_timings = dict(indexed_results[result_index].stage_timings)
+                    timing = payload.get("timing")
+                    if isinstance(timing, dict):
+                        batch_elapsed = timing.get("batch_elapsed_seconds")
+                        if batch_elapsed is not None:
+                            stage_timings["evaluate_pe_native_loss"] = float(batch_elapsed)
+                    updated_result = replace(
+                        indexed_results[result_index],
+                        config=original_config,
+                        stage_timings=stage_timings,
+                        pe_native_scores=payload,
+                    )
+                    indexed_results[result_index] = updated_result
+
+            for result_index, candidate_path, original_config in pending_target_deltas:
+                target_deltas = compare_us_pe_native_target_deltas(
+                    from_dataset_path=str(original_config.baseline_dataset),
+                    to_dataset_path=candidate_path,
+                    period=(
+                        indexed_results[result_index].build_config.policyengine_dataset_year
+                        or original_config.target_period
+                    ),
+                    top_k=original_config.pe_native_target_delta_top_k,
+                    policyengine_us_data_repo=original_config.policyengine_us_data_repo,
+                )
+                destination = Path(original_config.output_pe_native_target_delta_path)
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                destination.write_text(
+                    json.dumps(
+                        _json_compatible_value(target_deltas),
+                        indent=2,
+                        sort_keys=True,
+                    )
+                )
+                stage_timings = dict(indexed_results[result_index].stage_timings)
+                stage_timings.setdefault("evaluate_pe_native_target_deltas", 0.0)
+                stage_timings.setdefault("write_pe_native_target_delta_json", 0.0)
+                indexed_results[result_index] = replace(
+                    indexed_results[result_index],
+                    stage_timings=stage_timings,
+                    pe_native_target_deltas=target_deltas,
+                )
+
+            final_results: list[USMicroplexPerformanceHarnessResult] = []
+            for result in indexed_results:
+                if result.config.output_json_path is not None:
+                    result.save(result.config.output_json_path)
+                final_results.append(result)
+
+        return tuple(final_results)
 
 
 def _union_target_set(target_sets: dict[str, TargetSet]) -> TargetSet:
@@ -1037,6 +1189,7 @@ def run_us_microplex_performance_harness(
 
 __all__ = [
     "USMicroplexPerformanceHarnessConfig",
+    "USMicroplexPerformanceHarnessRequest",
     "USMicroplexPerformanceHarnessResult",
     "USMicroplexCalibrationCacheEntry",
     "USMicroplexPreCalibrationCacheEntry",

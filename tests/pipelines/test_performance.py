@@ -16,6 +16,8 @@ from microplex_us.pipelines.pe_native_optimization import (
 )
 from microplex_us.pipelines.performance import (
     USMicroplexPerformanceHarnessConfig,
+    USMicroplexPerformanceHarnessRequest,
+    USMicroplexPerformanceHarnessResult,
     USMicroplexPerformanceSession,
     _calibration_build_config_key,
     _precalibration_build_config_key,
@@ -962,6 +964,124 @@ def test_us_microplex_performance_session_reuses_comparison_cache(monkeypatch):
             session.calibration_cache,
         )
     ]
+
+
+def test_us_microplex_performance_session_run_batch_uses_native_batch_scorer(
+    monkeypatch,
+    tmp_path,
+):
+    session = USMicroplexPerformanceSession()
+    run_configs: list[USMicroplexPerformanceHarnessConfig] = []
+    batch_calls: list[dict[str, object]] = []
+
+    fake_build_result = SimpleNamespace(calibration_summary={"backend": "entropy"})
+    fake_build_config = USMicroplexBuildConfig()
+
+    def fake_run(
+        providers,
+        *,
+        config,
+        queries=None,
+        comparison_cache=None,
+        frame_cache=None,
+        precalibration_cache=None,
+        calibration_cache=None,
+    ):
+        _ = providers
+        _ = queries
+        _ = comparison_cache
+        _ = frame_cache
+        _ = precalibration_cache
+        _ = calibration_cache
+        run_configs.append(config)
+        dataset_path = Path(config.output_policyengine_dataset_path)
+        dataset_path.parent.mkdir(parents=True, exist_ok=True)
+        dataset_path.write_text("stub")
+        return USMicroplexPerformanceHarnessResult(
+            config=config,
+            build_config=fake_build_config,
+            build_result=fake_build_result,
+            source_names=("cps",),
+            stage_timings={"load_frames": 0.0},
+            total_seconds=0.0,
+            parity_run=None,
+            pe_native_scores=None,
+            pe_native_target_deltas=None,
+            policyengine_dataset_path=str(dataset_path),
+        )
+
+    def fake_batch_score(**kwargs):
+        batch_calls.append(kwargs)
+        return [
+            {
+                "summary": {
+                    "candidate_enhanced_cps_native_loss": 0.2,
+                    "baseline_enhanced_cps_native_loss": 0.3,
+                    "enhanced_cps_native_loss_delta": -0.1,
+                },
+                "timing": {
+                    "batch_elapsed_seconds": 1.25,
+                    "batch_candidate_count": 2,
+                },
+            },
+            {
+                "summary": {
+                    "candidate_enhanced_cps_native_loss": 0.25,
+                    "baseline_enhanced_cps_native_loss": 0.3,
+                    "enhanced_cps_native_loss_delta": -0.05,
+                },
+                "timing": {
+                    "batch_elapsed_seconds": 1.25,
+                    "batch_candidate_count": 2,
+                },
+            },
+        ]
+
+    monkeypatch.setattr(
+        "microplex_us.pipelines.performance.run_us_microplex_performance_harness",
+        fake_run,
+    )
+    monkeypatch.setattr(
+        "microplex_us.pipelines.performance.compute_batch_us_pe_native_scores",
+        fake_batch_score,
+    )
+
+    requests = (
+        USMicroplexPerformanceHarnessRequest(
+            providers=(_DummyProvider("cps"),),
+            config=USMicroplexPerformanceHarnessConfig(
+                evaluate_parity=False,
+                evaluate_pe_native_loss=True,
+                baseline_dataset="/tmp/enhanced_cps.h5",
+                policyengine_us_data_repo="/tmp/policyengine-us-data",
+                output_policyengine_dataset_path=tmp_path / "candidate_a.h5",
+            ),
+        ),
+        USMicroplexPerformanceHarnessRequest(
+            providers=(_DummyProvider("cps"),),
+            config=USMicroplexPerformanceHarnessConfig(
+                evaluate_parity=False,
+                evaluate_pe_native_loss=True,
+                baseline_dataset="/tmp/enhanced_cps.h5",
+                policyengine_us_data_repo="/tmp/policyengine-us-data",
+                output_policyengine_dataset_path=tmp_path / "candidate_b.h5",
+            ),
+        ),
+    )
+
+    results = session.run_batch(requests)
+
+    assert len(run_configs) == 2
+    assert all(config.evaluate_pe_native_loss is False for config in run_configs)
+    assert len(batch_calls) == 1
+    assert batch_calls[0]["baseline_dataset_path"] == "/tmp/enhanced_cps.h5"
+    assert batch_calls[0]["candidate_dataset_paths"] == [
+        str(tmp_path / "candidate_a.h5"),
+        str(tmp_path / "candidate_b.h5"),
+    ]
+    assert results[0].pe_native_scores["summary"]["candidate_enhanced_cps_native_loss"] == 0.2
+    assert results[1].pe_native_scores["summary"]["candidate_enhanced_cps_native_loss"] == 0.25
+    assert results[0].stage_timings["evaluate_pe_native_loss"] == 1.25
 
 
 def test_us_microplex_performance_session_reuses_loaded_frames(monkeypatch):
