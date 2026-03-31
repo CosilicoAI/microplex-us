@@ -1610,3 +1610,16 @@ Append-only notes for agents working in `microplex-us`.
   - `ruff check src/microplex_us/pipelines/performance.py tests/pipelines/test_performance.py` -> clean
 - Read:
   - matched-size raw PE baselines are now a first-class harness comparator instead of a separate notebook-style script
+
+## 2026-03-31 harness matched-N reweighted PE baseline
+
+- Code:
+  - `src/microplex_us/pipelines/performance.py`
+    - added `reweight_matched_pe_native_loss`
+    - matched-size PE baseline path can now run PE's own `enhanced_cps.reweight(...)` on the sampled baseline H5 before rescoring
+    - this gives the local harness a fairer `PE@N_reweighted` comparator than simple weight rescaling alone
+- Focused verification:
+  - `pytest -q tests/pipelines/test_performance.py -k 'reweight_matched_native_loss or evaluate_matched_native_loss or rejects_reweighted_matched_loss_without_matched_loss or rejects_nonpositive_matched_baseline_household_count or run_batch_uses_native_batch_scorer or write_pe_native_target_delta_output or rejects_nonpositive_target_delta_top_k or write_output_bundle or writes_optimized_dataset_output or can_optimize_native_loss or can_evaluate_native_loss or reuses_comparison_cache or reuses_loaded_frames or reuses_precalibration_state or reuses_calibration_state'` -> `15 passed`
+  - `ruff check src/microplex_us/pipelines/performance.py tests/pipelines/test_performance.py` -> clean
+- Read:
+  - the local harness can now emit `Microplex@N`, raw `PE@N`, and reweighted `PE@N` from one comparable evaluation surface

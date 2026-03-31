@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import json
 import shutil
+import subprocess
 from collections.abc import Iterable
 from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from time import perf_counter
 
+import numpy as np
 import pandas as pd
 from microplex.core import ObservationFrame, SourceProvider, SourceQuery
 from microplex.fusion import FusionPlan
@@ -17,11 +19,15 @@ from microplex.targets import TargetSet
 
 from microplex_us.pipelines.pe_native_optimization import (
     optimize_policyengine_us_native_loss_dataset,
+    rewrite_policyengine_us_dataset_weights,
 )
 from microplex_us.pipelines.pe_native_scores import (
+    _ENHANCED_CPS_BAD_TARGETS,
+    build_policyengine_us_data_subprocess_env,
     compare_us_pe_native_target_deltas,
     compute_batch_us_pe_native_scores,
     compute_us_pe_native_scores,
+    resolve_policyengine_us_data_repo_root,
 )
 from microplex_us.pipelines.us import (
     USMicroplexBuildConfig,
@@ -66,6 +72,72 @@ PRECALIBRATION_STAGE_NAMES = (
     "build_policyengine_tables",
 )
 
+_MATCHED_BASELINE_REWEIGHT_SCRIPT = """
+import json
+import sys
+from pathlib import Path
+
+import numpy as np
+from policyengine_core.data import Dataset
+
+REPO_ROOT = sys.argv[1]
+if REPO_ROOT not in sys.path:
+    sys.path.insert(0, REPO_ROOT)
+
+from policyengine_us import Microsimulation
+from policyengine_us_data.datasets.cps.enhanced_cps import reweight
+from policyengine_us_data.utils.loss import build_loss_matrix
+
+BAD_TARGETS = tuple(json.loads(sys.argv[2]))
+PERIOD = int(sys.argv[3])
+DATASET_PATH = sys.argv[4]
+OUTPUT_WEIGHTS = Path(sys.argv[5])
+EPOCHS = int(sys.argv[6])
+L0_LAMBDA = float(sys.argv[7])
+SEED = int(sys.argv[8])
+
+
+def dataset_from_path(dataset_path: str, dataset_name: str):
+    class LocalDataset(Dataset):
+        name = dataset_name
+        label = dataset_name
+        file_path = dataset_path
+        data_format = Dataset.TIME_PERIOD_ARRAYS
+        time_period = PERIOD
+
+    return LocalDataset
+
+
+dataset_cls = dataset_from_path(
+    DATASET_PATH,
+    Path(DATASET_PATH).stem.replace("-", "_"),
+)
+sim = Microsimulation(dataset=dataset_cls)
+original_weights = sim.calculate(
+    "household_weight",
+    map_to="household",
+    period=PERIOD,
+).values.astype(np.float64)
+rng = np.random.default_rng(SEED)
+original_weights = original_weights + rng.normal(1.0, 0.1, len(original_weights))
+loss_matrix, targets_array = build_loss_matrix(dataset_cls, PERIOD)
+zero_mask = np.isclose(targets_array, 0.0, atol=0.1)
+bad_mask = loss_matrix.columns.isin(BAD_TARGETS)
+keep_mask = ~(zero_mask | bad_mask)
+loss_matrix_clean = loss_matrix.loc[:, keep_mask].astype(np.float32)
+targets_array_clean = targets_array[keep_mask]
+optimized_weights = reweight(
+    original_weights,
+    loss_matrix_clean,
+    targets_array_clean,
+    log_path=None,
+    epochs=EPOCHS,
+    l0_lambda=L0_LAMBDA,
+    seed=SEED,
+)
+np.save(OUTPUT_WEIGHTS, optimized_weights.astype(np.float32))
+""".strip()
+
 
 def default_fast_calibration_target_variables(
     variables: tuple[str, ...],
@@ -101,6 +173,7 @@ class USMicroplexPerformanceHarnessConfig:
     evaluate_parity: bool = True
     evaluate_pe_native_loss: bool = False
     evaluate_matched_pe_native_loss: bool = False
+    reweight_matched_pe_native_loss: bool = False
     optimize_pe_native_loss: bool = False
     pe_native_household_budget: int | None = None
     pe_native_optimizer_max_iter: int = 200
@@ -110,6 +183,9 @@ class USMicroplexPerformanceHarnessConfig:
     pe_native_target_delta_top_k: int = 25
     matched_baseline_household_count: int | None = None
     matched_baseline_random_seed: int = 42
+    matched_baseline_reweight_epochs: int = 250
+    matched_baseline_reweight_l0_lambda: float = 2.6445e-07
+    matched_baseline_reweight_seed: int = 1456
     policyengine_us_data_repo: str | Path | None = None
     strict_materialization: bool = True
     fast_inner_loop_calibration: bool = False
@@ -535,6 +611,59 @@ def _write_matched_policyengine_us_baseline_dataset(
     )
 
 
+def _reweight_matched_policyengine_us_baseline_dataset(
+    input_dataset_path: str | Path,
+    output_dataset_path: str | Path,
+    *,
+    period: int,
+    epochs: int,
+    l0_lambda: float,
+    seed: int,
+    policyengine_us_data_repo: str | Path | None = None,
+) -> str:
+    resolved_repo = resolve_policyengine_us_data_repo_root(policyengine_us_data_repo)
+    env = build_policyengine_us_data_subprocess_env(resolved_repo)
+    with TemporaryDirectory(prefix="microplex-us-matched-baseline-reweight-") as temp_dir:
+        weights_path = Path(temp_dir) / "matched_baseline_weights.npy"
+        completed = subprocess.run(
+            [
+                "uv",
+                "run",
+                "--project",
+                str(resolved_repo),
+                "python",
+                "-c",
+                _MATCHED_BASELINE_REWEIGHT_SCRIPT,
+                str(resolved_repo),
+                json.dumps(_ENHANCED_CPS_BAD_TARGETS),
+                str(int(period)),
+                str(Path(input_dataset_path).expanduser().resolve()),
+                str(weights_path),
+                str(int(epochs)),
+                str(float(l0_lambda)),
+                str(int(seed)),
+            ],
+            cwd=resolved_repo,
+            env=env,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if completed.returncode != 0:
+            stderr = completed.stderr.strip()
+            stdout = completed.stdout.strip()
+            detail = stderr or stdout or f"exit code {completed.returncode}"
+            raise RuntimeError(f"Matched baseline reweighting failed: {detail}")
+        optimized_weights = np.load(weights_path)
+    rewritten = rewrite_policyengine_us_dataset_weights(
+        input_dataset_path=input_dataset_path,
+        output_dataset_path=output_dataset_path,
+        household_weights=optimized_weights,
+        period=period,
+    )
+    return str(rewritten.resolve())
+
+
 def _default_provider_query(
     config: USMicroplexPerformanceHarnessConfig,
 ) -> SourceQuery:
@@ -926,6 +1055,10 @@ def run_us_microplex_performance_harness(
         raise ValueError(
             "USMicroplex performance harness requires baseline_dataset for matched PE-native loss scoring"
         )
+    if config.reweight_matched_pe_native_loss and not config.evaluate_matched_pe_native_loss:
+        raise ValueError(
+            "reweight_matched_pe_native_loss requires evaluate_matched_pe_native_loss"
+        )
     if config.optimize_pe_native_loss and not config.evaluate_pe_native_loss:
         raise ValueError(
             "USMicroplex performance harness requires evaluate_pe_native_loss when optimize_pe_native_loss is enabled"
@@ -944,6 +1077,10 @@ def run_us_microplex_performance_harness(
         and config.matched_baseline_household_count <= 0
     ):
         raise ValueError("matched_baseline_household_count must be positive")
+    if config.matched_baseline_reweight_epochs <= 0:
+        raise ValueError("matched_baseline_reweight_epochs must be positive")
+    if config.matched_baseline_reweight_l0_lambda < 0.0:
+        raise ValueError("matched_baseline_reweight_l0_lambda must be nonnegative")
     if (
         config.output_pe_native_target_delta_path is not None
         and config.baseline_dataset is None
@@ -1243,6 +1380,26 @@ def run_us_microplex_performance_harness(
                     "build_matched_baseline_dataset",
                     matched_start,
                 )
+                if config.reweight_matched_pe_native_loss:
+                    reweight_start = _stage(
+                        stage_timings,
+                        "reweight_matched_baseline_dataset",
+                    )
+                    matched_baseline_dataset_path = _reweight_matched_policyengine_us_baseline_dataset(
+                        matched_baseline_dataset_path,
+                        config.output_matched_baseline_dataset_path
+                        or (Path(temp_dir) / "matched_baseline_policyengine_us_reweighted.h5"),
+                        period=build_config.policyengine_dataset_year or config.target_period,
+                        epochs=config.matched_baseline_reweight_epochs,
+                        l0_lambda=config.matched_baseline_reweight_l0_lambda,
+                        seed=config.matched_baseline_reweight_seed,
+                        policyengine_us_data_repo=config.policyengine_us_data_repo,
+                    )
+                    _finish_stage(
+                        stage_timings,
+                        "reweight_matched_baseline_dataset",
+                        reweight_start,
+                    )
                 matched_score_start = _stage(
                     stage_timings,
                     "evaluate_matched_pe_native_loss",

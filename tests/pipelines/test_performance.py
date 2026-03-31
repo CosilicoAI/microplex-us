@@ -562,6 +562,111 @@ def test_run_us_microplex_performance_harness_can_evaluate_matched_native_loss(
     assert "evaluate_matched_pe_native_loss" in result.stage_timings
 
 
+def test_run_us_microplex_performance_harness_can_reweight_matched_native_loss(
+    monkeypatch,
+    tmp_path,
+):
+    _patch_fake_harness(monkeypatch)
+    matched_calls: list[dict[str, object]] = []
+    reweight_calls: list[dict[str, object]] = []
+    score_calls: list[dict[str, object]] = []
+
+    def _fake_write_matched_baseline(
+        baseline_dataset_path,
+        output_dataset_path,
+        *,
+        period,
+        household_count,
+        random_seed,
+    ):
+        matched_calls.append(
+            {
+                "baseline_dataset_path": baseline_dataset_path,
+                "period": period,
+                "household_count": household_count,
+                "random_seed": random_seed,
+            }
+        )
+        path = Path(output_dataset_path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("matched")
+        return str(path.resolve())
+
+    def _fake_reweight(
+        input_dataset_path,
+        output_dataset_path,
+        *,
+        period,
+        epochs,
+        l0_lambda,
+        seed,
+        policyengine_us_data_repo,
+    ):
+        reweight_calls.append(
+            {
+                "input_dataset_path": input_dataset_path,
+                "output_dataset_path": str(Path(output_dataset_path)),
+                "period": period,
+                "epochs": epochs,
+                "l0_lambda": l0_lambda,
+                "seed": seed,
+                "policyengine_us_data_repo": policyengine_us_data_repo,
+            }
+        )
+        path = Path(output_dataset_path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("reweighted")
+        return str(path.resolve())
+
+    def _fake_score(**kwargs):
+        score_calls.append(kwargs)
+        return {
+            "summary": {
+                "candidate_enhanced_cps_native_loss": 0.17,
+                "baseline_enhanced_cps_native_loss": 0.21,
+                "enhanced_cps_native_loss_delta": -0.04,
+            }
+        }
+
+    monkeypatch.setattr(
+        "microplex_us.pipelines.performance._write_matched_policyengine_us_baseline_dataset",
+        _fake_write_matched_baseline,
+    )
+    monkeypatch.setattr(
+        "microplex_us.pipelines.performance._reweight_matched_policyengine_us_baseline_dataset",
+        _fake_reweight,
+    )
+    monkeypatch.setattr(
+        "microplex_us.pipelines.performance.compute_us_pe_native_scores",
+        _fake_score,
+    )
+
+    baseline_output = tmp_path / "matched_baseline_reweighted.h5"
+    result = run_us_microplex_performance_harness(
+        providers=[_DummyProvider("cps")],
+        config=USMicroplexPerformanceHarnessConfig(
+            evaluate_parity=False,
+            evaluate_matched_pe_native_loss=True,
+            reweight_matched_pe_native_loss=True,
+            matched_baseline_reweight_epochs=300,
+            matched_baseline_reweight_l0_lambda=1e-6,
+            matched_baseline_reweight_seed=123,
+            baseline_dataset="/tmp/enhanced_cps.h5",
+            policyengine_us_data_repo="/tmp/policyengine-us-data",
+            output_matched_baseline_dataset_path=baseline_output,
+        ),
+    )
+
+    assert len(matched_calls) == 1
+    assert len(reweight_calls) == 1
+    assert reweight_calls[0]["epochs"] == 300
+    assert reweight_calls[0]["l0_lambda"] == 1e-6
+    assert reweight_calls[0]["seed"] == 123
+    assert score_calls[0]["baseline_dataset_path"] == str(baseline_output.resolve())
+    assert result.matched_baseline_dataset_path == str(baseline_output.resolve())
+    assert "reweight_matched_baseline_dataset" in result.stage_timings
+
+
 def test_run_us_microplex_performance_harness_can_write_output_bundle(monkeypatch, tmp_path):
     _patch_fake_harness(monkeypatch)
 
@@ -898,6 +1003,27 @@ def test_run_us_microplex_performance_harness_rejects_nonpositive_matched_baseli
     else:  # pragma: no cover - defensive assertion
         raise AssertionError(
             "expected matched baseline household count validation error"
+        )
+
+
+def test_run_us_microplex_performance_harness_rejects_reweighted_matched_loss_without_matched_loss(
+    monkeypatch,
+):
+    _patch_fake_harness(monkeypatch)
+
+    try:
+        run_us_microplex_performance_harness(
+            providers=[_DummyProvider("cps")],
+            config=USMicroplexPerformanceHarnessConfig(
+                evaluate_parity=False,
+                reweight_matched_pe_native_loss=True,
+            ),
+        )
+    except ValueError as exc:
+        assert "evaluate_matched_pe_native_loss" in str(exc)
+    else:  # pragma: no cover - defensive assertion
+        raise AssertionError(
+            "expected reweighted matched baseline validation error"
         )
 
 
