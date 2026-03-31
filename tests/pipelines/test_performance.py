@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
@@ -484,6 +485,31 @@ def test_run_us_microplex_performance_harness_can_evaluate_native_loss(monkeypat
     assert "evaluate_pe_native_loss" in result.stage_timings
 
 
+def test_run_us_microplex_performance_harness_can_write_output_bundle(monkeypatch, tmp_path):
+    _patch_fake_harness(monkeypatch)
+
+    result_path = tmp_path / "result.json"
+    dataset_path = tmp_path / "candidate.h5"
+
+    result = run_us_microplex_performance_harness(
+        providers=[_DummyProvider("cps")],
+        config=USMicroplexPerformanceHarnessConfig(
+            evaluate_parity=False,
+            output_json_path=result_path,
+            output_policyengine_dataset_path=dataset_path,
+        ),
+    )
+
+    assert result_path.exists()
+    assert dataset_path.exists()
+    assert result.policyengine_dataset_path == str(dataset_path)
+
+    payload = json.loads(result_path.read_text())
+    assert payload["policyengine_dataset_path"] == str(dataset_path)
+    assert payload["source_names"] == ["cps"]
+    assert payload["calibration_summary"]["backend"] == "policyengine_db_entropy"
+
+
 def test_run_us_microplex_performance_harness_passes_export_direct_overrides(monkeypatch):
     stage_log: list[str] = []
     _patch_fake_harness(monkeypatch, stage_log=stage_log)
@@ -581,6 +607,65 @@ def test_run_us_microplex_performance_harness_can_optimize_native_loss(monkeypat
     assert result.pe_native_scores["optimization"]["optimized_loss"] == 0.2
     assert result.pe_native_scores["optimization"]["rescored_loss_abs_error"] == 0.0
     assert "optimize_pe_native_loss_weights" in result.stage_timings
+
+
+def test_run_us_microplex_performance_harness_writes_optimized_dataset_output(
+    monkeypatch,
+    tmp_path,
+):
+    _patch_fake_harness(monkeypatch)
+
+    def _fake_optimize(**kwargs):
+        Path(kwargs["output_dataset_path"]).write_text("optimized")
+        return PolicyEngineUSNativeWeightOptimizationResult(
+            metric="enhanced_cps_native_loss_weight_optimization",
+            period=2024,
+            input_dataset=str(kwargs["input_dataset_path"]),
+            output_dataset=str(Path(kwargs["output_dataset_path"]).resolve()),
+            initial_loss=0.4,
+            optimized_loss=0.2,
+            loss_delta=-0.2,
+            initial_weight_sum=10.0,
+            optimized_weight_sum=10.0,
+            household_count=3,
+            positive_household_count=2,
+            budget=2,
+            converged=True,
+            iterations=12,
+            target_names=("nation/foo", "state/bar"),
+        )
+
+    monkeypatch.setattr(
+        "microplex_us.pipelines.performance.optimize_policyengine_us_native_loss_dataset",
+        _fake_optimize,
+    )
+    monkeypatch.setattr(
+        "microplex_us.pipelines.performance.compute_us_pe_native_scores",
+        lambda **kwargs: {
+            "summary": {
+                "candidate_enhanced_cps_native_loss": 0.2,
+                "baseline_enhanced_cps_native_loss": 0.3,
+                "enhanced_cps_native_loss_delta": -0.1,
+            }
+        },
+    )
+
+    dataset_path = tmp_path / "candidate_optimized.h5"
+    result = run_us_microplex_performance_harness(
+        providers=[_DummyProvider("cps")],
+        config=USMicroplexPerformanceHarnessConfig(
+            evaluate_parity=False,
+            evaluate_pe_native_loss=True,
+            optimize_pe_native_loss=True,
+            pe_native_household_budget=2,
+            baseline_dataset="/tmp/enhanced_cps.h5",
+            policyengine_us_data_repo="/tmp/policyengine-us-data",
+            output_policyengine_dataset_path=dataset_path,
+        ),
+    )
+
+    assert result.policyengine_dataset_path == str(dataset_path.resolve())
+    assert dataset_path.read_text() == "optimized"
 
 
 def test_run_us_microplex_performance_harness_rejects_native_optimization_without_scoring(

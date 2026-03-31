@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import json
+import shutil
 from collections.abc import Iterable
-from dataclasses import dataclass, field, replace
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from time import perf_counter
@@ -100,6 +102,8 @@ class USMicroplexPerformanceHarnessConfig:
     policyengine_us_data_repo: str | Path | None = None
     strict_materialization: bool = True
     fast_inner_loop_calibration: bool = False
+    output_json_path: str | Path | None = None
+    output_policyengine_dataset_path: str | Path | None = None
 
 
 @dataclass(frozen=True)
@@ -114,6 +118,7 @@ class USMicroplexPerformanceHarnessResult:
     total_seconds: float
     parity_run: PolicyEngineUSHarnessRun | None = None
     pe_native_scores: dict[str, object] | None = None
+    policyengine_dataset_path: str | None = None
 
     def _parity_run_attr(self, name: str) -> float | None:
         if self.parity_run is None:
@@ -159,6 +164,32 @@ class USMicroplexPerformanceHarnessResult:
         value = self._pe_native_score_attr("enhanced_cps_native_loss_delta")
         return float(value) if value is not None else None
 
+    def to_dict(self) -> dict[str, object]:
+        payload: dict[str, object] = {
+            "config": _json_compatible_value(asdict(self.config)),
+            "build_config": self.build_config.to_dict(),
+            "source_names": list(self.source_names),
+            "stage_timings": dict(self.stage_timings),
+            "total_seconds": float(self.total_seconds),
+            "calibration_summary": _json_compatible_value(
+                self.build_result.calibration_summary
+            ),
+            "policyengine_dataset_path": self.policyengine_dataset_path,
+        }
+        if self.parity_run is not None:
+            payload["parity_run"] = self.parity_run.to_dict()
+        if self.pe_native_scores is not None:
+            payload["pe_native_scores"] = _json_compatible_value(
+                self.pe_native_scores
+            )
+        return payload
+
+    def save(self, path: str | Path) -> Path:
+        destination = Path(path)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_text(json.dumps(self.to_dict(), indent=2, sort_keys=True))
+        return destination
+
 
 @dataclass
 class USMicroplexPreCalibrationCacheEntry:
@@ -194,6 +225,14 @@ def _finish_stage(stage_timings: dict[str, float], name: str, start: float) -> N
     stage_timings[name] += perf_counter() - start
 
 
+def _copy_output_file(source: str | Path, destination: str | Path) -> str:
+    source_path = Path(source).expanduser().resolve()
+    destination_path = Path(destination).expanduser().resolve()
+    destination_path.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(source_path, destination_path)
+    return str(destination_path)
+
+
 def _normalize_source_query_value(value: object) -> object:
     if isinstance(value, Path):
         return str(value)
@@ -210,6 +249,26 @@ def _normalize_source_query_value(value: object) -> object:
         return tuple(_normalize_source_query_value(item) for item in value)
     if callable(value):
         return f"{value.__module__}.{value.__qualname__}"
+    return str(value)
+
+
+def _json_compatible_value(value: object) -> object:
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, dict):
+        return {
+            str(key): _json_compatible_value(item)
+            for key, item in value.items()
+        }
+    if isinstance(value, (list, tuple)):
+        return [_json_compatible_value(item) for item in value]
+    if hasattr(value, "item") and callable(getattr(value, "item")):
+        try:
+            return _json_compatible_value(value.item())
+        except (TypeError, ValueError):
+            pass
+    if isinstance(value, (str, int, float, bool)) or value is None:
+        return value
     return str(value)
 
 
@@ -809,6 +868,7 @@ def run_us_microplex_performance_harness(
         )
         _finish_stage(stage_timings, "evaluate_parity_harness", start)
 
+    policyengine_dataset_path = None
     pe_native_scores = None
     if config.evaluate_pe_native_loss:
         start = _stage(stage_timings, "evaluate_pe_native_loss")
@@ -874,10 +934,25 @@ def run_us_microplex_performance_harness(
                 pe_native_optimization = dict(pe_native_optimization)
                 pe_native_optimization["rescored_loss_abs_error"] = abs_error
                 pe_native_scores["optimization"] = pe_native_optimization
+            if config.output_policyengine_dataset_path is not None:
+                policyengine_dataset_path = _copy_output_file(
+                    dataset_to_score,
+                    config.output_policyengine_dataset_path,
+                )
         _finish_stage(stage_timings, "evaluate_pe_native_loss", start)
+    elif config.output_policyengine_dataset_path is not None:
+        start = _stage(stage_timings, "write_policyengine_dataset")
+        policyengine_dataset_path = str(
+            pipeline.export_policyengine_dataset(
+                build_result,
+                config.output_policyengine_dataset_path,
+                direct_override_variables=build_config.policyengine_direct_override_variables,
+            )
+        )
+        _finish_stage(stage_timings, "write_policyengine_dataset", start)
 
     total_seconds = perf_counter() - total_start
-    return USMicroplexPerformanceHarnessResult(
+    result = USMicroplexPerformanceHarnessResult(
         config=config,
         build_config=build_config,
         build_result=build_result,
@@ -886,7 +961,13 @@ def run_us_microplex_performance_harness(
         total_seconds=total_seconds,
         parity_run=parity_run,
         pe_native_scores=pe_native_scores,
+        policyengine_dataset_path=policyengine_dataset_path,
     )
+    if config.output_json_path is not None:
+        start = _stage(stage_timings, "write_output_json")
+        result.save(config.output_json_path)
+        _finish_stage(stage_timings, "write_output_json", start)
+    return result
 
 
 __all__ = [

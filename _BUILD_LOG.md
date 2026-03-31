@@ -1558,3 +1558,16 @@ Append-only notes for agents working in `microplex-us`.
 - Read:
   - budgeted selection on a full-support candidate is the first PE-scale change that clearly moved the frontier in the right direction
   - this is still not enough to beat full PE, but it is strong evidence that candidate construction + selection is a better lever than source-side subsampling or post-export weight tuning
+
+## 2026-03-31 harness output contract
+
+- Code:
+  - `src/microplex_us/pipelines/performance.py`
+    - added `output_json_path` and `output_policyengine_dataset_path` to the local harness config
+    - harness can now persist one self-contained JSON summary and one final PE-ingestable H5 without ad hoc wrapper scripts
+    - when `optimize_pe_native_loss=True`, the persisted H5 is the optimized dataset that was actually scored, not the pre-optimization export
+- Focused verification:
+  - `pytest -q tests/pipelines/test_performance.py -k 'write_output_bundle or writes_optimized_dataset_output or can_optimize_native_loss or can_evaluate_native_loss'` -> `4 passed`
+  - `ruff check src/microplex_us/pipelines/performance.py tests/pipelines/test_performance.py` -> clean
+- Read:
+  - long PE-scale runs no longer need bespoke `uv run python <<PY` wrappers just to save a JSON summary and exported dataset
