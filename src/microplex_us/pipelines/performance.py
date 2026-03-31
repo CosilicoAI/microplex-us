@@ -13,6 +13,9 @@ from microplex.core import ObservationFrame, SourceProvider, SourceQuery
 from microplex.fusion import FusionPlan
 from microplex.targets import TargetSet
 
+from microplex_us.pipelines.pe_native_optimization import (
+    optimize_policyengine_us_native_loss_dataset,
+)
 from microplex_us.pipelines.pe_native_scores import compute_us_pe_native_scores
 from microplex_us.pipelines.us import (
     USMicroplexBuildConfig,
@@ -88,6 +91,11 @@ class USMicroplexPerformanceHarnessConfig:
     build_config: USMicroplexBuildConfig | None = None
     evaluate_parity: bool = True
     evaluate_pe_native_loss: bool = False
+    optimize_pe_native_loss: bool = False
+    pe_native_household_budget: int | None = None
+    pe_native_optimizer_max_iter: int = 200
+    pe_native_optimizer_l2_penalty: float = 0.0
+    pe_native_optimizer_tol: float = 1e-8
     policyengine_us_data_repo: str | Path | None = None
     strict_materialization: bool = True
     fast_inner_loop_calibration: bool = False
@@ -592,6 +600,15 @@ def run_us_microplex_performance_harness(
         raise ValueError(
             "USMicroplex performance harness requires baseline_dataset for PE-native loss scoring"
         )
+    if config.optimize_pe_native_loss and not config.evaluate_pe_native_loss:
+        raise ValueError(
+            "USMicroplex performance harness requires evaluate_pe_native_loss when optimize_pe_native_loss is enabled"
+        )
+    if (
+        config.pe_native_household_budget is not None
+        and config.pe_native_household_budget <= 0
+    ):
+        raise ValueError("pe_native_household_budget must be positive when provided")
 
     build_config = _resolve_build_config(config)
     pipeline = USMicroplexPipeline(build_config)
@@ -790,12 +807,42 @@ def run_us_microplex_performance_harness(
                 Path(temp_dir) / "candidate_policyengine_us.h5",
                 direct_override_variables=build_config.policyengine_direct_override_variables,
             )
+            dataset_to_score = candidate_dataset_path
+            pe_native_optimization = None
+            if config.optimize_pe_native_loss:
+                optimize_start = _stage(
+                    stage_timings,
+                    "optimize_pe_native_loss_weights",
+                )
+                optimized_dataset_path = (
+                    Path(temp_dir) / "candidate_policyengine_us_optimized.h5"
+                )
+                optimization_result = optimize_policyengine_us_native_loss_dataset(
+                    input_dataset_path=candidate_dataset_path,
+                    output_dataset_path=optimized_dataset_path,
+                    period=build_config.policyengine_dataset_year or config.target_period,
+                    budget=config.pe_native_household_budget,
+                    max_iter=config.pe_native_optimizer_max_iter,
+                    l2_penalty=config.pe_native_optimizer_l2_penalty,
+                    tol=config.pe_native_optimizer_tol,
+                    policyengine_us_data_repo=config.policyengine_us_data_repo,
+                )
+                dataset_to_score = optimized_dataset_path
+                pe_native_optimization = optimization_result.to_dict()
+                _finish_stage(
+                    stage_timings,
+                    "optimize_pe_native_loss_weights",
+                    optimize_start,
+                )
             pe_native_scores = compute_us_pe_native_scores(
-                candidate_dataset_path=candidate_dataset_path,
+                candidate_dataset_path=dataset_to_score,
                 baseline_dataset_path=str(config.baseline_dataset),
                 period=build_config.policyengine_dataset_year or config.target_period,
                 policyengine_us_data_repo=config.policyengine_us_data_repo,
             )
+            if pe_native_optimization is not None:
+                pe_native_scores = dict(pe_native_scores)
+                pe_native_scores["optimization"] = pe_native_optimization
         _finish_stage(stage_timings, "evaluate_pe_native_loss", start)
 
     total_seconds = perf_counter() - total_start

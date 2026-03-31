@@ -3,12 +3,16 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 from types import SimpleNamespace
 
 import pandas as pd
 from microplex.core import EntityType
 from microplex.targets import TargetQuery, TargetSet, TargetSpec
 
+from microplex_us.pipelines.pe_native_optimization import (
+    PolicyEngineUSNativeWeightOptimizationResult,
+)
 from microplex_us.pipelines.performance import (
     USMicroplexPerformanceHarnessConfig,
     USMicroplexPerformanceSession,
@@ -476,6 +480,100 @@ def test_run_us_microplex_performance_harness_passes_export_direct_overrides(mon
     )
 
     assert "export_policyengine_dataset:('filing_status', 'snap')" in stage_log
+
+
+def test_run_us_microplex_performance_harness_can_optimize_native_loss(monkeypatch):
+    stage_log: list[str] = []
+    _patch_fake_harness(monkeypatch, stage_log=stage_log)
+    optimization_calls: list[dict[str, object]] = []
+    score_calls: list[dict[str, object]] = []
+
+    def _fake_optimize(**kwargs):
+        optimization_calls.append(kwargs)
+        Path(kwargs["output_dataset_path"]).write_text("optimized")
+        return PolicyEngineUSNativeWeightOptimizationResult(
+            metric="enhanced_cps_native_loss_weight_optimization",
+            period=2024,
+            input_dataset=str(kwargs["input_dataset_path"]),
+            output_dataset=str(Path(kwargs["output_dataset_path"]).resolve()),
+            initial_loss=0.4,
+            optimized_loss=0.2,
+            loss_delta=-0.2,
+            initial_weight_sum=10.0,
+            optimized_weight_sum=10.0,
+            household_count=3,
+            positive_household_count=2,
+            budget=2,
+            converged=True,
+            iterations=12,
+            target_names=("nation/foo", "state/bar"),
+        )
+
+    def _fake_score(**kwargs):
+        score_calls.append(kwargs)
+        return {
+            "summary": {
+                "candidate_enhanced_cps_native_loss": 0.2,
+                "baseline_enhanced_cps_native_loss": 0.3,
+                "enhanced_cps_native_loss_delta": -0.1,
+            }
+        }
+
+    monkeypatch.setattr(
+        "microplex_us.pipelines.performance.optimize_policyengine_us_native_loss_dataset",
+        _fake_optimize,
+    )
+    monkeypatch.setattr(
+        "microplex_us.pipelines.performance.compute_us_pe_native_scores",
+        _fake_score,
+    )
+
+    result = run_us_microplex_performance_harness(
+        providers=[_DummyProvider("cps")],
+        config=USMicroplexPerformanceHarnessConfig(
+            evaluate_parity=False,
+            evaluate_pe_native_loss=True,
+            optimize_pe_native_loss=True,
+            pe_native_household_budget=2,
+            pe_native_optimizer_max_iter=50,
+            pe_native_optimizer_l2_penalty=0.25,
+            pe_native_optimizer_tol=1e-6,
+            baseline_dataset="/tmp/enhanced_cps.h5",
+            policyengine_us_data_repo="/tmp/policyengine-us-data",
+        ),
+    )
+
+    assert len(optimization_calls) == 1
+    assert optimization_calls[0]["budget"] == 2
+    assert optimization_calls[0]["max_iter"] == 50
+    assert optimization_calls[0]["l2_penalty"] == 0.25
+    assert optimization_calls[0]["tol"] == 1e-6
+    assert str(score_calls[0]["candidate_dataset_path"]).endswith(
+        "candidate_policyengine_us_optimized.h5"
+    )
+    assert result.pe_native_scores is not None
+    assert result.pe_native_scores["optimization"]["optimized_loss"] == 0.2
+    assert "optimize_pe_native_loss_weights" in result.stage_timings
+
+
+def test_run_us_microplex_performance_harness_rejects_native_optimization_without_scoring(
+    monkeypatch,
+):
+    _patch_fake_harness(monkeypatch)
+
+    try:
+        run_us_microplex_performance_harness(
+            providers=[_DummyProvider("cps")],
+            config=USMicroplexPerformanceHarnessConfig(
+                evaluate_parity=False,
+                evaluate_pe_native_loss=False,
+                optimize_pe_native_loss=True,
+            ),
+        )
+    except ValueError as exc:
+        assert "evaluate_pe_native_loss" in str(exc)
+    else:  # pragma: no cover - defensive assertion
+        raise AssertionError("expected optimize_pe_native_loss validation error")
 
 
 def test_warm_us_microplex_parity_cache_preloads_baseline(monkeypatch):

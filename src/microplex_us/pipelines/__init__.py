@@ -32,6 +32,12 @@ from microplex_us.pipelines.local_reweighting import (
     USHouseholdTargetReweightingResult,
     reweight_us_household_targets,
 )
+from microplex_us.pipelines.pe_native_optimization import (
+    PolicyEngineUSNativeWeightOptimizationResult,
+    optimize_pe_native_loss_weights,
+    optimize_policyengine_us_native_loss_dataset,
+    rewrite_policyengine_us_dataset_weights,
+)
 from microplex_us.pipelines.pe_native_scores import (
     PolicyEngineUSEnhancedCPSNativeScores,
     compare_us_pe_native_target_deltas,
@@ -109,6 +115,7 @@ __all__ = [
     "append_us_microplex_run_registry_entry",
     "build_us_microplex_run_registry_entry",
     "PolicyEngineUSEnhancedCPSNativeScores",
+    "PolicyEngineUSNativeWeightOptimizationResult",
     "compare_us_pe_native_target_deltas",
     "compute_batch_us_pe_native_scores",
     "compute_policyengine_us_enhanced_cps_native_scores",
@@ -122,6 +129,9 @@ __all__ = [
     "select_us_microplex_frontier_index_row",
     "select_us_microplex_frontier_entry",
     "build_us_microplex_site_snapshot",
+    "optimize_pe_native_loss_weights",
+    "optimize_policyengine_us_native_loss_dataset",
+    "rewrite_policyengine_us_dataset_weights",
     "write_us_pe_native_scores",
     "write_us_pre_sim_parity_audit",
     "write_us_microplex_site_snapshot",

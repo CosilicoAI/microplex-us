@@ -1471,3 +1471,38 @@ Append-only notes for agents working in `microplex-us`.
     - `policyengine_selection_household_budget=29999`
     - `donor_imputer_backend='qrf'`
     - `donor_imputer_excluded_variables=('filing_status_code',)`
+
+## 2026-03-31 direct PE-native objective path
+
+- Code:
+  - `src/microplex_us/pipelines/pe_native_optimization.py`
+    - added direct PE-native loss-matrix extraction from `policyengine-us-data`
+    - added projected gradient weight optimization on the exact broad PE-native objective for a fixed exported candidate
+    - added H5 rewrite utilities to propagate optimized household weights to person and group weight arrays
+  - `src/microplex_us/pipelines/performance.py`
+    - added opt-in `optimize_pe_native_loss` harness mode so exported candidates can be weight-optimized before PE-native scoring
+  - `src/microplex_us/pipelines/__init__.py`
+    - exported the direct PE-native optimization helpers
+- Focused verification:
+  - `pytest -q tests/pipelines/test_pe_native_optimization.py tests/pipelines/test_performance.py -k 'native_loss or pe_native_optimization'` -> `5 passed`
+  - `ruff check src/microplex_us/pipelines/pe_native_optimization.py src/microplex_us/pipelines/performance.py src/microplex_us/pipelines/__init__.py tests/pipelines/test_pe_native_optimization.py tests/pipelines/test_performance.py` -> clean
+- First same-candidate direct-objective A/B:
+  - input candidate:
+    - `/Users/maxghenis/CosilicoAI/microplex-us/artifacts/live_pe_native_broad_entropy_batch_noharness_20260329/20260329T210427Z-057066af/policyengine_us.h5`
+  - optimized output:
+    - `/Users/maxghenis/CosilicoAI/microplex-us/artifacts/tmp_pe_native_direct_opt_20260331.h5`
+  - summary:
+    - `/Users/maxghenis/CosilicoAI/microplex-us/artifacts/tmp_pe_native_direct_opt_20260331.json`
+  - result:
+    - raw candidate PE-native broad loss: `0.9233365911702252`
+    - direct-objective optimized loss: `0.9229024219474923`
+    - improvement: `-0.00043416922273291814`
+    - baseline PE loss: `0.020243908529428433`
+    - optimizer status:
+      - `converged=false`
+      - `iterations=200`
+      - `positive_household_count=1993 / 2000`
+- Read:
+  - optimizing the exact PE-native broad objective on a fixed exported candidate helps only trivially
+  - objective mismatch is real but not the main blocker on the current path
+  - the next large gain must come from better records or a budgeted selector over a larger support set, not just replacing entropy with a better weight objective after export
