@@ -1684,3 +1684,26 @@ Append-only notes for agents working in `microplex-us`.
   - `ruff check src/microplex_us/data_sources/puf.py src/microplex_us/policyengine/us.py src/microplex_us/variables.py tests/test_puf_source_provider.py tests/policyengine/test_us.py tests/test_variables.py` -> clean
 - Read:
   - the remaining IRS gap is not just “more support”; several high-loss cells were impossible to hit because losses or leaves were being structurally erased before PE saw them
+
+## 2026-03-31 authoritative donor override for shared IRS variables
+
+- Scope: allow PUF to replace weak shared CPS scaffold values for a narrow signed-IRS allowlist instead of only filling donor-only variables
+- Root cause:
+  - even after restoring signed PUF support, donor integration only modeled `donor_observed - scaffold_observed`
+  - `self_employment_income` and `rental_income` exist on both CPS and PUF, so PUF could not overwrite the CPS scaffold despite being the more authoritative IRS-style source
+  - when a shared variable becomes a donor target, it also must be removed from donor conditions for that block; otherwise the imputer just learns back the scaffold value being replaced
+- Code:
+  - `src/microplex_us/pipelines/us.py`
+    - add `donor_imputer_authoritative_override_variables`, defaulting to `self_employment_income` and `rental_income`
+    - allow authoritative donors to model and overwrite those shared variables
+    - exclude block target variables from the donor condition set
+- Focused verification:
+  - `pytest -q tests/pipelines/test_us.py -k 'authoritative_override_for_shared_irs_variables or preserves_informative_scaffold_values or defaults'` -> `4 passed`
+  - `ruff check src/microplex_us/pipelines/us.py tests/pipelines/test_us.py` -> clean
+- Cheap export spotcheck:
+  - `artifacts/tmp_signed_income_override_spotcheck_20260331.h5`
+  - `self_employment_income_before_lsr`: `31` negative rows, `62` positive rows, min `-14175.0`
+  - `rental_income`: `14` negative rows, `32` positive rows, min `-243450.0`
+  - `non_sch_d_capital_gains`: `24` positive rows
+- Read:
+  - the signed IRS surfaces now survive into a real PE export, which is the prerequisite for the next full `29,999` selector rerun

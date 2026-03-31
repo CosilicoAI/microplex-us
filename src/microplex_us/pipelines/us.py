@@ -551,6 +551,10 @@ class USMicroplexBuildConfig:
     )
     donor_imputer_max_condition_vars: int | None = 8
     donor_imputer_excluded_variables: tuple[str, ...] = ("filing_status_code",)
+    donor_imputer_authoritative_override_variables: tuple[str, ...] = (
+        "self_employment_income",
+        "rental_income",
+    )
     bootstrap_strata_columns: tuple[str, ...] = ()
     prefer_cached_cps_asec_source: bool = False
     cps_asec_source_year: int = 2023
@@ -762,6 +766,9 @@ class USMicroplexPipeline:
             "scaffold_source": scaffold_input.frame.source.name,
             "donor_integrated_variables": donor_integration["integrated_variables"],
             "donor_excluded_variables": list(self.config.donor_imputer_excluded_variables),
+            "donor_authoritative_override_variables": list(
+                self.config.donor_imputer_authoritative_override_variables
+            ),
             "state_program_support_proxies": _state_program_support_proxy_summary(
                 set(seed_data.columns)
             ),
@@ -2249,10 +2256,24 @@ class USMicroplexPipeline:
                 and self._should_integrate_donor_variable(current, variable)
                 and self._is_compatible_donor_target(donor_seed[variable])
             )
-            if not shared_vars or not donor_only_vars:
+            donor_override_vars = sorted(
+                variable
+                for variable in scaffold_observed & donor_observed
+                if variable not in excluded
+                and variable not in self.config.donor_imputer_excluded_variables
+                and variable in self.config.donor_imputer_authoritative_override_variables
+                and variable in current.columns
+                and variable in donor_seed.columns
+                and variable in numeric_current
+                and variable in numeric_donor
+                and donor_input.frame.source.is_authoritative_for(variable)
+                and self._is_compatible_donor_target(donor_seed[variable])
+            )
+            donor_target_vars = sorted(set(donor_only_vars) | set(donor_override_vars))
+            if not shared_vars or not donor_target_vars:
                 continue
 
-            donor_block_specs = donor_imputation_block_specs(donor_only_vars)
+            donor_block_specs = donor_imputation_block_specs(donor_target_vars)
             required_entities = {
                 donor_block_spec.native_entity
                 for donor_block_spec in donor_block_specs
@@ -2272,7 +2293,11 @@ class USMicroplexPipeline:
                 donor_working = donor_seed.copy()
                 if donor_block_spec.prepare_frame is not None:
                     donor_working = donor_block_spec.prepare_frame(donor_working)
-                shared_vars_for_block = list(shared_vars)
+                shared_vars_for_block = [
+                    variable
+                    for variable in shared_vars
+                    if variable not in donor_block_spec.model_variables
+                ]
                 donor_fit_source = donor_working
                 current_generation_source = current
                 entity_key = self._entity_key_column(donor_block_spec.native_entity)
