@@ -96,6 +96,7 @@ class USMicroplexPerformanceHarnessConfig:
     pe_native_optimizer_max_iter: int = 200
     pe_native_optimizer_l2_penalty: float = 0.0
     pe_native_optimizer_tol: float = 1e-8
+    pe_native_score_consistency_tol: float = 1e-6
     policyengine_us_data_repo: str | Path | None = None
     strict_materialization: bool = True
     fast_inner_loop_calibration: bool = False
@@ -609,6 +610,8 @@ def run_us_microplex_performance_harness(
         and config.pe_native_household_budget <= 0
     ):
         raise ValueError("pe_native_household_budget must be positive when provided")
+    if config.pe_native_score_consistency_tol <= 0.0:
+        raise ValueError("pe_native_score_consistency_tol must be positive")
 
     build_config = _resolve_build_config(config)
     pipeline = USMicroplexPipeline(build_config)
@@ -841,7 +844,27 @@ def run_us_microplex_performance_harness(
                 policyengine_us_data_repo=config.policyengine_us_data_repo,
             )
             if pe_native_optimization is not None:
+                summary = pe_native_scores.get("summary")
+                if not isinstance(summary, dict):
+                    raise ValueError(
+                        "PE-native optimization requires score summary metadata for consistency validation"
+                    )
+                rescored_loss = summary.get("candidate_enhanced_cps_native_loss")
+                if rescored_loss is None:
+                    raise ValueError(
+                        "PE-native optimization consistency validation requires candidate_enhanced_cps_native_loss"
+                    )
+                abs_error = abs(
+                    float(rescored_loss) - float(pe_native_optimization["optimized_loss"])
+                )
+                if abs_error > config.pe_native_score_consistency_tol:
+                    raise ValueError(
+                        "PE-native optimized loss does not match rescored loss within tolerance: "
+                        f"{abs_error:.6g} > {config.pe_native_score_consistency_tol:.6g}"
+                    )
                 pe_native_scores = dict(pe_native_scores)
+                pe_native_optimization = dict(pe_native_optimization)
+                pe_native_optimization["rescored_loss_abs_error"] = abs_error
                 pe_native_scores["optimization"] = pe_native_optimization
         _finish_stage(stage_timings, "evaluate_pe_native_loss", start)
 

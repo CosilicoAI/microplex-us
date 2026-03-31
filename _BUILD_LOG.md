@@ -1506,3 +1506,31 @@ Append-only notes for agents working in `microplex-us`.
   - optimizing the exact PE-native broad objective on a fixed exported candidate helps only trivially
   - objective mismatch is real but not the main blocker on the current path
   - the next large gain must come from better records or a budgeted selector over a larger support set, not just replacing entropy with a better weight objective after export
+
+## 2026-03-31 PE-native optimizer score-consistency guard
+
+- Code:
+  - `src/microplex_us/pipelines/performance.py`
+    - added a hard consistency check for `optimize_pe_native_loss=True`
+    - the rescored `candidate_enhanced_cps_native_loss` must now match the optimizer's internal `optimized_loss` within `pe_native_score_consistency_tol` (default `1e-6`)
+    - mismatches now raise immediately instead of silently attaching stale/incorrect optimization metadata
+- Focused verification:
+  - `pytest -q tests/pipelines/test_performance.py -k 'optimize_native_loss or consistency'` -> `1 passed`
+  - `ruff check src/microplex_us/pipelines/performance.py tests/pipelines/test_performance.py` -> clean
+- Read:
+  - this does not change the diagnosis; it just makes the direct-objective path trustworthy for future larger-candidate selector work
+
+## 2026-03-31 focused Claude review — direct PE-native optimizer
+
+- Scope: code review + architectural diagnosis of `pe_native_optimization.py`, harness integration, and first A/B result
+- Full review: `reviews/2026-03-31-claude-direct-pe-native-optimizer-review.md`
+- Top findings:
+  1. **Objective alignment is correct**: optimizer's `||M^T w - s||^2` proven algebraically identical to the scorer's native loss. Initial losses match within float64 noise (2e-16).
+  2. **No serious correctness bugs**: gradient, Lipschitz estimate, simplex projection, H5 weight rewrite, and harness integration are all correct.
+  3. **MINOR**: weight-sum drift ~9e-6 relative after 200 iterations (cosmetic). No cross-validation between optimizer's internal loss and rescored loss (worth adding as guard).
+- Objective alignment confirmed: the direct optimizer minimizes the exact same function the scorer evaluates.
+- Tiny gain (0.92334 → 0.92290) definitively confirms record support is the bottleneck:
+  - The best achievable loss with 2000 households is ~0.923 — entropy was already near-optimal for this support
+  - Only 0.05% of the 0.903 gap to PE is attributable to the weight objective
+  - The other 99.95% is structural (support, state coverage, missing IRS mass)
+- Top next fix: full-support + budgeted household selection path (already prototyped). Do not invest further in direct weight optimization on small candidates.
