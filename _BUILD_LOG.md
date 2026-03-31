@@ -1534,3 +1534,27 @@ Append-only notes for agents working in `microplex-us`.
   - Only 0.05% of the 0.903 gap to PE is attributable to the weight objective
   - The other 99.95% is structural (support, state coverage, missing IRS mass)
 - Top next fix: full-support + budgeted household selection path (already prototyped). Do not invest further in direct weight optimization on small candidates.
+
+## 2026-03-31 full-support PE-native-loss selector at PE row budget
+
+- Scope: full CPS + full PUF support, `synthesis_backend='seed'`, `policyengine_selection_backend='pe_native_loss'`, household budget `29,999`
+- Artifact:
+  - `artifacts/tmp_fullsource_seed_pe_native_selector29999_20260331.json`
+  - `artifacts/tmp_fullsource_seed_pe_native_selector29999_20260331.h5`
+- Result:
+  1. candidate PE-native broad loss `0.6333835740352115`
+  2. PE baseline `0.020243908529428433`
+  3. delta `+0.613139665505783`
+- Comparison:
+  1. materially better than earlier full-support sparse selector (`0.8960`)
+  2. materially better than source-sampled `29,999` run (`0.9548`)
+  3. still far from full PE baseline
+- Diagnostics:
+  1. final calibration still `converged=false`
+  2. supported targets `2575 / 4183`
+  3. feasibility filter dropped `887 / 3462` post-selection constraints (`25.6%`)
+  4. selector optimization itself did not converge in `200` iterations, but still produced a much stronger selected population
+  5. selector kept exactly `29,999` positive-weight households from `56,839` input households
+- Read:
+  - budgeted selection on a full-support candidate is the first PE-scale change that clearly moved the frontier in the right direction
+  - this is still not enough to beat full PE, but it is strong evidence that candidate construction + selection is a better lever than source-side subsampling or post-export weight tuning
