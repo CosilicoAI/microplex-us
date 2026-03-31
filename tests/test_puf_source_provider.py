@@ -225,6 +225,8 @@ def test_puf_source_provider_maps_policyengine_medical_and_alimony_inputs(tmp_pa
             "E00200": [50_000.0],
             "E00800": [2_000.0],
             "E17500": [1_000.0],
+            "E26390": [700.0],
+            "E26400": [200.0],
             "AGE_HEAD": [45],
             "GENDER": [1],
         }
@@ -247,6 +249,7 @@ def test_puf_source_provider_maps_policyengine_medical_and_alimony_inputs(tmp_pa
     assert persons["other_medical_expenses"].sum() == 325.0
     assert persons["medicare_part_b_premiums"].sum() == 137.0
     assert persons["over_the_counter_health_expenses"].sum() == 85.0
+    assert persons["estate_income"].sum() == 500.0
     assert persons["income"].sum() == 52_000.0
 
 

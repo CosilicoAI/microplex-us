@@ -186,6 +186,10 @@ def test_load_cps_asec_caches_household_geography_on_persons(tmp_path):
             "PEDISOUT": [0, 0, 0],
             "PEDISPHY": [0, 0, 0],
             "PEDISREM": [0, 0, 0],
+            "RESNSS1": [0, 2, 0],
+            "RESNSS2": [0, 0, 0],
+            "SS_VAL": [0, 9000, 0],
+            "WICYN": [1, 2, 0],
             "NOW_MRK": [1, 0, 0],
             "NOW_GRP": [0, 1, 0],
         }
@@ -213,6 +217,8 @@ def test_load_cps_asec_caches_household_geography_on_persons(tmp_path):
     assert "cps_race" in first.persons.columns
     assert "is_hispanic" in first.persons.columns
     assert "is_disabled" in first.persons.columns
+    assert "social_security_disability" in first.persons.columns
+    assert "receives_wic" in first.persons.columns
     assert "has_marketplace_health_coverage" in first.persons.columns
     assert "has_esi" in first.persons.columns
     assert cached_persons["state_fips"].to_list() == [6, 6, 36]
@@ -220,9 +226,11 @@ def test_load_cps_asec_caches_household_geography_on_persons(tmp_path):
     assert cached_persons["cps_race"].to_list() == [4, 4, 1]
     assert cached_persons["is_hispanic"].to_list() == [False, True, False]
     assert cached_persons["is_disabled"].to_list() == [False, True, False]
+    assert cached_persons["social_security_disability"].to_list() == [0.0, 9000.0, 0.0]
+    assert cached_persons["receives_wic"].to_list() == [True, False, False]
     assert cached_persons["has_marketplace_health_coverage"].to_list() == [True, False, False]
     assert cached_persons["has_esi"].to_list() == [False, True, False]
-    assert second.source.endswith("cps_asec_2023_processed_v20260330.parquet")
+    assert second.source.endswith("cps_asec_2023_processed_v20260331.parquet")
     assert sorted(second.households["state_fips"].to_list()) == [6, 36]
     assert sorted(second.households["county_fips"].to_list()) == [1, 61]
 
@@ -241,6 +249,10 @@ def test_load_cps_asec_derives_policyengine_value_inputs(tmp_path):
             "DIS_SC1": [2, 1],
             "DIS_VAL2": [50, 25],
             "DIS_SC2": [3, 2],
+            "RESNSS1": [2, 1],
+            "RESNSS2": [0, 0],
+            "SS_VAL": [1200, 800],
+            "WICYN": [1, 2],
             "PHIP_VAL": [900, -1],
             "POTC_VAL": [120, -1],
             "PMED_VAL": [450, -1],
@@ -256,6 +268,8 @@ def test_load_cps_asec_derives_policyengine_value_inputs(tmp_path):
     assert persons["alimony_income"].tolist() == [1200, 0]
     assert persons["child_support_received"].tolist() == [300, 0]
     assert persons["disability_benefits"].tolist() == [550, 25]
+    assert persons["social_security_disability"].tolist() == [1200, 0]
+    assert persons["receives_wic"].tolist() == [True, False]
     assert persons["health_insurance_premiums_without_medicare_part_b"].tolist() == [900, 0]
     assert persons["over_the_counter_health_expenses"].tolist() == [120, 0]
     assert persons["other_medical_expenses"].tolist() == [450, 0]
@@ -277,8 +291,10 @@ def test_cps_source_provider_repeat_loads_are_deterministic_for_cached_processed
             "cps_race": [1, 4, 1, 2, 4],
             "is_hispanic": [False, True, False, False, True],
             "is_disabled": [False, False, False, True, False],
+            "social_security_disability": [0.0] * 5,
             "has_esi": [True, False, True, False, False],
             "has_marketplace_health_coverage": [False, True, False, False, True],
+            "receives_wic": [False] * 5,
             "alimony_income": [0.0, 0.0, 0.0, 0.0, 0.0],
             "child_support_received": [0.0, 0.0, 0.0, 0.0, 0.0],
             "disability_benefits": [0.0, 0.0, 0.0, 0.0, 0.0],

@@ -33,7 +33,7 @@ from microplex_us.source_registry import resolve_source_variable_capabilities
 
 # Default cache directory
 DEFAULT_CACHE_DIR = Path.home() / ".cache" / "microplex"
-CPS_ASEC_PROCESSED_CACHE_VERSION = "20260330"
+CPS_ASEC_PROCESSED_CACHE_VERSION = "20260331"
 
 # CPS ASEC data URLs by year
 CPS_URLS = {
@@ -61,6 +61,8 @@ PERSON_VARIABLES = {
     "DIS_SC1": "_disability_income_code_1",
     "DIS_VAL2": "_disability_income_2",
     "DIS_SC2": "_disability_income_code_2",
+    "RESNSS1": "_social_security_reason_1",
+    "RESNSS2": "_social_security_reason_2",
     # Employment
     "A_CLSWKR": "class_of_worker",
     "A_WKSTAT": "work_status",
@@ -88,6 +90,7 @@ PERSON_VARIABLES = {
     "POTC_VAL": "over_the_counter_health_expenses",
     "PMED_VAL": "other_medical_expenses",
     "PEMCPREM": "medicare_part_b_premiums",
+    "WICYN": "_receives_wic",
     # Identifiers
     "PH_SEQ": "household_id",
     "GESTFIPS": "state_fips",
@@ -144,6 +147,7 @@ PERSON_NONNEGATIVE_VALUE_COLUMNS = (
     "over_the_counter_health_expenses",
     "other_medical_expenses",
     "medicare_part_b_premiums",
+    "social_security_disability",
 )
 
 PERSON_ZERO_DEFAULT_VALUE_COLUMNS = (
@@ -154,6 +158,7 @@ PERSON_ZERO_DEFAULT_VALUE_COLUMNS = (
     "over_the_counter_health_expenses",
     "other_medical_expenses",
     "medicare_part_b_premiums",
+    "social_security_disability",
 )
 
 PERSON_CACHE_REQUIRED_COLUMNS = (
@@ -171,6 +176,8 @@ PERSON_CACHE_REQUIRED_COLUMNS = (
     "other_medical_expenses",
     "over_the_counter_health_expenses",
     "medicare_part_b_premiums",
+    "social_security_disability",
+    "receives_wic",
 )
 
 PERSON_CPS_DISABILITY_COLUMNS = (
@@ -184,6 +191,9 @@ PERSON_CPS_DISABILITY_COLUMNS = (
 
 WORKERS_COMP_DISABILITY_CODE = 1
 ALIMONY_OTHER_INCOME_CODE = 20
+SOCIAL_SECURITY_RETIREMENT_REASON_CODE = 1
+SOCIAL_SECURITY_DISABILITY_REASON_CODE = 2
+MINIMUM_RETIREMENT_AGE = 62
 
 
 def processed_cps_asec_cache_path(*, year: int, cache_dir: Path) -> Path:
@@ -762,6 +772,51 @@ def _process_persons(df: pl.DataFrame, year: int) -> pl.DataFrame:
         ]
         if drop_columns:
             result = result.drop(drop_columns)
+    if {
+        "_social_security_reason_1",
+        "_social_security_reason_2",
+        "social_security",
+        "age",
+    }.issubset(set(result.columns)) and "social_security_disability" not in result.columns:
+        reason_1 = pl.col("_social_security_reason_1")
+        reason_2 = pl.col("_social_security_reason_2")
+        has_retirement_reason = (
+            (reason_1 == SOCIAL_SECURITY_RETIREMENT_REASON_CODE)
+            | (reason_2 == SOCIAL_SECURITY_RETIREMENT_REASON_CODE)
+        )
+        has_disability_reason = (
+            (reason_1 == SOCIAL_SECURITY_DISABILITY_REASON_CODE)
+            | (reason_2 == SOCIAL_SECURITY_DISABILITY_REASON_CODE)
+        )
+        unclassified_social_security = (
+            (pl.col("social_security") > 0)
+            & ~has_retirement_reason
+            & ~has_disability_reason
+        )
+        result = result.with_columns(
+            (
+                pl.when(has_disability_reason & ~has_retirement_reason)
+                .then(pl.col("social_security"))
+                .otherwise(0.0)
+                + pl.when(
+                    unclassified_social_security
+                    & (pl.col("age") < MINIMUM_RETIREMENT_AGE)
+                )
+                .then(pl.col("social_security"))
+                .otherwise(0.0)
+            ).alias("social_security_disability")
+        ).drop(["_social_security_reason_1", "_social_security_reason_2"])
+    else:
+        drop_columns = [
+            column
+            for column in (
+                "_social_security_reason_1",
+                "_social_security_reason_2",
+            )
+            if column in result.columns
+        ]
+        if drop_columns:
+            result = result.drop(drop_columns)
     disability_columns = [
         column for column in PERSON_CPS_DISABILITY_COLUMNS if column in result.columns
     ]
@@ -810,10 +865,20 @@ def _process_persons(df: pl.DataFrame, year: int) -> pl.DataFrame:
         ]
         if drop_columns:
             result = result.drop(drop_columns)
+    if "_receives_wic" in result.columns and "receives_wic" not in result.columns:
+        result = result.with_columns(
+            (pl.col("_receives_wic") == 1).alias("receives_wic")
+        ).drop("_receives_wic")
+    elif "_receives_wic" in result.columns:
+        result = result.drop("_receives_wic")
     for value_column in PERSON_ZERO_DEFAULT_VALUE_COLUMNS:
         if value_column not in result.columns:
             result = result.with_columns(pl.lit(0.0).alias(value_column))
-    for bool_column in ("has_esi", "has_marketplace_health_coverage"):
+    for bool_column in (
+        "has_esi",
+        "has_marketplace_health_coverage",
+        "receives_wic",
+    ):
         if bool_column in result.columns:
             result = result.with_columns((pl.col(bool_column) == 1).alias(bool_column))
     for col in PERSON_NONNEGATIVE_VALUE_COLUMNS:

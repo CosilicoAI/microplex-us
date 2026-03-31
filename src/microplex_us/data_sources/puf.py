@@ -201,6 +201,8 @@ def map_puf_variables(
         result.get("rental_income_positive", 0).fillna(0) +
         result.get("rental_income_negative", 0).fillna(0)
     )
+    if {"E26390", "E26400"}.issubset(set(puf.columns)):
+        result["estate_income"] = puf["E26390"].fillna(0) - puf["E26400"].fillna(0)
     medical_expense_floor = result.get("medical_expense_agi_floor")
     if medical_expense_floor is not None:
         for variable, fraction in MEDICAL_EXPENSE_CATEGORY_BREAKDOWNS.items():

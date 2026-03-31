@@ -1820,6 +1820,8 @@ class TestPolicyEngineUSProjection:
         )
 
         assert overlaps == []
+        assert "estate_income" in SAFE_POLICYENGINE_US_EXPORT_VARIABLES
+        assert "receives_wic" in SAFE_POLICYENGINE_US_EXPORT_VARIABLES
 
     def test_build_policyengine_us_export_variable_maps_supports_pre_sim_aliases(self):
         class FakeEntity:
