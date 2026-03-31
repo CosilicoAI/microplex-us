@@ -239,6 +239,9 @@ class TestUSMicroplexBuildConfig:
             synthesizer_epochs=12,
             policyengine_selection_backend="pe_native_loss",
             policyengine_selection_household_budget=500,
+            policyengine_selection_max_iter=750,
+            policyengine_selection_tol=1e-7,
+            policyengine_selection_l2_penalty=1e-5,
         )
 
         assert config.n_synthetic == 250
@@ -247,6 +250,9 @@ class TestUSMicroplexBuildConfig:
         assert config.synthesizer_epochs == 12
         assert config.policyengine_selection_backend == "pe_native_loss"
         assert config.policyengine_selection_household_budget == 500
+        assert config.policyengine_selection_max_iter == 750
+        assert config.policyengine_selection_tol == 1e-7
+        assert config.policyengine_selection_l2_penalty == 1e-5
 
 
 class TestUSMicroplexPipeline:
@@ -1744,6 +1750,9 @@ class TestUSMicroplexPipeline:
         _create_policyengine_calibration_db(db_path)
 
         def _fake_optimize(**kwargs):
+            assert kwargs["max_iter"] == 777
+            assert kwargs["tol"] == pytest.approx(1e-7)
+            assert kwargs["l2_penalty"] == pytest.approx(1e-5)
             output_path = kwargs["output_dataset_path"]
             with h5py.File(output_path, "w") as handle:
                 household_id_group = handle.create_group("household_id")
@@ -1777,6 +1786,9 @@ class TestUSMicroplexPipeline:
             policyengine_calibration_min_active_households=1,
             policyengine_selection_backend="pe_native_loss",
             policyengine_selection_household_budget=2,
+            policyengine_selection_max_iter=777,
+            policyengine_selection_tol=1e-7,
+            policyengine_selection_l2_penalty=1e-5,
         )
         pipeline = USMicroplexPipeline(config)
         seed = pipeline.prepare_seed_data(persons, households).rename(

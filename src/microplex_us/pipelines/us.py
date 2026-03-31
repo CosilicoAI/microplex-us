@@ -572,6 +572,9 @@ class USMicroplexBuildConfig:
     policyengine_calibration_target_profile: str | None = None
     policyengine_selection_backend: Literal["sparse", "pe_native_loss"] = "sparse"
     policyengine_selection_household_budget: int | None = None
+    policyengine_selection_max_iter: int = 200
+    policyengine_selection_tol: float = 1e-8
+    policyengine_selection_l2_penalty: float = 0.0
     policyengine_calibration_max_constraints: int | None = None
     policyengine_calibration_max_constraints_per_household: float | None = (
         DEFAULT_POLICYENGINE_CALIBRATION_MAX_CONSTRAINTS_PER_HOUSEHOLD
@@ -1481,8 +1484,9 @@ class USMicroplexPipeline:
                 output_dataset_path=selection_output_path,
                 period=period,
                 budget=requested_budget,
-                max_iter=max(self.config.calibration_max_iter, 200),
-                l2_penalty=0.0,
+                max_iter=max(self.config.policyengine_selection_max_iter, 1),
+                l2_penalty=float(self.config.policyengine_selection_l2_penalty),
+                tol=float(self.config.policyengine_selection_tol),
             )
             with h5py.File(selection_output_path, "r") as handle:
                 period_key = str(period)

@@ -407,6 +407,32 @@ def test_calibration_cache_key_includes_household_budget_selection():
     )
 
 
+def test_calibration_cache_key_includes_pe_native_selection_hyperparameters():
+    base = USMicroplexBuildConfig(
+        calibration_backend="entropy",
+        policyengine_selection_backend="pe_native_loss",
+        policyengine_selection_household_budget=29_999,
+        policyengine_selection_max_iter=200,
+        policyengine_selection_tol=1e-8,
+        policyengine_selection_l2_penalty=0.0,
+    )
+    updated = USMicroplexBuildConfig(
+        calibration_backend="entropy",
+        policyengine_selection_backend="pe_native_loss",
+        policyengine_selection_household_budget=29_999,
+        policyengine_selection_max_iter=1_000,
+        policyengine_selection_tol=1e-7,
+        policyengine_selection_l2_penalty=1e-5,
+    )
+
+    assert _precalibration_build_config_key(base) == _precalibration_build_config_key(
+        updated
+    )
+    assert _calibration_build_config_key(base) != _calibration_build_config_key(
+        updated
+    )
+
+
 def test_run_us_microplex_performance_harness_allows_full_source_queries(monkeypatch):
     captured_queries: list[dict[str, object]] = []
     _patch_fake_harness(monkeypatch)
