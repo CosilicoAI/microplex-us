@@ -18,7 +18,10 @@ from microplex.targets import TargetSet
 from microplex_us.pipelines.pe_native_optimization import (
     optimize_policyengine_us_native_loss_dataset,
 )
-from microplex_us.pipelines.pe_native_scores import compute_us_pe_native_scores
+from microplex_us.pipelines.pe_native_scores import (
+    compare_us_pe_native_target_deltas,
+    compute_us_pe_native_scores,
+)
 from microplex_us.pipelines.us import (
     USMicroplexBuildConfig,
     USMicroplexBuildResult,
@@ -99,11 +102,13 @@ class USMicroplexPerformanceHarnessConfig:
     pe_native_optimizer_l2_penalty: float = 0.0
     pe_native_optimizer_tol: float = 1e-8
     pe_native_score_consistency_tol: float = 1e-6
+    pe_native_target_delta_top_k: int = 25
     policyengine_us_data_repo: str | Path | None = None
     strict_materialization: bool = True
     fast_inner_loop_calibration: bool = False
     output_json_path: str | Path | None = None
     output_policyengine_dataset_path: str | Path | None = None
+    output_pe_native_target_delta_path: str | Path | None = None
 
 
 @dataclass(frozen=True)
@@ -118,6 +123,7 @@ class USMicroplexPerformanceHarnessResult:
     total_seconds: float
     parity_run: PolicyEngineUSHarnessRun | None = None
     pe_native_scores: dict[str, object] | None = None
+    pe_native_target_deltas: dict[str, object] | None = None
     policyengine_dataset_path: str | None = None
 
     def _parity_run_attr(self, name: str) -> float | None:
@@ -181,6 +187,10 @@ class USMicroplexPerformanceHarnessResult:
         if self.pe_native_scores is not None:
             payload["pe_native_scores"] = _json_compatible_value(
                 self.pe_native_scores
+            )
+        if self.pe_native_target_deltas is not None:
+            payload["pe_native_target_deltas"] = _json_compatible_value(
+                self.pe_native_target_deltas
             )
         return payload
 
@@ -679,6 +689,15 @@ def run_us_microplex_performance_harness(
         raise ValueError("pe_native_household_budget must be positive when provided")
     if config.pe_native_score_consistency_tol <= 0.0:
         raise ValueError("pe_native_score_consistency_tol must be positive")
+    if config.pe_native_target_delta_top_k <= 0:
+        raise ValueError("pe_native_target_delta_top_k must be positive")
+    if (
+        config.output_pe_native_target_delta_path is not None
+        and config.baseline_dataset is None
+    ):
+        raise ValueError(
+            "USMicroplex performance harness requires baseline_dataset for PE-native target deltas"
+        )
 
     build_config = _resolve_build_config(config)
     pipeline = USMicroplexPipeline(build_config)
@@ -870,9 +889,14 @@ def run_us_microplex_performance_harness(
 
     policyengine_dataset_path = None
     pe_native_scores = None
-    if config.evaluate_pe_native_loss:
-        start = _stage(stage_timings, "evaluate_pe_native_loss")
+    pe_native_target_deltas = None
+    needs_pe_dataset = (
+        config.evaluate_pe_native_loss
+        or config.output_pe_native_target_delta_path is not None
+    )
+    if needs_pe_dataset:
         with TemporaryDirectory(prefix="microplex-us-native-score-") as temp_dir:
+            pe_stage_started = False
             candidate_dataset_path = pipeline.export_policyengine_dataset(
                 build_result,
                 Path(temp_dir) / "candidate_policyengine_us.h5",
@@ -881,6 +905,9 @@ def run_us_microplex_performance_harness(
             dataset_to_score = candidate_dataset_path
             pe_native_optimization = None
             if config.optimize_pe_native_loss:
+                if not pe_stage_started:
+                    start = _stage(stage_timings, "evaluate_pe_native_loss")
+                    pe_stage_started = True
                 optimize_start = _stage(
                     stage_timings,
                     "optimize_pe_native_loss_weights",
@@ -905,41 +932,78 @@ def run_us_microplex_performance_harness(
                     "optimize_pe_native_loss_weights",
                     optimize_start,
                 )
-            pe_native_scores = compute_us_pe_native_scores(
-                candidate_dataset_path=dataset_to_score,
-                baseline_dataset_path=str(config.baseline_dataset),
-                period=build_config.policyengine_dataset_year or config.target_period,
-                policyengine_us_data_repo=config.policyengine_us_data_repo,
-            )
-            if pe_native_optimization is not None:
-                summary = pe_native_scores.get("summary")
-                if not isinstance(summary, dict):
-                    raise ValueError(
-                        "PE-native optimization requires score summary metadata for consistency validation"
-                    )
-                rescored_loss = summary.get("candidate_enhanced_cps_native_loss")
-                if rescored_loss is None:
-                    raise ValueError(
-                        "PE-native optimization consistency validation requires candidate_enhanced_cps_native_loss"
-                    )
-                abs_error = abs(
-                    float(rescored_loss) - float(pe_native_optimization["optimized_loss"])
+            if config.evaluate_pe_native_loss:
+                if not pe_stage_started:
+                    start = _stage(stage_timings, "evaluate_pe_native_loss")
+                    pe_stage_started = True
+                pe_native_scores = compute_us_pe_native_scores(
+                    candidate_dataset_path=dataset_to_score,
+                    baseline_dataset_path=str(config.baseline_dataset),
+                    period=build_config.policyengine_dataset_year or config.target_period,
+                    policyengine_us_data_repo=config.policyengine_us_data_repo,
                 )
-                if abs_error > config.pe_native_score_consistency_tol:
-                    raise ValueError(
-                        "PE-native optimized loss does not match rescored loss within tolerance: "
-                        f"{abs_error:.6g} > {config.pe_native_score_consistency_tol:.6g}"
+                if pe_native_optimization is not None:
+                    summary = pe_native_scores.get("summary")
+                    if not isinstance(summary, dict):
+                        raise ValueError(
+                            "PE-native optimization requires score summary metadata for consistency validation"
+                        )
+                    rescored_loss = summary.get("candidate_enhanced_cps_native_loss")
+                    if rescored_loss is None:
+                        raise ValueError(
+                            "PE-native optimization consistency validation requires candidate_enhanced_cps_native_loss"
+                        )
+                    abs_error = abs(
+                        float(rescored_loss) - float(pe_native_optimization["optimized_loss"])
                     )
-                pe_native_scores = dict(pe_native_scores)
-                pe_native_optimization = dict(pe_native_optimization)
-                pe_native_optimization["rescored_loss_abs_error"] = abs_error
-                pe_native_scores["optimization"] = pe_native_optimization
+                    if abs_error > config.pe_native_score_consistency_tol:
+                        raise ValueError(
+                            "PE-native optimized loss does not match rescored loss within tolerance: "
+                            f"{abs_error:.6g} > {config.pe_native_score_consistency_tol:.6g}"
+                        )
+                    pe_native_scores = dict(pe_native_scores)
+                    pe_native_optimization = dict(pe_native_optimization)
+                    pe_native_optimization["rescored_loss_abs_error"] = abs_error
+                    pe_native_scores["optimization"] = pe_native_optimization
             if config.output_policyengine_dataset_path is not None:
                 policyengine_dataset_path = _copy_output_file(
                     dataset_to_score,
                     config.output_policyengine_dataset_path,
                 )
-        _finish_stage(stage_timings, "evaluate_pe_native_loss", start)
+            if config.output_pe_native_target_delta_path is not None:
+                delta_start = _stage(stage_timings, "evaluate_pe_native_target_deltas")
+                pe_native_target_deltas = compare_us_pe_native_target_deltas(
+                    from_dataset_path=str(config.baseline_dataset),
+                    to_dataset_path=dataset_to_score,
+                    period=build_config.policyengine_dataset_year or config.target_period,
+                    top_k=config.pe_native_target_delta_top_k,
+                    policyengine_us_data_repo=config.policyengine_us_data_repo,
+                )
+                _finish_stage(
+                    stage_timings,
+                    "evaluate_pe_native_target_deltas",
+                    delta_start,
+                )
+                write_delta_start = _stage(
+                    stage_timings,
+                    "write_pe_native_target_delta_json",
+                )
+                destination = Path(config.output_pe_native_target_delta_path)
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                destination.write_text(
+                    json.dumps(
+                        _json_compatible_value(pe_native_target_deltas),
+                        indent=2,
+                        sort_keys=True,
+                    )
+                )
+                _finish_stage(
+                    stage_timings,
+                    "write_pe_native_target_delta_json",
+                    write_delta_start,
+                )
+            if pe_stage_started:
+                _finish_stage(stage_timings, "evaluate_pe_native_loss", start)
     elif config.output_policyengine_dataset_path is not None:
         start = _stage(stage_timings, "write_policyengine_dataset")
         policyengine_dataset_path = str(
@@ -961,6 +1025,7 @@ def run_us_microplex_performance_harness(
         total_seconds=total_seconds,
         parity_run=parity_run,
         pe_native_scores=pe_native_scores,
+        pe_native_target_deltas=pe_native_target_deltas,
         policyengine_dataset_path=policyengine_dataset_path,
     )
     if config.output_json_path is not None:

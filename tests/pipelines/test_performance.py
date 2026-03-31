@@ -510,6 +510,50 @@ def test_run_us_microplex_performance_harness_can_write_output_bundle(monkeypatc
     assert payload["calibration_summary"]["backend"] == "policyengine_db_entropy"
 
 
+def test_run_us_microplex_performance_harness_can_write_pe_native_target_delta_output(
+    monkeypatch,
+    tmp_path,
+):
+    _patch_fake_harness(monkeypatch)
+
+    delta_path = tmp_path / "target_deltas.json"
+    compare_calls: list[dict[str, object]] = []
+
+    def _fake_compare(**kwargs):
+        compare_calls.append(kwargs)
+        return {
+            "metric": "enhanced_cps_native_loss_target_delta",
+            "top_regressions": [{"target_name": "nation/foo", "weighted_term_delta": 0.5}],
+            "top_improvements": [{"target_name": "state/bar", "weighted_term_delta": -0.25}],
+        }
+
+    monkeypatch.setattr(
+        "microplex_us.pipelines.performance.compare_us_pe_native_target_deltas",
+        _fake_compare,
+    )
+
+    result = run_us_microplex_performance_harness(
+        providers=[_DummyProvider("cps")],
+        config=USMicroplexPerformanceHarnessConfig(
+            evaluate_parity=False,
+            baseline_dataset="/tmp/enhanced_cps.h5",
+            policyengine_us_data_repo="/tmp/policyengine-us-data",
+            output_pe_native_target_delta_path=delta_path,
+            pe_native_target_delta_top_k=7,
+        ),
+    )
+
+    assert result.pe_native_target_deltas is not None
+    assert delta_path.exists()
+    assert compare_calls[0]["from_dataset_path"] == "/tmp/enhanced_cps.h5"
+    assert compare_calls[0]["top_k"] == 7
+    payload = json.loads(delta_path.read_text())
+    assert payload["metric"] == "enhanced_cps_native_loss_target_delta"
+    assert payload["top_regressions"][0]["target_name"] == "nation/foo"
+    assert "evaluate_pe_native_target_deltas" in result.stage_timings
+    assert "write_pe_native_target_delta_json" in result.stage_timings
+
+
 def test_run_us_microplex_performance_harness_passes_export_direct_overrides(monkeypatch):
     stage_log: list[str] = []
     _patch_fake_harness(monkeypatch, stage_log=stage_log)
@@ -738,6 +782,25 @@ def test_run_us_microplex_performance_harness_rejects_native_loss_mismatch(monke
         assert "does not match rescored loss" in str(exc)
     else:  # pragma: no cover - defensive assertion
         raise AssertionError("expected PE-native loss consistency validation error")
+
+
+def test_run_us_microplex_performance_harness_rejects_nonpositive_target_delta_top_k(
+    monkeypatch,
+):
+    _patch_fake_harness(monkeypatch)
+
+    try:
+        run_us_microplex_performance_harness(
+            providers=[_DummyProvider("cps")],
+            config=USMicroplexPerformanceHarnessConfig(
+                evaluate_parity=False,
+                pe_native_target_delta_top_k=0,
+            ),
+        )
+    except ValueError as exc:
+        assert "pe_native_target_delta_top_k" in str(exc)
+    else:  # pragma: no cover - defensive assertion
+        raise AssertionError("expected target delta top-k validation error")
 
 
 def test_warm_us_microplex_parity_cache_preloads_baseline(monkeypatch):
