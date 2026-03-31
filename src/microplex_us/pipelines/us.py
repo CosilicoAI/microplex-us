@@ -3413,30 +3413,12 @@ class USMicroplexPipeline:
             else:
                 result["is_hispanic"] = hispanic.fillna(0).astype(int).ne(0)
 
-        marital_status = (
-            pd.to_numeric(result.get("marital_status"), errors="coerce")
-            .fillna(0)
-            .astype(int)
-            if "marital_status" in result.columns
-            else pd.Series(0, index=result.index, dtype=int)
-        )
-        filing_status_code = (
-            pd.to_numeric(result.get("filing_status_code"), errors="coerce")
-            .fillna(0)
-            .astype(int)
-            if "filing_status_code" in result.columns
-            else pd.Series(0, index=result.index, dtype=int)
-        )
         if "is_separated" in result.columns:
             result["is_separated"] = result["is_separated"].fillna(False).astype(bool)
-        else:
-            result["is_separated"] = filing_status_code.eq(3) | marital_status.isin({3, 6})
         if "is_surviving_spouse" in result.columns:
             result["is_surviving_spouse"] = (
                 result["is_surviving_spouse"].fillna(False).astype(bool)
             )
-        else:
-            result["is_surviving_spouse"] = filing_status_code.eq(5) | marital_status.eq(4)
 
         if "medicaid" in result.columns:
             result["medicaid"] = (

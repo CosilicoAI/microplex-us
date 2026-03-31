@@ -180,8 +180,6 @@ SAFE_POLICYENGINE_US_EXPORT_VARIABLES: set[str] = {
     "is_female",
     "is_hispanic",
     "is_disabled",
-    "is_separated",
-    "is_surviving_spouse",
     "medicare_part_b_premiums",
     "employment_income_before_lsr",
     "other_medical_expenses",

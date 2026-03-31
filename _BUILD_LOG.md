@@ -1640,3 +1640,25 @@ Append-only notes for agents working in `microplex-us`.
   - direct schema diff now matches full PE exactly at `N=2000`, `N=3000`, and `N=29999` (`167` vars, no missing, no extra)
 - Consequence:
   - the earlier harness-produced raw `PE@29999` comparator was invalid and should not be used
+
+## 2026-03-31 filing-status experiments falsified
+
+- Scope: tested two ways to push separated / surviving-spouse structure into PE on the `29,999` full-support selector path
+  - direct `filing_status` override
+  - exporting person-level `is_separated` / `is_surviving_spouse`
+- Results:
+  - prior `statusfix` baseline: `0.6362298466`
+  - direct `filing_status` override: `0.6539544578`
+  - leaf-input export: `0.9793611801`
+  - PE baseline: `0.0202439085`
+- Root cause read:
+  - PE's `filing_status` formula uses tax-unit structure plus person-level leaf inputs
+  - direct override carried existing synthesized MFJ structural errors straight into PE
+  - the leaf-input experiment was worse because coarse CPS `marital_status` / `filing_status_code` hints were not precise enough to safely synthesize `is_separated` and `is_surviving_spouse`
+  - that path inflated separated-filer structure and caused severe weight collapse
+- Code consequence:
+  - reverted `is_separated` / `is_surviving_spouse` from the default PE export surface
+  - kept only passthrough normalization if those columns ever exist from a more trustworthy source
+- Read:
+  - the filing-status seam is real, but these two fixes are not the right fix
+  - next work should shift back to the larger `national_irs_other`, `state_agi_distribution`, and `state_age_distribution` support problems
