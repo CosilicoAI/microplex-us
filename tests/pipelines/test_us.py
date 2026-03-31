@@ -1802,6 +1802,80 @@ class TestUSMicroplexPipeline:
             rel=1e-6,
         )
 
+    def test_calibrate_policyengine_tables_from_db_with_pe_l0_backend(
+        self,
+        persons,
+        households,
+        tmp_path,
+        monkeypatch,
+    ):
+        db_path = tmp_path / "policyengine_targets.db"
+        _create_policyengine_calibration_db(db_path)
+        seen_constraints = {}
+
+        class StubPolicyEngineL0Calibrator:
+            def __init__(self, **_kwargs):
+                self._constraints = ()
+
+            def fit_transform(
+                self,
+                frame,
+                *_args,
+                weight_col,
+                linear_constraints=None,
+                **_kwargs,
+            ):
+                self._constraints = tuple(linear_constraints or ())
+                seen_constraints["count"] = len(self._constraints)
+                result = frame.copy()
+                result[weight_col] = result[weight_col].astype(float)
+                return result
+
+            def validate(self, _frame):
+                return {
+                    "max_error": 0.0,
+                    "mean_error": 0.0,
+                    "converged": True,
+                    "sparsity": 0.1,
+                    "linear_errors": {
+                        constraint.name: {
+                            "actual": float(constraint.target),
+                            "target": float(constraint.target),
+                            "relative_error": 0.0,
+                        }
+                        for constraint in self._constraints
+                    },
+                }
+
+        monkeypatch.setattr(
+            "microplex_us.pipelines.us.PolicyEngineL0Calibrator",
+            StubPolicyEngineL0Calibrator,
+        )
+        config = USMicroplexBuildConfig(
+            calibration_backend="pe_l0",
+            policyengine_targets_db=str(db_path),
+            policyengine_target_variables=("household_count",),
+            policyengine_target_period=2024,
+            policyengine_calibration_min_active_households=1,
+        )
+        pipeline = USMicroplexPipeline(config)
+        seed = pipeline.prepare_seed_data(persons, households).rename(
+            columns={"hh_weight": "weight"}
+        )
+        tables = pipeline.build_policyengine_entity_tables(seed)
+
+        calibrated_tables, _, summary = pipeline.calibrate_policyengine_tables(tables)
+
+        assert seen_constraints["count"] == 2
+        assert summary["backend"] == "policyengine_db_pe_l0"
+        assert summary["n_constraints"] == 2
+        assert summary["converged"] is True
+        assert summary["sparsity"] == pytest.approx(0.1)
+        assert calibrated_tables.households["household_weight"].sum() == pytest.approx(
+            450.0,
+            rel=1e-6,
+        )
+
     def test_calibrate_policyengine_tables_flags_weight_collapse(
         self,
         persons,

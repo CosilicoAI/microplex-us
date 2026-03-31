@@ -36,6 +36,7 @@ from microplex.synthesizer import Synthesizer
 from microplex.targets import TargetQuery, TargetSpec
 from sklearn.ensemble import RandomForestClassifier
 
+from microplex_us.pipelines.pe_l0 import PolicyEngineL0Calibrator
 from microplex_us.policyengine.target_profiles import (
     PolicyEngineUSTargetCell,
     resolve_policyengine_us_target_profile,
@@ -510,7 +511,7 @@ class USMicroplexBuildConfig:
 
     n_synthetic: int = 100_000
     synthesis_backend: Literal["bootstrap", "synthesizer", "seed"] = "synthesizer"
-    calibration_backend: Literal["entropy", "ipf", "chi2", "sparse", "hardconcrete"] = (
+    calibration_backend: Literal["entropy", "ipf", "chi2", "sparse", "hardconcrete", "pe_l0"] = (
         "entropy"
     )
     calibration_tol: float = 1e-6
@@ -1293,7 +1294,7 @@ class USMicroplexPipeline:
 
     def _build_weight_calibrator(
         self,
-    ) -> Calibrator | SparseCalibrator | HardConcreteCalibrator:
+    ) -> Calibrator | SparseCalibrator | HardConcreteCalibrator | PolicyEngineL0Calibrator:
         if self.config.calibration_backend in {"entropy", "ipf", "chi2"}:
             return Calibrator(
                 method=self.config.calibration_backend,
@@ -1313,6 +1314,13 @@ class USMicroplexPipeline:
                 lr=0.1,
                 device=self.config.device,
                 verbose=False,
+            )
+        if self.config.calibration_backend == "pe_l0":
+            return PolicyEngineL0Calibrator(
+                lambda_l0=1e-4,
+                epochs=max(self.config.calibration_max_iter, 100),
+                device=self.config.device,
+                tol=self.config.calibration_tol,
             )
         raise ValueError(
             f"Unsupported calibration backend: {self.config.calibration_backend}"
