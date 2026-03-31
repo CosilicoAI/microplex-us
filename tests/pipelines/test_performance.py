@@ -487,6 +487,81 @@ def test_run_us_microplex_performance_harness_can_evaluate_native_loss(monkeypat
     assert "evaluate_pe_native_loss" in result.stage_timings
 
 
+def test_run_us_microplex_performance_harness_can_evaluate_matched_native_loss(
+    monkeypatch,
+    tmp_path,
+):
+    _patch_fake_harness(monkeypatch)
+    matched_calls: list[dict[str, object]] = []
+    score_calls: list[dict[str, object]] = []
+
+    def _fake_write_matched_baseline(
+        baseline_dataset_path,
+        output_dataset_path,
+        *,
+        period,
+        household_count,
+        random_seed,
+    ):
+        matched_calls.append(
+            {
+                "baseline_dataset_path": baseline_dataset_path,
+                "period": period,
+                "household_count": household_count,
+                "random_seed": random_seed,
+            }
+        )
+        path = Path(output_dataset_path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("matched")
+        return str(path.resolve())
+
+    def _fake_score(**kwargs):
+        score_calls.append(kwargs)
+        return {
+            "summary": {
+                "candidate_enhanced_cps_native_loss": 0.18,
+                "baseline_enhanced_cps_native_loss": 0.22,
+                "enhanced_cps_native_loss_delta": -0.04,
+            }
+        }
+
+    monkeypatch.setattr(
+        "microplex_us.pipelines.performance._write_matched_policyengine_us_baseline_dataset",
+        _fake_write_matched_baseline,
+    )
+    monkeypatch.setattr(
+        "microplex_us.pipelines.performance.compute_us_pe_native_scores",
+        _fake_score,
+    )
+
+    baseline_output = tmp_path / "matched_baseline.h5"
+    result = run_us_microplex_performance_harness(
+        providers=[_DummyProvider("cps")],
+        config=USMicroplexPerformanceHarnessConfig(
+            evaluate_parity=False,
+            evaluate_matched_pe_native_loss=True,
+            baseline_dataset="/tmp/enhanced_cps.h5",
+            policyengine_us_data_repo="/tmp/policyengine-us-data",
+            output_matched_baseline_dataset_path=baseline_output,
+        ),
+    )
+
+    assert matched_calls == [
+        {
+            "baseline_dataset_path": "/tmp/enhanced_cps.h5",
+            "period": 2024,
+            "household_count": 1,
+            "random_seed": 42,
+        }
+    ]
+    assert score_calls[0]["baseline_dataset_path"] == str(baseline_output.resolve())
+    assert result.matched_pe_native_scores is not None
+    assert result.matched_baseline_dataset_path == str(baseline_output.resolve())
+    assert "build_matched_baseline_dataset" in result.stage_timings
+    assert "evaluate_matched_pe_native_loss" in result.stage_timings
+
+
 def test_run_us_microplex_performance_harness_can_write_output_bundle(monkeypatch, tmp_path):
     _patch_fake_harness(monkeypatch)
 
@@ -803,6 +878,27 @@ def test_run_us_microplex_performance_harness_rejects_nonpositive_target_delta_t
         assert "pe_native_target_delta_top_k" in str(exc)
     else:  # pragma: no cover - defensive assertion
         raise AssertionError("expected target delta top-k validation error")
+
+
+def test_run_us_microplex_performance_harness_rejects_nonpositive_matched_baseline_household_count(
+    monkeypatch,
+):
+    _patch_fake_harness(monkeypatch)
+
+    try:
+        run_us_microplex_performance_harness(
+            providers=[_DummyProvider("cps")],
+            config=USMicroplexPerformanceHarnessConfig(
+                evaluate_parity=False,
+                matched_baseline_household_count=0,
+            ),
+        )
+    except ValueError as exc:
+        assert "matched_baseline_household_count" in str(exc)
+    else:  # pragma: no cover - defensive assertion
+        raise AssertionError(
+            "expected matched baseline household count validation error"
+        )
 
 
 def test_warm_us_microplex_parity_cache_preloads_baseline(monkeypatch):

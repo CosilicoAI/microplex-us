@@ -39,6 +39,9 @@ from microplex_us.policyengine.harness import (
 from microplex_us.policyengine.us import (
     PolicyEngineUSDBTargetProvider,
     PolicyEngineUSEntityTableBundle,
+    build_policyengine_us_time_period_arrays,
+    load_policyengine_us_entity_tables,
+    write_policyengine_us_time_period_dataset,
 )
 
 CacheValue = object
@@ -97,6 +100,7 @@ class USMicroplexPerformanceHarnessConfig:
     build_config: USMicroplexBuildConfig | None = None
     evaluate_parity: bool = True
     evaluate_pe_native_loss: bool = False
+    evaluate_matched_pe_native_loss: bool = False
     optimize_pe_native_loss: bool = False
     pe_native_household_budget: int | None = None
     pe_native_optimizer_max_iter: int = 200
@@ -104,12 +108,15 @@ class USMicroplexPerformanceHarnessConfig:
     pe_native_optimizer_tol: float = 1e-8
     pe_native_score_consistency_tol: float = 1e-6
     pe_native_target_delta_top_k: int = 25
+    matched_baseline_household_count: int | None = None
+    matched_baseline_random_seed: int = 42
     policyengine_us_data_repo: str | Path | None = None
     strict_materialization: bool = True
     fast_inner_loop_calibration: bool = False
     output_json_path: str | Path | None = None
     output_policyengine_dataset_path: str | Path | None = None
     output_pe_native_target_delta_path: str | Path | None = None
+    output_matched_baseline_dataset_path: str | Path | None = None
 
 
 @dataclass(frozen=True)
@@ -124,8 +131,10 @@ class USMicroplexPerformanceHarnessResult:
     total_seconds: float
     parity_run: PolicyEngineUSHarnessRun | None = None
     pe_native_scores: dict[str, object] | None = None
+    matched_pe_native_scores: dict[str, object] | None = None
     pe_native_target_deltas: dict[str, object] | None = None
     policyengine_dataset_path: str | None = None
+    matched_baseline_dataset_path: str | None = None
 
     def _parity_run_attr(self, name: str) -> float | None:
         if self.parity_run is None:
@@ -189,10 +198,16 @@ class USMicroplexPerformanceHarnessResult:
             payload["pe_native_scores"] = _json_compatible_value(
                 self.pe_native_scores
             )
+        if self.matched_pe_native_scores is not None:
+            payload["matched_pe_native_scores"] = _json_compatible_value(
+                self.matched_pe_native_scores
+            )
         if self.pe_native_target_deltas is not None:
             payload["pe_native_target_deltas"] = _json_compatible_value(
                 self.pe_native_target_deltas
             )
+        if self.matched_baseline_dataset_path is not None:
+            payload["matched_baseline_dataset_path"] = self.matched_baseline_dataset_path
         return payload
 
     def save(self, path: str | Path) -> Path:
@@ -440,6 +455,83 @@ def _clone_calibration_cache_entry(
         policyengine_tables=_clone_policyengine_us_tables(entry.policyengine_tables),
         calibrated_data=entry.calibrated_data.copy(deep=True),
         calibration_summary=dict(entry.calibration_summary),
+    )
+
+
+def _filter_policyengine_tables_to_households(
+    tables: PolicyEngineUSEntityTableBundle,
+    household_ids: pd.Index,
+) -> PolicyEngineUSEntityTableBundle:
+    household_id_set = set(household_ids.tolist())
+
+    def _filter_table(table: pd.DataFrame | None) -> pd.DataFrame | None:
+        if table is None:
+            return None
+        if "household_id" not in table.columns:
+            return table.copy()
+        return table.loc[table["household_id"].isin(household_id_set)].copy()
+
+    households = tables.households.loc[
+        tables.households["household_id"].isin(household_id_set)
+    ].copy()
+    return PolicyEngineUSEntityTableBundle(
+        households=households,
+        persons=_filter_table(tables.persons),
+        tax_units=_filter_table(tables.tax_units),
+        spm_units=_filter_table(tables.spm_units),
+        families=_filter_table(tables.families),
+        marital_units=_filter_table(tables.marital_units),
+    )
+
+
+def _write_matched_policyengine_us_baseline_dataset(
+    baseline_dataset_path: str | Path,
+    output_dataset_path: str | Path,
+    *,
+    period: int,
+    household_count: int,
+    random_seed: int,
+) -> str:
+    tables = load_policyengine_us_entity_tables(
+        baseline_dataset_path,
+        period=period,
+    )
+    households = tables.households.copy()
+    if household_count <= 0:
+        raise ValueError("matched baseline household_count must be positive")
+    if household_count > len(households):
+        raise ValueError(
+            "matched baseline household_count cannot exceed baseline household rows"
+        )
+
+    rng = pd.Series(households["household_id"]).sample(
+        n=household_count,
+        replace=False,
+        random_state=random_seed,
+    )
+    sampled_household_ids = pd.Index(rng.to_numpy())
+    sampled_tables = _filter_policyengine_tables_to_households(
+        tables,
+        sampled_household_ids,
+    )
+    original_weight_sum = float(households["household_weight"].sum())
+    sampled_weight_sum = float(sampled_tables.households["household_weight"].sum())
+    if sampled_weight_sum <= 0.0:
+        raise ValueError("matched baseline sample produced nonpositive household weight sum")
+    sampled_tables.households["household_weight"] = (
+        sampled_tables.households["household_weight"]
+        * (original_weight_sum / sampled_weight_sum)
+    )
+
+    arrays = build_policyengine_us_time_period_arrays(
+        sampled_tables,
+        period=period,
+    )
+    return str(
+        write_policyengine_us_time_period_dataset(
+            arrays,
+            output_dataset_path,
+        ).resolve()
     )
 
 
@@ -830,6 +922,10 @@ def run_us_microplex_performance_harness(
         raise ValueError(
             "USMicroplex performance harness requires baseline_dataset for PE-native loss scoring"
         )
+    if config.evaluate_matched_pe_native_loss and config.baseline_dataset is None:
+        raise ValueError(
+            "USMicroplex performance harness requires baseline_dataset for matched PE-native loss scoring"
+        )
     if config.optimize_pe_native_loss and not config.evaluate_pe_native_loss:
         raise ValueError(
             "USMicroplex performance harness requires evaluate_pe_native_loss when optimize_pe_native_loss is enabled"
@@ -843,6 +939,11 @@ def run_us_microplex_performance_harness(
         raise ValueError("pe_native_score_consistency_tol must be positive")
     if config.pe_native_target_delta_top_k <= 0:
         raise ValueError("pe_native_target_delta_top_k must be positive")
+    if (
+        config.matched_baseline_household_count is not None
+        and config.matched_baseline_household_count <= 0
+    ):
+        raise ValueError("matched_baseline_household_count must be positive")
     if (
         config.output_pe_native_target_delta_path is not None
         and config.baseline_dataset is None
@@ -1041,9 +1142,11 @@ def run_us_microplex_performance_harness(
 
     policyengine_dataset_path = None
     pe_native_scores = None
+    matched_pe_native_scores = None
     pe_native_target_deltas = None
     needs_pe_dataset = (
         config.evaluate_pe_native_loss
+        or config.evaluate_matched_pe_native_loss
         or config.output_pe_native_target_delta_path is not None
     )
     if needs_pe_dataset:
@@ -1117,6 +1220,44 @@ def run_us_microplex_performance_harness(
                     pe_native_optimization = dict(pe_native_optimization)
                     pe_native_optimization["rescored_loss_abs_error"] = abs_error
                     pe_native_scores["optimization"] = pe_native_optimization
+            matched_baseline_dataset_path = None
+            if config.evaluate_matched_pe_native_loss:
+                matched_start = _stage(
+                    stage_timings,
+                    "build_matched_baseline_dataset",
+                )
+                candidate_household_count = len(build_result.policyengine_tables.households)
+                matched_baseline_dataset_path = _write_matched_policyengine_us_baseline_dataset(
+                    config.baseline_dataset,
+                    config.output_matched_baseline_dataset_path
+                    or (Path(temp_dir) / "matched_baseline_policyengine_us.h5"),
+                    period=build_config.policyengine_dataset_year or config.target_period,
+                    household_count=(
+                        config.matched_baseline_household_count
+                        or candidate_household_count
+                    ),
+                    random_seed=config.matched_baseline_random_seed,
+                )
+                _finish_stage(
+                    stage_timings,
+                    "build_matched_baseline_dataset",
+                    matched_start,
+                )
+                matched_score_start = _stage(
+                    stage_timings,
+                    "evaluate_matched_pe_native_loss",
+                )
+                matched_pe_native_scores = compute_us_pe_native_scores(
+                    candidate_dataset_path=dataset_to_score,
+                    baseline_dataset_path=matched_baseline_dataset_path,
+                    period=build_config.policyengine_dataset_year or config.target_period,
+                    policyengine_us_data_repo=config.policyengine_us_data_repo,
+                )
+                _finish_stage(
+                    stage_timings,
+                    "evaluate_matched_pe_native_loss",
+                    matched_score_start,
+                )
             if config.output_policyengine_dataset_path is not None:
                 policyengine_dataset_path = _copy_output_file(
                     dataset_to_score,
@@ -1177,8 +1318,12 @@ def run_us_microplex_performance_harness(
         total_seconds=total_seconds,
         parity_run=parity_run,
         pe_native_scores=pe_native_scores,
+        matched_pe_native_scores=matched_pe_native_scores,
         pe_native_target_deltas=pe_native_target_deltas,
         policyengine_dataset_path=policyengine_dataset_path,
+        matched_baseline_dataset_path=(
+            matched_baseline_dataset_path if needs_pe_dataset else None
+        ),
     )
     if config.output_json_path is not None:
         start = _stage(stage_timings, "write_output_json")
