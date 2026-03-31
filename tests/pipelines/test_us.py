@@ -4,6 +4,7 @@
 import sqlite3
 from types import SimpleNamespace
 
+import h5py
 import numpy as np
 import pandas as pd
 import pytest
@@ -236,6 +237,7 @@ class TestUSMicroplexBuildConfig:
             synthesis_backend="seed",
             calibration_backend="ipf",
             synthesizer_epochs=12,
+            policyengine_selection_backend="pe_native_loss",
             policyengine_selection_household_budget=500,
         )
 
@@ -243,6 +245,7 @@ class TestUSMicroplexBuildConfig:
         assert config.synthesis_backend == "seed"
         assert config.calibration_backend == "ipf"
         assert config.synthesizer_epochs == 12
+        assert config.policyengine_selection_backend == "pe_native_loss"
         assert config.policyengine_selection_household_budget == 500
 
 
@@ -1729,6 +1732,71 @@ class TestUSMicroplexPipeline:
         assert summary["selection"]["selected_household_count"] == 2
         assert summary["selection"]["selector_positive_selected_count"] == 2
         assert "pre_selection" in summary["feasibility_filter"]
+
+    def test_calibrate_policyengine_tables_from_db_can_use_pe_native_selection_backend(
+        self,
+        persons,
+        households,
+        tmp_path,
+        monkeypatch,
+    ):
+        db_path = tmp_path / "policyengine_targets.db"
+        _create_policyengine_calibration_db(db_path)
+
+        def _fake_optimize(**kwargs):
+            output_path = kwargs["output_dataset_path"]
+            with h5py.File(output_path, "w") as handle:
+                household_id_group = handle.create_group("household_id")
+                household_id_group.create_dataset("2024", data=np.asarray([1, 2, 3]))
+                household_weight_group = handle.create_group("household_weight")
+                household_weight_group.create_dataset(
+                    "2024",
+                    data=np.asarray([3.0, 2.0, 0.0], dtype=np.float32),
+                )
+            return SimpleNamespace(
+                to_dict=lambda: {
+                    "metric": "enhanced_cps_native_loss_weight_optimization",
+                    "initial_loss": 0.9,
+                    "optimized_loss": 0.7,
+                    "converged": True,
+                    "iterations": 12,
+                    "positive_household_count": 2,
+                    "target_names": ["nation/foo"],
+                }
+            )
+
+        monkeypatch.setattr(
+            "microplex_us.pipelines.us.optimize_policyengine_us_native_loss_dataset",
+            _fake_optimize,
+        )
+        config = USMicroplexBuildConfig(
+            calibration_backend="entropy",
+            policyengine_targets_db=str(db_path),
+            policyengine_target_variables=("household_count",),
+            policyengine_target_period=2024,
+            policyengine_calibration_min_active_households=1,
+            policyengine_selection_backend="pe_native_loss",
+            policyengine_selection_household_budget=2,
+        )
+        pipeline = USMicroplexPipeline(config)
+        seed = pipeline.prepare_seed_data(persons, households).rename(
+            columns={"hh_weight": "weight"}
+        )
+        tables = pipeline.build_policyengine_entity_tables(seed)
+
+        calibrated_tables, calibrated_persons, summary = (
+            pipeline.calibrate_policyengine_tables(tables)
+        )
+
+        assert len(calibrated_tables.households) == 2
+        assert set(calibrated_tables.households["household_id"]) == {1, 2}
+        assert set(calibrated_persons["household_id"]) == {1, 2}
+        assert summary["selection"]["applied"] is True
+        assert summary["selection"]["backend"] == "pe_native_loss"
+        assert summary["selection"]["selected_household_count"] == 2
+        assert summary["selection"]["selector_positive_selected_count"] == 2
+        assert summary["selection"]["pe_native_optimization"]["optimized_loss"] == 0.7
+        assert "target_names" not in summary["selection"]["pe_native_optimization"]
 
     def test_calibrate_policyengine_tables_from_db_with_hardconcrete_backend(
         self,

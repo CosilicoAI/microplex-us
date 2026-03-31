@@ -7,9 +7,11 @@ import warnings
 from collections.abc import Iterable
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from types import FunctionType
 from typing import Any, Literal
 
+import h5py
 import numpy as np
 import pandas as pd
 from microplex.calibration import (
@@ -37,6 +39,9 @@ from microplex.targets import TargetQuery, TargetSpec
 from sklearn.ensemble import RandomForestClassifier
 
 from microplex_us.pipelines.pe_l0 import PolicyEngineL0Calibrator
+from microplex_us.pipelines.pe_native_optimization import (
+    optimize_policyengine_us_native_loss_dataset,
+)
 from microplex_us.policyengine.target_profiles import (
     PolicyEngineUSTargetCell,
     resolve_policyengine_us_target_profile,
@@ -565,6 +570,7 @@ class USMicroplexBuildConfig:
     policyengine_calibration_target_domains: tuple[str, ...] = ()
     policyengine_calibration_target_geo_levels: tuple[str, ...] = ()
     policyengine_calibration_target_profile: str | None = None
+    policyengine_selection_backend: Literal["sparse", "pe_native_loss"] = "sparse"
     policyengine_selection_household_budget: int | None = None
     policyengine_calibration_max_constraints: int | None = None
     policyengine_calibration_max_constraints_per_household: float | None = (
@@ -1366,24 +1372,56 @@ class USMicroplexPipeline:
             )
 
         target_sparsity = max(0.0, 1.0 - (requested_budget / household_count))
-        selector = SparseCalibrator(
-            target_sparsity=target_sparsity,
-            tol=self.config.calibration_tol,
-            max_iter=max(self.config.calibration_max_iter, 1_000),
-        )
-        selector_result = selector.fit_transform(
-            tables.households.copy(),
-            {},
-            weight_col="household_weight",
-            linear_constraints=constraints,
-        )
-        selector_validation = selector.validate(selector_result)
-        selector_weights = (
-            pd.to_numeric(selector_result["household_weight"], errors="coerce")
-            .fillna(0.0)
-            .to_numpy(dtype=float)
-        )
         household_ids = tables.households["household_id"].to_numpy(dtype=np.int64)
+        selection_backend = self.config.policyengine_selection_backend
+        if selection_backend == "sparse":
+            selector = SparseCalibrator(
+                target_sparsity=target_sparsity,
+                tol=self.config.calibration_tol,
+                max_iter=max(self.config.calibration_max_iter, 1_000),
+            )
+            selector_result = selector.fit_transform(
+                tables.households.copy(),
+                {},
+                weight_col="household_weight",
+                linear_constraints=constraints,
+            )
+            selector_validation = selector.validate(selector_result)
+            selector_weights = (
+                pd.to_numeric(selector_result["household_weight"], errors="coerce")
+                .fillna(0.0)
+                .to_numpy(dtype=float)
+            )
+            selector_metadata = {
+                "selector_converged": bool(
+                    selector_validation.get("converged", False)
+                ),
+                "selector_max_error": float(selector_validation.get("max_error", 0.0)),
+                "selector_mean_error": float(
+                    selector_validation.get("mean_error", 0.0)
+                ),
+                "selector_sparsity": float(selector_validation.get("sparsity", 0.0)),
+            }
+        elif selection_backend == "pe_native_loss":
+            selector_weights, optimization_summary = (
+                self._select_policyengine_household_budget_with_pe_native_loss(
+                    tables=tables,
+                    requested_budget=requested_budget,
+                    household_ids=household_ids,
+                )
+            )
+            selector_metadata = {
+                "selector_converged": bool(optimization_summary.get("converged", False)),
+                "selector_max_error": 0.0,
+                "selector_mean_error": 0.0,
+                "selector_sparsity": 0.0,
+                "pe_native_optimization": optimization_summary,
+            }
+        else:
+            raise ValueError(
+                f"Unsupported policyengine_selection_backend: {selection_backend}"
+            )
+
         ranking = np.lexsort((household_ids, -selector_weights))
         selected_positions = np.sort(ranking[:requested_budget])
         household_mask = np.zeros(household_count, dtype=bool)
@@ -1396,15 +1434,11 @@ class USMicroplexPipeline:
             _subset_policyengine_linear_constraints(constraints, household_mask),
             {
                 "applied": True,
-                "backend": "sparse",
+                "backend": selection_backend,
                 "requested_household_budget": int(requested_budget),
                 "input_household_count": int(household_count),
                 "selected_household_count": int(household_mask.sum()),
                 "target_sparsity": float(target_sparsity),
-                "selector_converged": bool(selector_validation.get("converged", False)),
-                "selector_max_error": float(selector_validation.get("max_error", 0.0)),
-                "selector_mean_error": float(selector_validation.get("mean_error", 0.0)),
-                "selector_sparsity": float(selector_validation.get("sparsity", 0.0)),
                 "selector_nonzero_count": int((selector_weights > 0.0).sum()),
                 "selector_positive_selected_count": int(
                     (selector_weights[household_mask] > 0.0).sum()
@@ -1412,8 +1446,69 @@ class USMicroplexPipeline:
                 "selector_weight_diagnostics": _summarize_weight_diagnostics(
                     selector_weights
                 ),
+                **selector_metadata,
             },
         )
+
+    def _select_policyengine_household_budget_with_pe_native_loss(
+        self,
+        *,
+        tables: PolicyEngineUSEntityTableBundle,
+        requested_budget: int,
+        household_ids: np.ndarray,
+    ) -> tuple[np.ndarray, dict[str, Any]]:
+        period = self.config.policyengine_dataset_year or self.config.policyengine_target_period or 2024
+        with TemporaryDirectory(prefix="microplex-us-pe-native-selection-") as temp_dir:
+            temp_dir_path = Path(temp_dir)
+            selection_build_result = USMicroplexBuildResult(
+                config=self.config,
+                seed_data=pd.DataFrame(),
+                synthetic_data=pd.DataFrame(),
+                calibrated_data=pd.DataFrame(),
+                targets=USMicroplexTargets(marginal={}, continuous={}),
+                calibration_summary={},
+                policyengine_tables=tables,
+            )
+            selection_input_path = self.export_policyengine_dataset(
+                selection_build_result,
+                temp_dir_path / "selection_candidate.h5",
+                period=period,
+                direct_override_variables=self.config.policyengine_direct_override_variables,
+            )
+            selection_output_path = temp_dir_path / "selection_candidate_optimized.h5"
+            optimization_result = optimize_policyengine_us_native_loss_dataset(
+                input_dataset_path=selection_input_path,
+                output_dataset_path=selection_output_path,
+                period=period,
+                budget=requested_budget,
+                max_iter=max(self.config.calibration_max_iter, 200),
+                l2_penalty=0.0,
+            )
+            with h5py.File(selection_output_path, "r") as handle:
+                period_key = str(period)
+                optimized_household_ids = handle["household_id"][period_key][:].astype(
+                    np.int64,
+                    copy=False,
+                )
+                optimized_household_weights = handle["household_weight"][period_key][:].astype(
+                    np.float64,
+                    copy=False,
+                )
+        weight_by_household_id = {
+            int(household_id): float(weight)
+            for household_id, weight in zip(
+                optimized_household_ids,
+                optimized_household_weights,
+                strict=True,
+            )
+        }
+        selector_weights = np.asarray(
+            [weight_by_household_id[int(household_id)] for household_id in household_ids],
+            dtype=np.float64,
+        )
+        optimization_summary = optimization_result.to_dict()
+        optimization_summary.pop("target_names", None)
+        return selector_weights, optimization_summary
 
     def calibrate_policyengine_tables(
         self,
