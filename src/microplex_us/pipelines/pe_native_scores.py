@@ -9,6 +9,7 @@ import subprocess
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
+from time import perf_counter
 from typing import Any
 
 _DEFAULT_PE_US_DATA_REPO = Path.home() / "PolicyEngine" / "policyengine-us-data"
@@ -869,6 +870,7 @@ def compute_batch_us_pe_native_scores(
 
     if not candidate_dataset_paths:
         return []
+    started_at = perf_counter()
     resolved_repo = resolve_policyengine_us_data_repo_root(policyengine_us_data_repo)
     env = build_policyengine_us_data_subprocess_env(resolved_repo)
     if policyengine_us_data_python is not None:
@@ -903,7 +905,8 @@ def compute_batch_us_pe_native_scores(
         detail = stderr or stdout or f"exit code {completed.returncode}"
         raise RuntimeError(f"PE-native batch broad loss scoring failed: {detail}")
     payload = json.loads(completed.stdout)
-    return [
+    elapsed_seconds = perf_counter() - started_at
+    results = [
         {
             "metric": item["metric"],
             "period": int(item["period"]),
@@ -964,6 +967,12 @@ def compute_batch_us_pe_native_scores(
         }
         for item in payload
     ]
+    for item in results:
+        item["timing"] = {
+            "batch_elapsed_seconds": float(elapsed_seconds),
+            "batch_candidate_count": len(candidate_dataset_paths),
+        }
+    return results
 
 
 def compare_us_pe_native_target_deltas(

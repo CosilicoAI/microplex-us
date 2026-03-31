@@ -218,6 +218,8 @@ def test_compute_batch_us_pe_native_scores_wraps_multiple_candidates(
     assert results[1]["broad_loss"]["enhanced_cps_native_loss_delta"] == 0.25
     assert results[0]["family_breakdown"][0]["family"] == "state_age_distribution"
     assert results[1]["broad_loss"]["family_breakdown"][0]["family"] == "state_agi_distribution"
+    assert results[0]["timing"]["batch_candidate_count"] == 2
+    assert results[0]["timing"]["batch_elapsed_seconds"] >= 0.0
 
 
 def test_build_policyengine_us_data_pythonpath_includes_sibling_microimpute(
