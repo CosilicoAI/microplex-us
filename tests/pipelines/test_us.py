@@ -34,6 +34,7 @@ from microplex_us.pipelines.us import (
 )
 from microplex_us.policyengine.us import (
     PolicyEngineUSConstraint,
+    PolicyEngineUSEntityTableBundle,
     build_policyengine_us_export_variable_maps,
     compute_policyengine_us_definition_hash,
 )
@@ -240,6 +241,7 @@ class TestUSMicroplexBuildConfig:
             synthesizer_epochs=12,
             policyengine_selection_backend="pe_native_loss",
             policyengine_selection_household_budget=500,
+            policyengine_selection_state_floor=25,
             policyengine_selection_max_iter=750,
             policyengine_selection_tol=1e-7,
             policyengine_selection_l2_penalty=1e-5,
@@ -251,6 +253,7 @@ class TestUSMicroplexBuildConfig:
         assert config.synthesizer_epochs == 12
         assert config.policyengine_selection_backend == "pe_native_loss"
         assert config.policyengine_selection_household_budget == 500
+        assert config.policyengine_selection_state_floor == 25
         assert config.policyengine_selection_max_iter == 750
         assert config.policyengine_selection_tol == 1e-7
         assert config.policyengine_selection_l2_penalty == 1e-5
@@ -2060,6 +2063,88 @@ class TestUSMicroplexPipeline:
         assert summary["selection"]["selector_positive_selected_count"] == 2
         assert summary["selection"]["pe_native_optimization"]["optimized_loss"] == 0.7
         assert "target_names" not in summary["selection"]["pe_native_optimization"]
+
+    def test_calibrate_policyengine_tables_pe_native_selection_can_preallocate_state_floor(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        db_path = tmp_path / "policyengine_targets.db"
+        _create_policyengine_calibration_db(db_path)
+
+        def _unexpected_optimize(**_kwargs):
+            raise AssertionError("PE-native optimizer should not run when state floor fills budget")
+
+        monkeypatch.setattr(
+            "microplex_us.pipelines.us.optimize_policyengine_us_native_loss_dataset",
+            _unexpected_optimize,
+        )
+        pipeline = USMicroplexPipeline(
+            USMicroplexBuildConfig(
+                calibration_backend="entropy",
+                policyengine_targets_db=str(db_path),
+                policyengine_target_variables=("household_count",),
+                policyengine_target_period=2024,
+                policyengine_calibration_min_active_households=1,
+                policyengine_selection_backend="pe_native_loss",
+                policyengine_selection_household_budget=2,
+                policyengine_selection_state_floor=1,
+            )
+        )
+        tables = PolicyEngineUSEntityTableBundle(
+            households=pd.DataFrame(
+                {
+                    "household_id": [1, 2, 3],
+                    "household_weight": [10.0, 4.0, 8.0],
+                    "state_fips": [6, 6, 36],
+                }
+            ),
+            persons=pd.DataFrame(
+                {
+                    "person_id": [101, 102, 103],
+                    "household_id": [1, 2, 3],
+                    "weight": [10.0, 4.0, 8.0],
+                    "state_fips": [6, 6, 36],
+                    "age": [35, 28, 52],
+                }
+            ),
+            tax_units=pd.DataFrame(
+                {
+                    "tax_unit_id": [11, 12, 13],
+                    "household_id": [1, 2, 3],
+                }
+            ),
+            spm_units=pd.DataFrame(
+                {
+                    "spm_unit_id": [21, 22, 23],
+                    "household_id": [1, 2, 3],
+                }
+            ),
+            families=pd.DataFrame(
+                {
+                    "family_id": [31, 32, 33],
+                    "household_id": [1, 2, 3],
+                }
+            ),
+            marital_units=pd.DataFrame(
+                {
+                    "marital_unit_id": [41, 42, 43],
+                    "household_id": [1, 2, 3],
+                }
+            ),
+        )
+
+        calibrated_tables, calibrated_persons, summary = pipeline.calibrate_policyengine_tables(
+            tables
+        )
+
+        assert set(calibrated_tables.households["household_id"]) == {1, 3}
+        assert set(calibrated_persons["household_id"]) == {1, 3}
+        assert summary["selection"]["backend"] == "pe_native_loss"
+        assert summary["selection"]["state_floor"]["applied"] is True
+        assert summary["selection"]["state_floor"]["selected_household_count"] == 2
+        assert summary["selection"]["state_floor"]["state_count"] == 2
+        assert summary["selection"]["pe_native_optimization"]["budget"] == 0
 
     def test_calibrate_policyengine_tables_from_db_with_hardconcrete_backend(
         self,

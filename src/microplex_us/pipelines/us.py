@@ -572,8 +572,10 @@ class USMicroplexBuildConfig:
     policyengine_calibration_target_geo_levels: tuple[str, ...] = ()
     policyengine_calibration_target_profile: str | None = None
     policyengine_calibration_rescale_to_input_weight_sum: bool = False
+    policyengine_calibration_target_total_weight: float | None = None
     policyengine_selection_backend: Literal["sparse", "pe_native_loss"] = "sparse"
     policyengine_selection_household_budget: int | None = None
+    policyengine_selection_state_floor: int = 0
     policyengine_selection_max_iter: int = 200
     policyengine_selection_tol: float = 1e-8
     policyengine_selection_l2_penalty: float = 0.0
@@ -1382,6 +1384,11 @@ class USMicroplexPipeline:
         target_sparsity = max(0.0, 1.0 - (requested_budget / household_count))
         household_ids = tables.households["household_id"].to_numpy(dtype=np.int64)
         selection_backend = self.config.policyengine_selection_backend
+        state_floor_positions = np.asarray([], dtype=np.int64)
+        state_floor_summary = {
+            "applied": False,
+            "requested_state_floor": int(max(self.config.policyengine_selection_state_floor, 0)),
+        }
         if selection_backend == "sparse":
             selector = SparseCalibrator(
                 target_sparsity=target_sparsity,
@@ -1411,19 +1418,73 @@ class USMicroplexPipeline:
                 "selector_sparsity": float(selector_validation.get("sparsity", 0.0)),
             }
         elif selection_backend == "pe_native_loss":
-            selector_weights, optimization_summary = (
-                self._select_policyengine_household_budget_with_pe_native_loss(
-                    tables=tables,
-                    requested_budget=requested_budget,
-                    household_ids=household_ids,
-                )
+            (
+                state_floor_positions,
+                state_floor_summary,
+            ) = self._select_policyengine_state_floor_positions(
+                tables=tables,
+                requested_budget=requested_budget,
             )
+            state_floor_mask = np.zeros(household_count, dtype=bool)
+            state_floor_mask[state_floor_positions] = True
+            remaining_budget = requested_budget - int(state_floor_mask.sum())
+            if remaining_budget < 0:
+                raise ValueError(
+                    "policyengine_selection_state_floor selects more households than "
+                    "policyengine_selection_household_budget allows"
+                )
+            remaining_tables = (
+                _subset_policyengine_tables_by_households(
+                    tables,
+                    pd.Index(
+                        household_ids[~state_floor_mask],
+                        name="household_id",
+                    ),
+                )
+                if state_floor_mask.any()
+                else tables
+            )
+            remaining_household_ids = (
+                household_ids[~state_floor_mask] if state_floor_mask.any() else household_ids
+            )
+            if remaining_budget == 0 or len(remaining_household_ids) == 0:
+                selector_weights = np.zeros(len(remaining_household_ids), dtype=np.float64)
+                optimization_summary = {
+                    "metric": "enhanced_cps_native_loss_weight_optimization",
+                    "initial_loss": 0.0,
+                    "optimized_loss": 0.0,
+                    "loss_delta": 0.0,
+                    "initial_weight_sum": 0.0,
+                    "optimized_weight_sum": 0.0,
+                    "household_count": int(len(remaining_household_ids)),
+                    "positive_household_count": 0,
+                    "budget": int(remaining_budget),
+                    "converged": True,
+                    "iterations": 0,
+                }
+            else:
+                selector_weights, optimization_summary = (
+                    self._select_policyengine_household_budget_with_pe_native_loss(
+                        tables=remaining_tables,
+                        requested_budget=remaining_budget,
+                        household_ids=remaining_household_ids,
+                    )
+                )
+            if state_floor_mask.any():
+                full_selector_weights = np.zeros(household_count, dtype=np.float64)
+                full_selector_weights[~state_floor_mask] = selector_weights
+                floor_priority = (
+                    float(selector_weights.max()) + 1.0 if selector_weights.size else 1.0
+                )
+                full_selector_weights[state_floor_mask] = floor_priority
+                selector_weights = full_selector_weights
             selector_metadata = {
                 "selector_converged": bool(optimization_summary.get("converged", False)),
                 "selector_max_error": 0.0,
                 "selector_mean_error": 0.0,
                 "selector_sparsity": 0.0,
                 "pe_native_optimization": optimization_summary,
+                "state_floor": state_floor_summary,
             }
         else:
             raise ValueError(
@@ -1455,6 +1516,75 @@ class USMicroplexPipeline:
                     selector_weights
                 ),
                 **selector_metadata,
+            },
+        )
+
+    def _select_policyengine_state_floor_positions(
+        self,
+        *,
+        tables: PolicyEngineUSEntityTableBundle,
+        requested_budget: int,
+    ) -> tuple[np.ndarray, dict[str, Any]]:
+        requested_floor = int(max(self.config.policyengine_selection_state_floor, 0))
+        if requested_floor <= 0:
+            return (
+                np.asarray([], dtype=np.int64),
+                {"applied": False, "requested_state_floor": requested_floor},
+            )
+        households = tables.households.copy()
+        if "state_fips" not in households.columns:
+            return (
+                np.asarray([], dtype=np.int64),
+                {
+                    "applied": False,
+                    "requested_state_floor": requested_floor,
+                    "reason": "missing_state_fips",
+                },
+            )
+        ranked = households.loc[:, ["household_id", "state_fips", "household_weight"]].copy()
+        ranked["_position"] = np.arange(len(ranked), dtype=np.int64)
+        ranked["state_fips"] = pd.to_numeric(ranked["state_fips"], errors="coerce")
+        ranked["household_weight"] = pd.to_numeric(
+            ranked["household_weight"], errors="coerce"
+        ).fillna(0.0)
+        ranked = ranked.dropna(subset=["state_fips"])
+        if ranked.empty:
+            return (
+                np.asarray([], dtype=np.int64),
+                {
+                    "applied": False,
+                    "requested_state_floor": requested_floor,
+                    "reason": "no_rankable_states",
+                },
+            )
+        ranked["state_fips"] = ranked["state_fips"].astype(int)
+        ranked = ranked.sort_values(
+            ["state_fips", "household_weight", "household_id"],
+            ascending=[True, False, True],
+            kind="mergesort",
+        )
+        selected = ranked.groupby("state_fips", sort=True).head(requested_floor)
+        selected_positions = np.sort(selected["_position"].to_numpy(dtype=np.int64))
+        if len(selected_positions) > requested_budget:
+            raise ValueError(
+                "policyengine_selection_state_floor selects "
+                f"{len(selected_positions)} households, exceeding budget "
+                f"{requested_budget}"
+            )
+        counts_by_state = (
+            selected.groupby("state_fips")["household_id"].size().astype(int).to_dict()
+        )
+        return (
+            selected_positions,
+            {
+                "applied": True,
+                "requested_state_floor": requested_floor,
+                "selected_household_count": int(len(selected_positions)),
+                "state_count": int(selected["state_fips"].nunique()),
+                "counts_by_state": {
+                    str(int(state_fips)): int(count)
+                    for state_fips, count in counts_by_state.items()
+                },
             },
         )
 
@@ -1600,11 +1730,21 @@ class USMicroplexPipeline:
                     )
         calibrator = self._build_weight_calibrator()
         input_household_weight_sum = float(tables.households["household_weight"].sum())
+        calibration_constraints = list(constraints)
+        if self.config.policyengine_calibration_target_total_weight is not None:
+            n_hh = len(tables.households)
+            calibration_constraints.append(
+                LinearConstraint(
+                    name="total_household_weight_sum",
+                    coefficients=np.ones(n_hh, dtype=float),
+                    target=float(self.config.policyengine_calibration_target_total_weight),
+                )
+            )
         calibrated_households = calibrator.fit_transform(
             tables.households.copy(),
             {},
             weight_col="household_weight",
-            linear_constraints=constraints,
+            linear_constraints=tuple(calibration_constraints),
         )
         pre_rescale_household_weight_sum = float(calibrated_households["household_weight"].sum())
         weight_sum_rescaled = False
@@ -1675,6 +1815,7 @@ class USMicroplexPipeline:
                 )
             ),
             "input_household_weight_sum": input_household_weight_sum,
+            "total_weight_constraint_target": self.config.policyengine_calibration_target_total_weight,
             "pre_rescale_household_weight_sum": pre_rescale_household_weight_sum,
             "post_rescale_household_weight_sum": float(
                 calibrated_households["household_weight"].sum()
