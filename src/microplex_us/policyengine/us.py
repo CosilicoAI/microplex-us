@@ -182,7 +182,6 @@ SAFE_POLICYENGINE_US_EXPORT_VARIABLES: set[str] = {
     "is_disabled",
     "medicare_part_b_premiums",
     "employment_income_before_lsr",
-    "non_sch_d_capital_gains",
     "other_medical_expenses",
     "over_the_counter_health_expenses",
     "self_employment_income_before_lsr",

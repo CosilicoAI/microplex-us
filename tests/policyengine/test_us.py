@@ -1821,7 +1821,7 @@ class TestPolicyEngineUSProjection:
 
         assert overlaps == []
         assert "estate_income" in SAFE_POLICYENGINE_US_EXPORT_VARIABLES
-        assert "non_sch_d_capital_gains" in SAFE_POLICYENGINE_US_EXPORT_VARIABLES
+        assert "non_sch_d_capital_gains" not in SAFE_POLICYENGINE_US_EXPORT_VARIABLES
         assert "receives_wic" in SAFE_POLICYENGINE_US_EXPORT_VARIABLES
         assert "is_separated" not in SAFE_POLICYENGINE_US_EXPORT_VARIABLES
         assert "is_surviving_spouse" not in SAFE_POLICYENGINE_US_EXPORT_VARIABLES
@@ -1861,6 +1861,7 @@ class TestPolicyEngineUSProjection:
         export_maps = build_policyengine_us_export_variable_maps(
             tables,
             tax_benefit_system=FakeSystem(),
+            direct_override_variables=("non_sch_d_capital_gains",),
         )
 
         assert export_maps["person"] == {

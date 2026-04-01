@@ -1726,3 +1726,18 @@ Append-only notes for agents working in `microplex-us`.
 - Code consequence:
   - revert the default override allowlist to `()`
   - retain the override mechanism for future bounded A/Bs only
+
+## 2026-03-31 capital gains distributions export moved back to opt-in
+
+- Evidence:
+  - the no-override `signedirsfix` run (`0.9762246696`) was still far worse than `statusfix` (`0.6362298466`)
+  - in `tmp_fullsupport_selector29999_signedirsfix_20260331.h5`, `self_employment_income_before_lsr` and `rental_income` still had `0` negative rows, so the signed-income support repairs were not yet affecting the default path
+  - the main new default-path change was exporting `capital_gains_distributions` as `non_sch_d_capital_gains`
+- Code consequence:
+  - remove `non_sch_d_capital_gains` from `SAFE_POLICYENGINE_US_EXPORT_VARIABLES`
+  - keep the alias available for explicit opt-in through `direct_override_variables`
+- Focused verification:
+  - `pytest -q tests/policyengine/test_us.py -k 'default_policyengine_us_export_surface_avoids_formula_aggregates or supports_pre_sim_aliases'` -> `2 passed`
+  - `ruff check src/microplex_us/policyengine/us.py tests/policyengine/test_us.py` -> clean
+- Read:
+  - until a direct H5 ablation proves otherwise, `non_sch_d_capital_gains` should not be on the default PE export surface
