@@ -81,6 +81,27 @@ def test_optimize_pe_native_loss_weights_reduces_objective_and_respects_budget()
     assert np.isclose(summary["optimized_weight_sum"], initial_weights.sum())
 
 
+def test_optimize_pe_native_loss_weights_respects_target_total_weight():
+    """When target_total_weight is given, the simplex projection uses that total."""
+    scaled_matrix = np.eye(3, dtype=np.float64)
+    scaled_target = np.asarray([5.0, 0.0, 0.0], dtype=np.float64)
+    initial_weights = np.asarray([1.0, 1.0, 1.0], dtype=np.float64)
+
+    optimized_weights, summary = optimize_pe_native_loss_weights(
+        scaled_matrix=scaled_matrix,
+        scaled_target=scaled_target,
+        initial_weights=initial_weights,
+        target_total_weight=5.0,
+        max_iter=200,
+    )
+
+    assert np.isclose(optimized_weights.sum(), 5.0, atol=1e-6)
+    assert summary["initial_weight_sum"] == 3.0
+    assert summary["target_total_weight"] == 5.0
+    assert np.isclose(summary["optimized_weight_sum"], 5.0, atol=1e-6)
+    assert summary["optimized_loss"] < summary["initial_loss"]
+
+
 def test_rewrite_policyengine_us_dataset_weights_updates_group_weights(tmp_path: Path):
     source_path = _build_stub_dataset(tmp_path / "input.h5")
     output_path = tmp_path / "output.h5"

@@ -245,6 +245,7 @@ class TestUSMicroplexBuildConfig:
             policyengine_selection_max_iter=750,
             policyengine_selection_tol=1e-7,
             policyengine_selection_l2_penalty=1e-5,
+            policyengine_selection_target_total_weight=150_000_000.0,
         )
 
         assert config.n_synthetic == 250
@@ -257,6 +258,7 @@ class TestUSMicroplexBuildConfig:
         assert config.policyengine_selection_max_iter == 750
         assert config.policyengine_selection_tol == 1e-7
         assert config.policyengine_selection_l2_penalty == 1e-5
+        assert config.policyengine_selection_target_total_weight == 150_000_000.0
 
     def test_can_opt_into_authoritative_donor_overrides(self):
         config = USMicroplexBuildConfig(
@@ -2145,6 +2147,27 @@ class TestUSMicroplexPipeline:
         assert summary["selection"]["state_floor"]["selected_household_count"] == 2
         assert summary["selection"]["state_floor"]["state_count"] == 2
         assert summary["selection"]["pe_native_optimization"]["budget"] == 0
+
+    def test_selection_optimizer_kwargs_passes_target_total_weight(self):
+        pipeline = USMicroplexPipeline(
+            USMicroplexBuildConfig(
+                policyengine_selection_backend="pe_native_loss",
+                policyengine_selection_household_budget=100,
+                policyengine_selection_target_total_weight=150_000_000.0,
+            )
+        )
+        kwargs = pipeline._policyengine_selection_optimizer_kwargs(requested_budget=100)
+        assert kwargs["target_total_weight"] == 150_000_000.0
+
+    def test_selection_optimizer_kwargs_omits_target_total_weight_when_none(self):
+        pipeline = USMicroplexPipeline(
+            USMicroplexBuildConfig(
+                policyengine_selection_backend="pe_native_loss",
+                policyengine_selection_household_budget=100,
+            )
+        )
+        kwargs = pipeline._policyengine_selection_optimizer_kwargs(requested_budget=100)
+        assert "target_total_weight" not in kwargs
 
     def test_calibrate_policyengine_tables_from_db_with_hardconcrete_backend(
         self,

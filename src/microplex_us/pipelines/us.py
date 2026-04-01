@@ -579,6 +579,7 @@ class USMicroplexBuildConfig:
     policyengine_selection_max_iter: int = 200
     policyengine_selection_tol: float = 1e-8
     policyengine_selection_l2_penalty: float = 0.0
+    policyengine_selection_target_total_weight: float | None = None
     policyengine_calibration_max_constraints: int | None = None
     policyengine_calibration_max_constraints_per_household: float | None = (
         DEFAULT_POLICYENGINE_CALIBRATION_MAX_CONSTRAINTS_PER_HOUSEHOLD
@@ -1652,13 +1653,18 @@ class USMicroplexPipeline:
         self,
         *,
         requested_budget: int,
-    ) -> dict[str, int | float]:
-        return {
+    ) -> dict[str, Any]:
+        kwargs: dict[str, Any] = {
             "budget": requested_budget,
             "max_iter": max(self.config.policyengine_selection_max_iter, 1),
             "l2_penalty": float(self.config.policyengine_selection_l2_penalty),
             "tol": float(self.config.policyengine_selection_tol),
         }
+        if self.config.policyengine_selection_target_total_weight is not None:
+            kwargs["target_total_weight"] = float(
+                self.config.policyengine_selection_target_total_weight
+            )
+        return kwargs
 
     def calibrate_policyengine_tables(
         self,

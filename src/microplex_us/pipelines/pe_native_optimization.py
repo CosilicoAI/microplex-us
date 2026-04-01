@@ -221,8 +221,15 @@ def optimize_pe_native_loss_weights(
     max_iter: int = 200,
     l2_penalty: float = 0.0,
     tol: float = 1e-8,
+    target_total_weight: float | None = None,
 ) -> tuple[np.ndarray, dict[str, Any]]:
-    """Optimize nonnegative household weights directly on the PE-native loss matrix."""
+    """Optimize nonnegative household weights directly on the PE-native loss matrix.
+
+    If *target_total_weight* is provided, the simplex projection targets that
+    total instead of the initial weight sum.  This allows the optimizer to
+    rescale the weight budget (e.g. to match a known population total) while
+    simultaneously redistributing weights to minimise the PE-native loss.
+    """
     matrix = np.asarray(scaled_matrix, dtype=np.float64)
     target = np.asarray(scaled_target, dtype=np.float64)
     weights0 = np.asarray(initial_weights, dtype=np.float64)
@@ -233,7 +240,10 @@ def optimize_pe_native_loss_weights(
     if weights0.ndim != 1 or weights0.shape[0] != matrix.shape[0]:
         raise ValueError("initial_weights must match scaled_matrix household dimension")
 
-    total_weight = float(weights0.sum())
+    initial_weight_sum = float(weights0.sum())
+    total_weight = (
+        float(target_total_weight) if target_total_weight is not None else initial_weight_sum
+    )
     weights = _project_to_budget_simplex(weights0, total_weight, budget)
     initial_reference = weights.copy()
     lipschitz = _estimate_quadratic_lipschitz(matrix, l2_penalty)
@@ -274,7 +284,8 @@ def optimize_pe_native_loss_weights(
         "initial_loss": float(objective(initial_reference)),
         "optimized_loss": float(current_loss),
         "loss_delta": float(current_loss - objective(initial_reference)),
-        "initial_weight_sum": total_weight,
+        "initial_weight_sum": initial_weight_sum,
+        "target_total_weight": total_weight,
         "optimized_weight_sum": float(weights.sum()),
         "household_count": int(len(weights)),
         "positive_household_count": int((weights > 1e-9).sum()),
@@ -364,6 +375,7 @@ def optimize_policyengine_us_native_loss_dataset(
     max_iter: int = 200,
     l2_penalty: float = 0.0,
     tol: float = 1e-8,
+    target_total_weight: float | None = None,
     policyengine_us_data_repo: str | Path | None = None,
 ) -> PolicyEngineUSNativeWeightOptimizationResult:
     """Optimize household weights of an exported PE-US dataset on the broad native loss."""
@@ -411,6 +423,7 @@ def optimize_policyengine_us_native_loss_dataset(
             max_iter=max_iter,
             l2_penalty=l2_penalty,
             tol=tol,
+            target_total_weight=target_total_weight,
         )
         rewritten = rewrite_policyengine_us_dataset_weights(
             input_dataset_path=input_dataset_path,
