@@ -571,6 +571,7 @@ class USMicroplexBuildConfig:
     policyengine_calibration_target_domains: tuple[str, ...] = ()
     policyengine_calibration_target_geo_levels: tuple[str, ...] = ()
     policyengine_calibration_target_profile: str | None = None
+    policyengine_calibration_rescale_to_input_weight_sum: bool = False
     policyengine_selection_backend: Literal["sparse", "pe_native_loss"] = "sparse"
     policyengine_selection_household_budget: int | None = None
     policyengine_selection_max_iter: int = 200
@@ -1598,12 +1599,25 @@ class USMicroplexPipeline:
                         "No supported PolicyEngine DB targets remained after household-budget selection"
                     )
         calibrator = self._build_weight_calibrator()
+        input_household_weight_sum = float(tables.households["household_weight"].sum())
         calibrated_households = calibrator.fit_transform(
             tables.households.copy(),
             {},
             weight_col="household_weight",
             linear_constraints=constraints,
         )
+        pre_rescale_household_weight_sum = float(calibrated_households["household_weight"].sum())
+        weight_sum_rescaled = False
+        if (
+            self.config.policyengine_calibration_rescale_to_input_weight_sum
+            and pre_rescale_household_weight_sum > 0.0
+            and not np.isclose(pre_rescale_household_weight_sum, input_household_weight_sum)
+        ):
+            calibrated_households["household_weight"] = (
+                calibrated_households["household_weight"].astype(float)
+                * (input_household_weight_sum / pre_rescale_household_weight_sum)
+            )
+            weight_sum_rescaled = True
         validation = calibrator.validate(calibrated_households)
 
         household_weights = calibrated_households.set_index("household_id")["household_weight"]
@@ -1660,6 +1674,12 @@ class USMicroplexPipeline:
                     and person_weight_diagnostics["collapse_suspected"]
                 )
             ),
+            "input_household_weight_sum": input_household_weight_sum,
+            "pre_rescale_household_weight_sum": pre_rescale_household_weight_sum,
+            "post_rescale_household_weight_sum": float(
+                calibrated_households["household_weight"].sum()
+            ),
+            "weight_sum_rescaled": weight_sum_rescaled,
             "household_weight_diagnostics": household_weight_diagnostics,
             "person_weight_diagnostics": person_weight_diagnostics,
         }
