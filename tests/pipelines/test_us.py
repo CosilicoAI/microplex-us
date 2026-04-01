@@ -1871,6 +1871,40 @@ class TestUSMicroplexPipeline:
             calibrated_persons["state_fips"] == 6, "weight"
         ].iloc[0] == pytest.approx(225.0, rel=1e-6)
 
+    def test_calibrate_policyengine_tables_none_backend_preserves_original_weights(
+        self,
+        persons,
+        households,
+        tmp_path,
+    ):
+        db_path = tmp_path / "policyengine_targets.db"
+        _create_policyengine_calibration_db(db_path)
+        config = USMicroplexBuildConfig(
+            calibration_backend="none",
+            policyengine_targets_db=str(db_path),
+            policyengine_target_variables=("household_count",),
+            policyengine_target_period=2024,
+            policyengine_calibration_min_active_households=1,
+        )
+        pipeline = USMicroplexPipeline(config)
+        seed = pipeline.prepare_seed_data(persons, households).rename(
+            columns={"hh_weight": "weight"}
+        )
+        tables = pipeline.build_policyengine_entity_tables(seed)
+        original_weights = tables.households["household_weight"].astype(float).copy()
+
+        calibrated_tables, calibrated_persons, summary = (
+            pipeline.calibrate_policyengine_tables(tables)
+        )
+
+        assert summary["backend"] == "policyengine_db_none"
+        assert summary["converged"] is True
+        assert summary["max_error"] == 0.0
+        assert summary["mean_error"] == 0.0
+        assert summary["weight_collapse_suspected"] is False
+        calibrated_weights = calibrated_tables.households["household_weight"].astype(float)
+        assert calibrated_weights.tolist() == pytest.approx(original_weights.tolist())
+
     def test_calibrate_policyengine_tables_from_db_with_sparse_backend(
         self,
         persons,

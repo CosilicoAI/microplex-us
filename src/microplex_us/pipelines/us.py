@@ -516,9 +516,9 @@ class USMicroplexBuildConfig:
 
     n_synthetic: int = 100_000
     synthesis_backend: Literal["bootstrap", "synthesizer", "seed"] = "synthesizer"
-    calibration_backend: Literal["entropy", "ipf", "chi2", "sparse", "hardconcrete", "pe_l0"] = (
-        "entropy"
-    )
+    calibration_backend: Literal[
+        "entropy", "ipf", "chi2", "sparse", "hardconcrete", "pe_l0", "none"
+    ] = "entropy"
     calibration_tol: float = 1e-6
     calibration_max_iter: int = 100
     random_seed: int = 42
@@ -1270,6 +1270,13 @@ class USMicroplexPipeline:
         targets: USMicroplexTargets,
     ) -> tuple[pd.DataFrame, dict[str, Any]]:
         """Calibrate synthetic records to weighted targets."""
+        if self.config.calibration_backend == "none":
+            return synthetic_data.copy(), {
+                "backend": "none",
+                "max_error": 0.0,
+                "mean_error": 0.0,
+                "converged": True,
+            }
         calibrator = self._build_weight_calibrator()
         if self.config.calibration_backend in {"entropy", "ipf", "chi2"}:
             calibrated = calibrator.fit_transform(
@@ -1734,25 +1741,29 @@ class USMicroplexPipeline:
                     raise ValueError(
                         "No supported PolicyEngine DB targets remained after household-budget selection"
                     )
-        calibrator = self._build_weight_calibrator()
         input_household_weight_sum = float(tables.households["household_weight"].sum())
-        calibration_constraints = list(constraints)
-        if self.config.policyengine_calibration_target_total_weight is not None:
-            n_hh = len(tables.households)
-            calibration_constraints.append(
-                LinearConstraint(
-                    name="total_household_weight_sum",
-                    coefficients=np.ones(n_hh, dtype=float),
-                    target=float(self.config.policyengine_calibration_target_total_weight),
+        if self.config.calibration_backend == "none":
+            calibrated_households = tables.households.copy()
+            pre_rescale_household_weight_sum = input_household_weight_sum
+        else:
+            calibrator = self._build_weight_calibrator()
+            calibration_constraints = list(constraints)
+            if self.config.policyengine_calibration_target_total_weight is not None:
+                n_hh = len(tables.households)
+                calibration_constraints.append(
+                    LinearConstraint(
+                        name="total_household_weight_sum",
+                        coefficients=np.ones(n_hh, dtype=float),
+                        target=float(self.config.policyengine_calibration_target_total_weight),
+                    )
                 )
+            calibrated_households = calibrator.fit_transform(
+                tables.households.copy(),
+                {},
+                weight_col="household_weight",
+                linear_constraints=tuple(calibration_constraints),
             )
-        calibrated_households = calibrator.fit_transform(
-            tables.households.copy(),
-            {},
-            weight_col="household_weight",
-            linear_constraints=tuple(calibration_constraints),
-        )
-        pre_rescale_household_weight_sum = float(calibrated_households["household_weight"].sum())
+            pre_rescale_household_weight_sum = float(calibrated_households["household_weight"].sum())
         weight_sum_rescaled = False
         if (
             self.config.policyengine_calibration_rescale_to_input_weight_sum
@@ -1764,7 +1775,15 @@ class USMicroplexPipeline:
                 * (input_household_weight_sum / pre_rescale_household_weight_sum)
             )
             weight_sum_rescaled = True
-        validation = calibrator.validate(calibrated_households)
+        if self.config.calibration_backend == "none":
+            validation = {
+                "converged": True,
+                "max_error": 0.0,
+                "sparsity": 0.0,
+                "linear_errors": {},
+            }
+        else:
+            validation = calibrator.validate(calibrated_households)
 
         household_weights = calibrated_households.set_index("household_id")["household_weight"]
         calibrated_persons = tables.persons.copy() if tables.persons is not None else pd.DataFrame()
