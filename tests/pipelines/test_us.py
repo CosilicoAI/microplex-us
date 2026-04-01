@@ -230,10 +230,7 @@ class TestUSMicroplexBuildConfig:
         assert config.calibration_backend == "entropy"
         assert config.n_synthetic == 100_000
         assert config.random_seed == 42
-        assert config.donor_imputer_authoritative_override_variables == (
-            "self_employment_income",
-            "rental_income",
-        )
+        assert config.donor_imputer_authoritative_override_variables == ()
 
     def test_custom_values(self):
         config = USMicroplexBuildConfig(
@@ -257,6 +254,19 @@ class TestUSMicroplexBuildConfig:
         assert config.policyengine_selection_max_iter == 750
         assert config.policyengine_selection_tol == 1e-7
         assert config.policyengine_selection_l2_penalty == 1e-5
+
+    def test_can_opt_into_authoritative_donor_overrides(self):
+        config = USMicroplexBuildConfig(
+            donor_imputer_authoritative_override_variables=(
+                "self_employment_income",
+                "rental_income",
+            )
+        )
+
+        assert config.donor_imputer_authoritative_override_variables == (
+            "self_employment_income",
+            "rental_income",
+        )
 
 
 class TestUSMicroplexPipeline:
@@ -1728,7 +1738,13 @@ class TestUSMicroplexPipeline:
         )
 
         pipeline = USMicroplexPipeline(
-            USMicroplexBuildConfig(n_synthetic=3, synthesis_backend="bootstrap")
+            USMicroplexBuildConfig(
+                n_synthetic=3,
+                synthesis_backend="bootstrap",
+                donor_imputer_authoritative_override_variables=(
+                    "self_employment_income",
+                ),
+            )
         )
         cps_input = pipeline.prepare_source_input(cps_frame)
         donor_input = pipeline.prepare_source_input(donor_frame)

@@ -1707,3 +1707,22 @@ Append-only notes for agents working in `microplex-us`.
   - `non_sch_d_capital_gains`: `24` positive rows
 - Read:
   - the signed IRS surfaces now survive into a real PE export, which is the prerequisite for the next full `29,999` selector rerun
+
+## 2026-03-31 signed-support and shared-override PE-scale readout
+
+- Full `29,999` selector results:
+  - prior strong selector: `0.6333835740`
+  - `statusfix` baseline: `0.6362298466`
+  - signed-support fixes only: `0.9762246696`
+  - signed-support + `self_employment_income` authoritative override: `0.9317965866`
+  - signed-support + `rental_income` authoritative override: `0.9831478185`
+  - signed-support + both overrides: `0.9686514499`
+  - PE baseline: `0.0202439085`
+- Read:
+  - restoring signed IRS support was necessary for representability, but not a win on the current selector/calibration path
+  - all shared authoritative override variants were worse than the pre-override baseline
+  - `self_employment_income` override was harmful; `rental_income` override was worse
+  - keep `donor_imputer_authoritative_override_variables` opt-in only, not default
+- Code consequence:
+  - revert the default override allowlist to `()`
+  - retain the override mechanism for future bounded A/Bs only
