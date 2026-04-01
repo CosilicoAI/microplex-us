@@ -1623,6 +1623,7 @@ class TestPolicyEngineUSProjection:
             variables = {
                 "state_fips": FakeVariable("household"),
                 "alimony_income": FakeVariable("person"),
+                "child_support_expense": FakeVariable("person"),
                 "child_support_received": FakeVariable("person"),
                 "disability_benefits": FakeVariable("person"),
                 "employment_income_before_lsr": FakeVariable("person"),
@@ -1661,6 +1662,7 @@ class TestPolicyEngineUSProjection:
                     "person_id": [1],
                     "household_id": [10],
                     "alimony_income": [500.0],
+                    "child_support_expense": [350.0],
                     "child_support_received": [200.0],
                     "disability_benefits": [300.0],
                     "employment_income_before_lsr": [50_000.0],
@@ -1710,6 +1712,7 @@ class TestPolicyEngineUSProjection:
         assert export_maps["spm_unit"] == {}
         assert export_maps["person"] == {
             "alimony_income": "alimony_income",
+            "child_support_expense": "child_support_expense",
             "child_support_received": "child_support_received",
             "disability_benefits": "disability_benefits",
             "employment_income_before_lsr": "employment_income_before_lsr",
@@ -1821,6 +1824,7 @@ class TestPolicyEngineUSProjection:
 
         assert overlaps == []
         assert "estate_income" in SAFE_POLICYENGINE_US_EXPORT_VARIABLES
+        assert "child_support_expense" in SAFE_POLICYENGINE_US_EXPORT_VARIABLES
         assert "non_sch_d_capital_gains" not in SAFE_POLICYENGINE_US_EXPORT_VARIABLES
         assert "receives_wic" in SAFE_POLICYENGINE_US_EXPORT_VARIABLES
         assert "is_separated" not in SAFE_POLICYENGINE_US_EXPORT_VARIABLES

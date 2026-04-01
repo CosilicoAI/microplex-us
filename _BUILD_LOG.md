@@ -1741,3 +1741,66 @@ Append-only notes for agents working in `microplex-us`.
   - `ruff check src/microplex_us/policyengine/us.py tests/policyengine/test_us.py` -> clean
 - Read:
   - until a direct H5 ablation proves otherwise, `non_sch_d_capital_gains` should not be on the default PE export surface
+
+## 2026-04-01 PE-native support audit on the trusted `statusfix` path
+
+- Code:
+  - `src/microplex_us/pipelines/pe_native_scores.py`
+    - add `compute_us_pe_native_support_audit(...)`
+    - compare candidate vs baseline on stored-variable presence, filing-status support, high-AGI MFS support, state marketplace enrollment, and state age-bucket support
+  - `src/microplex_us/pipelines/performance.py`
+    - add `output_pe_native_support_audit_path`
+    - allow the harness to emit a durable support-audit JSON next to the normal PE-native score outputs
+  - `tests/pipelines/test_pe_native_scores.py`
+  - `tests/pipelines/test_performance.py`
+- Focused verification:
+  - `uv run pytest -q tests/pipelines/test_pe_native_scores.py -k 'support_audit or target_deltas'` -> `2 passed`
+  - `uv run pytest -q tests/pipelines/test_performance.py -k 'support_audit or target_delta_output'` -> `2 passed`
+  - `ruff check src/microplex_us/pipelines/pe_native_scores.py src/microplex_us/pipelines/performance.py tests/pipelines/test_pe_native_scores.py tests/pipelines/test_performance.py` -> clean
+- Artifact:
+  - `artifacts/tmp_fullsupport_selector29999_statusfix_support_audit_20260401.json`
+- Read:
+  - the trusted `statusfix` candidate is not just missing a few leaves; it is structurally underweighted after calibration
+  - candidate PE household-weight sum: `41.17M`
+  - same run's selection optimizer preserved `135.40M` total weight before entropy calibration
+  - full `enhanced_cps_2024` baseline PE household-weight sum: `149.96M`
+  - support gaps are therefore broad, not isolated:
+    - `child_support_expense` is entirely absent on the candidate export (`stored=false`, `weighted_nonzero=0.0`) while baseline has `2.63M` weighted nonzero support
+    - `has_marketplace_health_coverage`: candidate `2.54M` weighted nonzero vs baseline `11.74M`
+    - `has_esi`: candidate `63.61M` vs baseline `185.45M`
+    - `medicare_part_b_premiums`: candidate `11.54M` vs baseline `49.53M`
+    - `self_employment_income_before_lsr`: candidate `3.74M` vs baseline `25.53M`
+    - `rental_income`: candidate `3.04M` vs baseline `13.21M`
+  - filing-status support is still structurally incomplete:
+    - `SEPARATE` weighted count `0.0` vs baseline `6.53M`
+    - `SURVIVING_SPOUSE` weighted count `0.0` vs baseline `1.74M`
+    - MFS support in `75k+` AGI bins is exactly zero across the board
+  - ACA and state-age failures are clearly structural:
+    - biggest marketplace enrollment gaps include `GA`, `CA`, `TX`, `IL`, `NY`
+    - biggest state-age bucket gaps are concentrated in `TX`, `CA`, and `FL`
+- Next hypothesis:
+  - the best current selector path is being undone by post-selection entropy calibration collapsing total mass
+  - the next decisive experiment is to renormalize the final calibrated `statusfix` weights back toward the pre-calibration/selection total and rescore before changing record construction again
+
+## 2026-04-01 source-backed `child_support_expense` added to CPS + PE export
+
+- Code:
+  - `src/microplex_us/data_sources/cps.py`
+    - map CPS `CHSP_VAL -> child_support_expense`
+    - treat it as a nonnegative zero-default PE pre-sim input
+    - require it in the processed CPS cache contract
+    - bump CPS processed-cache version to `20260401`
+  - `src/microplex_us/policyengine/us.py`
+    - add `child_support_expense` to `SAFE_POLICYENGINE_US_EXPORT_VARIABLES`
+  - `tests/test_cps_source_provider.py`
+  - `tests/policyengine/test_us.py`
+- Why:
+  - the new PE-native support audit showed the trusted `statusfix` candidate exported no `child_support_expense` at all, while the full PE baseline had `2.63M` weighted nonzero support
+  - `policyengine-us-data` already sources this directly from CPS (`CHSP_VAL`), so this is a clean parity miss rather than a speculative new feature
+- Focused verification:
+  - `uv run pytest -q tests/test_cps_source_provider.py -k 'policyengine_value_inputs or stale_processed_cache_without_pe_presim_inputs or caches_household_geography_on_persons'` -> `3 passed`
+  - `uv run pytest -q tests/policyengine/test_us.py -k 'export_variable_maps_includes_tax_inputs or default_policyengine_us_export_surface_avoids_formula_aggregates'` -> `2 passed`
+  - `ruff check src/microplex_us/data_sources/cps.py src/microplex_us/policyengine/us.py tests/test_cps_source_provider.py tests/policyengine/test_us.py` -> clean
+- Read:
+  - this is a safe source-backed fix and should stay
+  - it may help some SNAP / expense surfaces, but it is not expected to explain the full `statusfix` gap by itself

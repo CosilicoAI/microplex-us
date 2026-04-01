@@ -28,6 +28,7 @@ from microplex_us.pipelines.pe_native_scores import (
     compare_us_pe_native_target_deltas,
     compute_batch_us_pe_native_scores,
     compute_us_pe_native_scores,
+    compute_us_pe_native_support_audit,
     resolve_policyengine_us_data_repo_root,
 )
 from microplex_us.pipelines.us import (
@@ -194,6 +195,7 @@ class USMicroplexPerformanceHarnessConfig:
     output_json_path: str | Path | None = None
     output_policyengine_dataset_path: str | Path | None = None
     output_pe_native_target_delta_path: str | Path | None = None
+    output_pe_native_support_audit_path: str | Path | None = None
     output_matched_baseline_dataset_path: str | Path | None = None
 
 
@@ -211,6 +213,7 @@ class USMicroplexPerformanceHarnessResult:
     pe_native_scores: dict[str, object] | None = None
     matched_pe_native_scores: dict[str, object] | None = None
     pe_native_target_deltas: dict[str, object] | None = None
+    pe_native_support_audit: dict[str, object] | None = None
     policyengine_dataset_path: str | None = None
     matched_baseline_dataset_path: str | None = None
 
@@ -283,6 +286,10 @@ class USMicroplexPerformanceHarnessResult:
         if self.pe_native_target_deltas is not None:
             payload["pe_native_target_deltas"] = _json_compatible_value(
                 self.pe_native_target_deltas
+            )
+        if self.pe_native_support_audit is not None:
+            payload["pe_native_support_audit"] = _json_compatible_value(
+                self.pe_native_support_audit
             )
         if self.matched_baseline_dataset_path is not None:
             payload["matched_baseline_dataset_path"] = self.matched_baseline_dataset_path
@@ -1197,6 +1204,13 @@ def run_us_microplex_performance_harness(
         raise ValueError(
             "USMicroplex performance harness requires baseline_dataset for PE-native target deltas"
         )
+    if (
+        config.output_pe_native_support_audit_path is not None
+        and config.baseline_dataset is None
+    ):
+        raise ValueError(
+            "USMicroplex performance harness requires baseline_dataset for PE-native support audit"
+        )
 
     build_config = _resolve_build_config(config)
     pipeline = USMicroplexPipeline(build_config)
@@ -1390,10 +1404,12 @@ def run_us_microplex_performance_harness(
     pe_native_scores = None
     matched_pe_native_scores = None
     pe_native_target_deltas = None
+    pe_native_support_audit = None
     needs_pe_dataset = (
         config.evaluate_pe_native_loss
         or config.evaluate_matched_pe_native_loss
         or config.output_pe_native_target_delta_path is not None
+        or config.output_pe_native_support_audit_path is not None
     )
     if needs_pe_dataset:
         with TemporaryDirectory(prefix="microplex-us-native-score-") as temp_dir:
@@ -1561,6 +1577,40 @@ def run_us_microplex_performance_harness(
                     "write_pe_native_target_delta_json",
                     write_delta_start,
                 )
+            if config.output_pe_native_support_audit_path is not None:
+                support_start = _stage(
+                    stage_timings,
+                    "evaluate_pe_native_support_audit",
+                )
+                pe_native_support_audit = compute_us_pe_native_support_audit(
+                    candidate_dataset_path=dataset_to_score,
+                    baseline_dataset_path=str(config.baseline_dataset),
+                    period=build_config.policyengine_dataset_year or config.target_period,
+                    policyengine_us_data_repo=config.policyengine_us_data_repo,
+                )
+                _finish_stage(
+                    stage_timings,
+                    "evaluate_pe_native_support_audit",
+                    support_start,
+                )
+                write_support_start = _stage(
+                    stage_timings,
+                    "write_pe_native_support_audit_json",
+                )
+                destination = Path(config.output_pe_native_support_audit_path)
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                destination.write_text(
+                    json.dumps(
+                        _json_compatible_value(pe_native_support_audit),
+                        indent=2,
+                        sort_keys=True,
+                    )
+                )
+                _finish_stage(
+                    stage_timings,
+                    "write_pe_native_support_audit_json",
+                    write_support_start,
+                )
             if pe_stage_started:
                 _finish_stage(stage_timings, "evaluate_pe_native_loss", start)
     elif config.output_policyengine_dataset_path is not None:
@@ -1586,6 +1636,7 @@ def run_us_microplex_performance_harness(
         pe_native_scores=pe_native_scores,
         matched_pe_native_scores=matched_pe_native_scores,
         pe_native_target_deltas=pe_native_target_deltas,
+        pe_native_support_audit=pe_native_support_audit,
         policyengine_dataset_path=policyengine_dataset_path,
         matched_baseline_dataset_path=(
             matched_baseline_dataset_path if needs_pe_dataset else None

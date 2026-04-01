@@ -33,7 +33,7 @@ from microplex_us.source_registry import resolve_source_variable_capabilities
 
 # Default cache directory
 DEFAULT_CACHE_DIR = Path.home() / ".cache" / "microplex"
-CPS_ASEC_PROCESSED_CACHE_VERSION = "20260331"
+CPS_ASEC_PROCESSED_CACHE_VERSION = "20260401"
 
 # CPS ASEC data URLs by year
 CPS_URLS = {
@@ -82,6 +82,7 @@ PERSON_VARIABLES = {
     # Benefits
     "PAW_VAL": "public_assistance",
     "CSP_VAL": "child_support_received",
+    "CHSP_VAL": "child_support_expense",
     "MCARE": "has_medicare",
     "MCAID": "has_medicaid",
     "NOW_GRP": "has_esi",
@@ -142,6 +143,7 @@ PERSON_NONNEGATIVE_VALUE_COLUMNS = (
     "total_person_income",
     "alimony_income",
     "child_support_received",
+    "child_support_expense",
     "disability_benefits",
     "health_insurance_premiums_without_medicare_part_b",
     "over_the_counter_health_expenses",
@@ -153,6 +155,7 @@ PERSON_NONNEGATIVE_VALUE_COLUMNS = (
 PERSON_ZERO_DEFAULT_VALUE_COLUMNS = (
     "alimony_income",
     "child_support_received",
+    "child_support_expense",
     "disability_benefits",
     "health_insurance_premiums_without_medicare_part_b",
     "over_the_counter_health_expenses",
@@ -171,6 +174,7 @@ PERSON_CACHE_REQUIRED_COLUMNS = (
     "has_marketplace_health_coverage",
     "alimony_income",
     "child_support_received",
+    "child_support_expense",
     "disability_benefits",
     "health_insurance_premiums_without_medicare_part_b",
     "other_medical_expenses",

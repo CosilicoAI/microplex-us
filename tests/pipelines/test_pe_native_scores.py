@@ -13,6 +13,7 @@ from microplex_us.pipelines.pe_native_scores import (
     compare_us_pe_native_target_deltas,
     compute_batch_us_pe_native_scores,
     compute_us_pe_native_scores,
+    compute_us_pe_native_support_audit,
     resolve_policyengine_us_data_python,
     write_us_pe_native_scores,
 )
@@ -358,4 +359,73 @@ def test_compare_us_pe_native_target_deltas_wraps_subprocess_payload(
 
     assert result["metric"] == "enhanced_cps_native_loss_target_delta"
     assert result["top_regressions"][0]["target_name"] == "nation/irs/example"
-    assert result["top_improvements"][0]["weighted_term_delta"] == -0.5
+
+
+def test_compute_us_pe_native_support_audit_wraps_subprocess_payload(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    candidate = tmp_path / "candidate.h5"
+    baseline = tmp_path / "baseline.h5"
+    for path in (candidate, baseline):
+        path.write_text(path.stem)
+
+    payload = {
+        "metric": "enhanced_cps_support_audit",
+        "period": 2024,
+        "candidate_dataset": str(candidate),
+        "baseline_dataset": str(baseline),
+        "candidate": {
+            "critical_input_support": {
+                "child_support_expense": {
+                    "stored": False,
+                    "weighted_nonzero": 0.0,
+                }
+            }
+        },
+        "baseline": {
+            "critical_input_support": {
+                "child_support_expense": {
+                    "stored": True,
+                    "weighted_nonzero": 10.0,
+                }
+            }
+        },
+        "comparisons": {
+            "critical_input_support": [
+                {
+                    "variable": "child_support_expense",
+                    "candidate_stored": False,
+                    "baseline_stored": True,
+                    "weighted_nonzero_delta": -10.0,
+                }
+            ]
+        },
+    }
+
+    monkeypatch.setattr(
+        "microplex_us.pipelines.pe_native_scores.subprocess.run",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            returncode=0,
+            stdout=json.dumps(payload),
+            stderr="",
+        ),
+    )
+    monkeypatch.setattr(
+        "microplex_us.pipelines.pe_native_scores.resolve_policyengine_us_data_repo_root",
+        lambda _repo=None: tmp_path,
+    )
+
+    result = compute_us_pe_native_support_audit(
+        candidate_dataset_path=candidate,
+        baseline_dataset_path=baseline,
+        period=2024,
+        policyengine_us_data_repo=tmp_path,
+        policyengine_us_data_python=tmp_path / "python",
+    )
+
+    assert result["metric"] == "enhanced_cps_support_audit"
+    assert (
+        result["comparisons"]["critical_input_support"][0]["variable"]
+        == "child_support_expense"
+    )

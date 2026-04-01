@@ -230,7 +230,7 @@ def test_load_cps_asec_caches_household_geography_on_persons(tmp_path):
     assert cached_persons["receives_wic"].to_list() == [True, False, False]
     assert cached_persons["has_marketplace_health_coverage"].to_list() == [True, False, False]
     assert cached_persons["has_esi"].to_list() == [False, True, False]
-    assert second.source.endswith("cps_asec_2023_processed_v20260331.parquet")
+    assert second.source.endswith("cps_asec_2023_processed_v20260401.parquet")
     assert sorted(second.households["state_fips"].to_list()) == [6, 36]
     assert sorted(second.households["county_fips"].to_list()) == [1, 61]
 
@@ -245,6 +245,7 @@ def test_load_cps_asec_derives_policyengine_value_inputs(tmp_path):
             "OI_OFF": [20, 12],
             "OI_VAL": [1200, 800],
             "CSP_VAL": [300, -1],
+            "CHSP_VAL": [700, -1],
             "DIS_VAL1": [500, 400],
             "DIS_SC1": [2, 1],
             "DIS_VAL2": [50, 25],
@@ -267,6 +268,7 @@ def test_load_cps_asec_derives_policyengine_value_inputs(tmp_path):
 
     assert persons["alimony_income"].tolist() == [1200, 0]
     assert persons["child_support_received"].tolist() == [300, 0]
+    assert persons["child_support_expense"].tolist() == [700, 0]
     assert persons["disability_benefits"].tolist() == [550, 25]
     assert persons["social_security_disability"].tolist() == [1200, 0]
     assert persons["receives_wic"].tolist() == [True, False]
@@ -297,6 +299,7 @@ def test_cps_source_provider_repeat_loads_are_deterministic_for_cached_processed
             "receives_wic": [False] * 5,
             "alimony_income": [0.0, 0.0, 0.0, 0.0, 0.0],
             "child_support_received": [0.0, 0.0, 0.0, 0.0, 0.0],
+            "child_support_expense": [0.0, 0.0, 0.0, 0.0, 0.0],
             "disability_benefits": [0.0, 0.0, 0.0, 0.0, 0.0],
             "health_insurance_premiums_without_medicare_part_b": [0.0] * 5,
             "other_medical_expenses": [0.0] * 5,
@@ -360,6 +363,7 @@ def test_load_cps_asec_rebuilds_stale_processed_cache_without_pe_presim_inputs(t
             "OI_OFF": [20, 0, 0],
             "OI_VAL": [1200, 0, 0],
             "CSP_VAL": [300, 0, 0],
+            "CHSP_VAL": [700, 0, 0],
             "DIS_VAL1": [500, 0, 0],
             "DIS_SC1": [2, 0, 0],
             "DIS_VAL2": [50, 0, 0],
@@ -393,6 +397,7 @@ def test_load_cps_asec_rebuilds_stale_processed_cache_without_pe_presim_inputs(t
     assert dataset.persons["has_esi"].to_list() == [False, True, False]
     assert dataset.persons["alimony_income"].to_list() == [1200, 0, 0]
     assert dataset.persons["child_support_received"].to_list() == [300, 0, 0]
+    assert dataset.persons["child_support_expense"].to_list() == [700, 0, 0]
     assert dataset.persons["disability_benefits"].to_list() == [550, 0, 0]
     assert (
         dataset.persons["health_insurance_premiums_without_medicare_part_b"].to_list()

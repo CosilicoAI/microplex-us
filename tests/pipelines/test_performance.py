@@ -785,6 +785,58 @@ def test_run_us_microplex_performance_harness_can_write_pe_native_target_delta_o
     assert "write_pe_native_target_delta_json" in result.stage_timings
 
 
+def test_run_us_microplex_performance_harness_can_write_pe_native_support_audit_output(
+    monkeypatch,
+    tmp_path,
+):
+    _patch_fake_harness(monkeypatch)
+
+    audit_path = tmp_path / "support_audit.json"
+    audit_calls: list[dict[str, object]] = []
+
+    def _fake_audit(**kwargs):
+        audit_calls.append(kwargs)
+        return {
+            "metric": "enhanced_cps_support_audit",
+            "comparisons": {
+                "critical_input_support": [
+                    {
+                        "variable": "child_support_expense",
+                        "candidate_stored": False,
+                        "baseline_stored": True,
+                    }
+                ]
+            },
+        }
+
+    monkeypatch.setattr(
+        "microplex_us.pipelines.performance.compute_us_pe_native_support_audit",
+        _fake_audit,
+    )
+
+    result = run_us_microplex_performance_harness(
+        providers=[_DummyProvider("cps")],
+        config=USMicroplexPerformanceHarnessConfig(
+            evaluate_parity=False,
+            baseline_dataset="/tmp/enhanced_cps.h5",
+            policyengine_us_data_repo="/tmp/policyengine-us-data",
+            output_pe_native_support_audit_path=audit_path,
+        ),
+    )
+
+    assert result.pe_native_support_audit is not None
+    assert audit_path.exists()
+    assert audit_calls[0]["baseline_dataset_path"] == "/tmp/enhanced_cps.h5"
+    payload = json.loads(audit_path.read_text())
+    assert payload["metric"] == "enhanced_cps_support_audit"
+    assert (
+        payload["comparisons"]["critical_input_support"][0]["variable"]
+        == "child_support_expense"
+    )
+    assert "evaluate_pe_native_support_audit" in result.stage_timings
+    assert "write_pe_native_support_audit_json" in result.stage_timings
+
+
 def test_run_us_microplex_performance_harness_passes_export_direct_overrides(monkeypatch):
     stage_log: list[str] = []
     _patch_fake_harness(monkeypatch, stage_log=stage_log)

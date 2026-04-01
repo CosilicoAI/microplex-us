@@ -172,6 +172,7 @@ ENTITY_TYPE_TO_POLICYENGINE_US_ENTITY_KEY: dict[EntityType, str] = {
 SAFE_POLICYENGINE_US_EXPORT_VARIABLES: set[str] = {
     "age",
     "alimony_income",
+    "child_support_expense",
     "child_support_received",
     "receives_wic",
     "cps_race",
