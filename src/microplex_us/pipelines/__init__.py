@@ -71,6 +71,7 @@ from microplex_us.pipelines.reduced_benchmark import (
     USMicroplexReducedDimensionSpec,
     USMicroplexReducedMeasureSpec,
     default_us_atomic_rung0_benchmarks,
+    default_us_atomic_rung1_benchmarks,
     evaluate_us_reduced_benchmark,
     run_us_microplex_reduced_benchmark_harness,
 )
@@ -117,6 +118,7 @@ __all__ = [
     "USHouseholdTargetReweightingResult",
     "default_us_source_mix_experiments",
     "default_us_atomic_rung0_benchmarks",
+    "default_us_atomic_rung1_benchmarks",
     "build_and_save_versioned_us_microplex",
     "build_and_save_versioned_us_microplex_from_data_dir",
     "build_and_save_versioned_us_microplex_from_source_provider",

@@ -195,6 +195,66 @@ def default_us_atomic_rung0_benchmarks() -> tuple[USMicroplexReducedBenchmarkSpe
     )
 
 
+def default_us_atomic_rung1_benchmarks() -> tuple[USMicroplexReducedBenchmarkSpec, ...]:
+    """A slightly richer CPS-like rung on person demographics and earnings."""
+
+    return (
+        USMicroplexReducedBenchmarkSpec(
+            name="person_count_by_state_sex",
+            entity="person",
+            dimensions=(
+                USMicroplexReducedDimensionSpec(
+                    variable="state_fips",
+                    zero_pad=2,
+                ),
+                USMicroplexReducedDimensionSpec(
+                    variable="is_female",
+                ),
+            ),
+            measures=(
+                USMicroplexReducedMeasureSpec(name="weighted_person_count"),
+            ),
+        ),
+        USMicroplexReducedBenchmarkSpec(
+            name="employment_income_sum_by_state",
+            entity="person",
+            dimensions=(
+                USMicroplexReducedDimensionSpec(
+                    variable="state_fips",
+                    zero_pad=2,
+                ),
+            ),
+            measures=(
+                USMicroplexReducedMeasureSpec(
+                    name="weighted_employment_income_sum",
+                    aggregation="weighted_sum",
+                    variable="employment_income_before_lsr",
+                ),
+            ),
+        ),
+        USMicroplexReducedBenchmarkSpec(
+            name="employment_income_mean_by_state_sex",
+            entity="person",
+            dimensions=(
+                USMicroplexReducedDimensionSpec(
+                    variable="state_fips",
+                    zero_pad=2,
+                ),
+                USMicroplexReducedDimensionSpec(
+                    variable="is_female",
+                ),
+            ),
+            measures=(
+                USMicroplexReducedMeasureSpec(
+                    name="weighted_employment_income_mean",
+                    aggregation="weighted_mean",
+                    variable="employment_income_before_lsr",
+                ),
+            ),
+        ),
+    )
+
+
 def evaluate_us_reduced_benchmark(
     candidate_dataset: str | Path,
     baseline_dataset: str | Path,
@@ -644,6 +704,7 @@ __all__ = [
     "USMicroplexReducedDimensionSpec",
     "USMicroplexReducedMeasureSpec",
     "default_us_atomic_rung0_benchmarks",
+    "default_us_atomic_rung1_benchmarks",
     "evaluate_us_reduced_benchmark",
     "run_us_microplex_reduced_benchmark_harness",
 ]
