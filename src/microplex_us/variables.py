@@ -11,6 +11,7 @@ import pandas as pd
 from microplex.core import EntityType, SourceVariableCapability
 from microplex.core.semantics import (
     FrameSemanticCheck,
+    FrameSemanticCheckReport,
     FrameSemanticTransform,
     SemanticTransformStage,
     apply_frame_semantic_transforms,
@@ -672,7 +673,7 @@ def apply_donor_variable_semantics(
 def validate_donor_variable_semantics(
     frame: pd.DataFrame,
     variable_names: Iterable[str],
-):
+) -> tuple[FrameSemanticCheckReport, ...]:
     """Evaluate semantic checks for donor-integrated variables."""
     checks: list[FrameSemanticCheck] = []
     seen_check_names: set[str] = set()
