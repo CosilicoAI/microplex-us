@@ -273,3 +273,73 @@ def test_run_us_microplex_reduced_benchmark_harness_wraps_performance_harness(
     payload = json.loads(output_json.read_text())
     assert "benchmark_reports" in payload
     assert payload["benchmark_reports"]["household_count_by_state"]["summary"]["n_cells"] == 2
+
+
+def test_evaluate_us_reduced_benchmark_weighted_sum(tmp_path):
+    """Weighted sum aggregation correctly sums age * weight per state."""
+    baseline_path = _write_dataset(
+        _sample_bundle(
+            household_weights=(2.0, 1.0),
+            state_fips=(6, 36),
+            ages_by_household=((10.0, 40.0), (70.0,)),
+        ),
+        tmp_path / "baseline.h5",
+    )
+    candidate_path = _write_dataset(
+        _sample_bundle(
+            household_weights=(1.0, 1.0),
+            state_fips=(6, 36),
+            ages_by_household=((40.0,), (70.0,)),
+        ),
+        tmp_path / "candidate.h5",
+    )
+    spec = USMicroplexReducedBenchmarkSpec(
+        name="person_age_sum_by_state",
+        entity="person",
+        dimensions=(
+            USMicroplexReducedDimensionSpec(variable="state_fips", zero_pad=2),
+        ),
+        measures=(
+            USMicroplexReducedMeasureSpec(
+                name="weighted_age_sum",
+                aggregation="weighted_sum",
+                variable="age",
+            ),
+        ),
+    )
+
+    report = evaluate_us_reduced_benchmark(
+        candidate_path,
+        baseline_path,
+        spec,
+        period=2024,
+    )
+
+    summary = report.measure_summaries["weighted_age_sum"]
+    # Baseline: state 06 has person age 10 (w=2) + age 40 (w=2) = 100,
+    #           state 36 has person age 70 (w=1) = 70  → total 170
+    # Candidate: state 06 has person age 40 (w=1) = 40,
+    #            state 36 has person age 70 (w=1) = 70  → total 110
+    assert summary["baseline_total"] == pytest.approx(170.0)
+    assert summary["candidate_total"] == pytest.approx(110.0)
+    assert summary["total_delta"] == pytest.approx(-60.0)
+
+
+def test_validate_duplicate_dimension_output_names():
+    """Duplicate dimension output names are rejected."""
+    spec = USMicroplexReducedBenchmarkSpec(
+        name="bad_spec",
+        entity="person",
+        dimensions=(
+            USMicroplexReducedDimensionSpec(variable="state_fips", zero_pad=2),
+            USMicroplexReducedDimensionSpec(
+                variable="state_fips", label="state_fips", zero_pad=2
+            ),
+        ),
+    )
+    with pytest.raises(ValueError, match="duplicate dimension output name"):
+        from microplex_us.pipelines.reduced_benchmark import (
+            _validate_reduced_benchmark_spec,
+        )
+
+        _validate_reduced_benchmark_spec(spec)
