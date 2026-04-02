@@ -231,7 +231,16 @@ def evaluate_us_reduced_benchmark(
         on=dimension_names,
         how="outer",
         suffixes=("_candidate", "_baseline"),
-    ).fillna(0.0)
+    )
+    # Fill NaN with 0.0 only for count/sum measures (missing cell = zero).
+    # Leave weighted_mean NaN so the error metric correctly reflects missing cells.
+    fill_zero_columns = []
+    for measure in spec.measures:
+        if measure.aggregation in {"weighted_count", "weighted_sum"}:
+            fill_zero_columns.append(f"{measure.name}_candidate")
+            fill_zero_columns.append(f"{measure.name}_baseline")
+    if fill_zero_columns:
+        merged[fill_zero_columns] = merged[fill_zero_columns].fillna(0.0)
 
     measure_summaries: dict[str, dict[str, Any]] = {}
     top_cell_gaps: dict[str, list[dict[str, Any]]] = {}
@@ -411,7 +420,14 @@ def _validate_reduced_benchmark_spec(spec: USMicroplexReducedBenchmarkSpec) -> N
             raise ValueError(
                 f"Reduced benchmark measure '{measure.name}' requires variable for {measure.aggregation}"
             )
+    seen_output_names: set[str] = set()
     for dimension in spec.dimensions:
+        output_name = dimension.output_name
+        if output_name in seen_output_names:
+            raise ValueError(
+                f"Reduced benchmark has duplicate dimension output name '{output_name}'"
+            )
+        seen_output_names.add(output_name)
         if dimension.bins is not None and len(dimension.bins) < 2:
             raise ValueError(
                 f"Reduced benchmark dimension '{dimension.variable}' requires at least two bin edges"
