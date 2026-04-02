@@ -287,6 +287,21 @@ def test_employment_income_donor_semantics_zero_minor_wages():
     assert adjusted["employment_income"].tolist() == [0.0, 25_000.0]
 
 
+def test_employment_income_donor_semantics_zero_retired_senior_wages_without_esi():
+    frame = pd.DataFrame(
+        {
+            "age": [68.0, 68.0, 68.0],
+            "employment_income": [80_000.0, 80_000.0, 80_000.0],
+            "social_security_retirement": [18_000.0, 18_000.0, 0.0],
+            "has_esi": [0.0, 1.0, 0.0],
+        }
+    )
+
+    adjusted = apply_donor_variable_semantics(frame, ("employment_income",))
+
+    assert adjusted["employment_income"].tolist() == [0.0, 80_000.0, 80_000.0]
+
+
 def test_validate_donor_variable_semantics_reports_minor_positive_wages():
     frame = pd.DataFrame(
         {

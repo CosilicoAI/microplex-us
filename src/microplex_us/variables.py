@@ -124,6 +124,53 @@ def zero_minor_employment_income(frame: pd.DataFrame) -> pd.DataFrame:
     return result
 
 
+def suppress_retired_senior_employment_income_without_esi(
+    frame: pd.DataFrame,
+) -> pd.DataFrame:
+    """Suppress donor-overridden wage income for retired seniors without ESI."""
+    required_columns = {
+        "employment_income",
+        "age",
+        "social_security_retirement",
+        "has_esi",
+    }
+    if not required_columns.issubset(frame.columns):
+        return frame
+    ages = pd.to_numeric(frame["age"], errors="coerce")
+    if ages.isna().all():
+        return frame
+    ss_retirement = (
+        pd.to_numeric(frame["social_security_retirement"], errors="coerce")
+        .fillna(0.0)
+        .astype(float)
+    )
+    has_esi = (
+        pd.to_numeric(frame["has_esi"], errors="coerce")
+        .fillna(0.0)
+        .astype(float)
+        .gt(0.0)
+    )
+    retired_senior_mask = (
+        ages.ge(65).fillna(False) & ss_retirement.gt(0.0) & ~has_esi
+    )
+    if not retired_senior_mask.any():
+        return frame
+    result = frame.copy()
+    result["employment_income"] = (
+        pd.to_numeric(result["employment_income"], errors="coerce")
+        .fillna(0.0)
+        .astype(float)
+    )
+    result.loc[retired_senior_mask, "employment_income"] = 0.0
+    return result
+
+
+def normalize_employment_income_donor_values(frame: pd.DataFrame) -> pd.DataFrame:
+    """Apply donor-side employment income semantic guards in a stable order."""
+    adjusted = zero_minor_employment_income(frame)
+    return suppress_retired_senior_employment_income_without_esi(adjusted)
+
+
 def minor_positive_employment_income_mask(frame: pd.DataFrame) -> pd.Series:
     """Return rows where minors still carry positive employment income."""
     if "employment_income" not in frame.columns or "age" not in frame.columns:
@@ -302,11 +349,15 @@ VARIABLE_SEMANTIC_SPECS: dict[str, VariableSemanticSpec] = {
             EntityType.TAX_UNIT,
         ),
         donor_transform=FrameSemanticTransform(
-            name="zero_minor_employment_income",
+            name="normalize_employment_income_donor_values",
             required_columns=("employment_income", "age"),
-            transform_frame=zero_minor_employment_income,
+            transform_frame=normalize_employment_income_donor_values,
             stage=SemanticTransformStage.POST_DONOR_INTEGRATION,
-            notes="Employment income donor overrides should not assign positive wages to minors.",
+            notes=(
+                "Employment income donor overrides should not assign positive wages "
+                "to minors and should suppress implausible retired-senior wages "
+                "when retirement Social Security is present without ESI."
+            ),
         ),
         donor_check=FrameSemanticCheck(
             name="minor_positive_employment_income",
@@ -315,7 +366,10 @@ VARIABLE_SEMANTIC_SPECS: dict[str, VariableSemanticSpec] = {
             stage=SemanticTransformStage.POST_DONOR_INTEGRATION,
             notes="Minors should not retain positive donor-overridden wage income.",
         ),
-        notes="Employment income donor overrides should not assign positive wages to minors.",
+        notes=(
+            "Employment income donor overrides should respect basic wage support "
+            "semantics for minors and retired seniors."
+        ),
     ),
     "self_employment_income": VariableSemanticSpec(
         native_entity=EntityType.PERSON,

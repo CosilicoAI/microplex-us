@@ -1949,6 +1949,186 @@ class TestUSMicroplexPipeline:
             80_000.0,
         ]
 
+    def test_integrate_donor_sources_zeroes_retired_senior_employment_income_without_esi(
+        self, monkeypatch
+    ):
+        class FakeSynthesizer:
+            def __init__(self, *, target_vars, condition_vars, **kwargs):
+                _ = condition_vars, kwargs
+                self.target_vars = tuple(target_vars)
+
+            def fit(self, *args, **kwargs):
+                _ = args, kwargs
+
+            def generate(self, frame, seed=None):
+                _ = seed
+                result = frame.copy()
+                if self.target_vars == ("employment_income",):
+                    result["employment_income"] = np.linspace(70_000.0, 90_000.0, len(result))
+                return result
+
+        monkeypatch.setattr("microplex_us.pipelines.us.Synthesizer", FakeSynthesizer)
+
+        cps_households = pd.DataFrame(
+            {
+                "household_id": [1, 2, 3],
+                "hh_weight": [100.0, 120.0, 130.0],
+                "state_fips": [6, 36, 48],
+                "tenure": [1, 2, 2],
+            }
+        )
+        cps_persons = pd.DataFrame(
+            {
+                "person_id": [10, 20, 30],
+                "household_id": [1, 2, 3],
+                "age": [68, 68, 68],
+                "sex": [1, 2, 1],
+                "education": [3, 3, 3],
+                "employment_status": [1, 1, 1],
+                "income": [45_000.0, 65_000.0, 50_000.0],
+                "employment_income": [30_000.0, 40_000.0, 35_000.0],
+                "social_security_retirement": [18_000.0, 18_000.0, 0.0],
+                "has_esi": [0.0, 1.0, 0.0],
+            }
+        )
+        donor_households = pd.DataFrame(
+            {
+                "household_id": [101, 102, 103],
+                "hh_weight": [90.0, 110.0, 105.0],
+                "state_fips": [6, 36, 48],
+                "tenure": [1, 2, 2],
+            }
+        )
+        donor_persons = pd.DataFrame(
+            {
+                "person_id": [1001, 1002, 1003],
+                "household_id": [101, 102, 103],
+                "age": [68, 68, 68],
+                "sex": [1, 2, 1],
+                "education": [3, 3, 3],
+                "employment_status": [1, 1, 1],
+                "income": [46_000.0, 66_000.0, 51_000.0],
+                "employment_income": [80_000.0, 85_000.0, 82_000.0],
+                "social_security_retirement": [19_000.0, 19_000.0, 0.0],
+                "has_esi": [0.0, 1.0, 0.0],
+            }
+        )
+        cps_frame = ObservationFrame(
+            source=SourceDescriptor(
+                name="cps_like",
+                shareability=Shareability.PUBLIC,
+                time_structure=TimeStructure.REPEATED_CROSS_SECTION,
+                observations=(
+                    EntityObservation(
+                        entity=EntityType.HOUSEHOLD,
+                        key_column="household_id",
+                        variable_names=("state_fips", "tenure"),
+                        weight_column="hh_weight",
+                    ),
+                    EntityObservation(
+                        entity=EntityType.PERSON,
+                        key_column="person_id",
+                        variable_names=(
+                            "household_id",
+                            "age",
+                            "sex",
+                            "education",
+                            "employment_status",
+                            "income",
+                            "employment_income",
+                            "social_security_retirement",
+                            "has_esi",
+                        ),
+                    ),
+                ),
+            ),
+            tables={
+                EntityType.HOUSEHOLD: cps_households,
+                EntityType.PERSON: cps_persons,
+            },
+            relationships=(
+                EntityRelationship(
+                    parent_entity=EntityType.HOUSEHOLD,
+                    child_entity=EntityType.PERSON,
+                    parent_key="household_id",
+                    child_key="household_id",
+                    cardinality=RelationshipCardinality.ONE_TO_MANY,
+                ),
+            ),
+        )
+        donor_frame = ObservationFrame(
+            source=SourceDescriptor(
+                name="tax_donor",
+                shareability=Shareability.RESTRICTED,
+                time_structure=TimeStructure.REPEATED_CROSS_SECTION,
+                observations=(
+                    EntityObservation(
+                        entity=EntityType.HOUSEHOLD,
+                        key_column="household_id",
+                        variable_names=("state_fips", "tenure"),
+                        weight_column="hh_weight",
+                    ),
+                    EntityObservation(
+                        entity=EntityType.PERSON,
+                        key_column="person_id",
+                        variable_names=(
+                            "household_id",
+                            "age",
+                            "sex",
+                            "education",
+                            "employment_status",
+                            "income",
+                            "employment_income",
+                            "social_security_retirement",
+                            "has_esi",
+                        ),
+                    ),
+                ),
+                variable_capabilities={
+                    "employment_income": SourceVariableCapability(
+                        authoritative=True,
+                        usable_as_condition=False,
+                    )
+                },
+            ),
+            tables={
+                EntityType.HOUSEHOLD: donor_households,
+                EntityType.PERSON: donor_persons,
+            },
+            relationships=(
+                EntityRelationship(
+                    parent_entity=EntityType.HOUSEHOLD,
+                    child_entity=EntityType.PERSON,
+                    parent_key="household_id",
+                    child_key="household_id",
+                    cardinality=RelationshipCardinality.ONE_TO_MANY,
+                ),
+            ),
+        )
+
+        pipeline = USMicroplexPipeline(
+            USMicroplexBuildConfig(
+                n_synthetic=3,
+                synthesis_backend="bootstrap",
+                donor_imputer_authoritative_override_variables=("employment_income",),
+            )
+        )
+        cps_input = pipeline.prepare_source_input(cps_frame)
+        donor_input = pipeline.prepare_source_input(donor_frame)
+        seed_data = pipeline.prepare_seed_data_from_source(cps_input)
+
+        integration = pipeline._integrate_donor_sources(
+            seed_data,
+            scaffold_input=cps_input,
+            donor_inputs=[donor_input],
+        )
+
+        assert "employment_income" in integration["integrated_variables"]
+        employment_income = integration["seed_data"]["employment_income"].tolist()
+        assert employment_income[0] == 0.0
+        assert employment_income[1] > 0.0
+        assert employment_income[2] > 0.0
+
     def test_export_policyengine_dataset(self, persons, households, tmp_path):
         config = USMicroplexBuildConfig(
             n_synthetic=8,
