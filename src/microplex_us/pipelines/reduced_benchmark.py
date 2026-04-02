@@ -47,6 +47,19 @@ DEFAULT_ATOMIC_AGE_LABELS: tuple[str, ...] = (
     "45_to_64",
     "65_plus",
 )
+DEFAULT_ATOMIC_EMPLOYMENT_INCOME_BINS: tuple[float, ...] = (
+    -1_000_000_000.0,
+    0.01,
+    10_000.0,
+    50_000.0,
+    1_000_000_000.0,
+)
+DEFAULT_ATOMIC_EMPLOYMENT_INCOME_LABELS: tuple[str, ...] = (
+    "zero_or_less",
+    "1_to_10k",
+    "10k_to_50k",
+    "50k_plus",
+)
 
 
 @dataclass(frozen=True)
@@ -324,6 +337,38 @@ def default_us_atomic_rung3_calibration() -> tuple[
     rung0 = default_us_atomic_rung0_benchmarks()
     return (
         rung0[1],
+        rung0 + default_us_atomic_rung1_benchmarks(),
+    )
+
+
+def default_us_atomic_rung4_calibration() -> tuple[
+    USMicroplexReducedBenchmarkSpec,
+    tuple[USMicroplexReducedBenchmarkSpec, ...],
+]:
+    """Reduced calibration comparison: fit age-by-income person counts, then evaluate rung 0+1."""
+
+    rung0 = default_us_atomic_rung0_benchmarks()
+    calibration_spec = USMicroplexReducedBenchmarkSpec(
+        name="person_count_by_age_employment_income_bucket",
+        entity="person",
+        dimensions=(
+            USMicroplexReducedDimensionSpec(
+                variable="age",
+                label="age_bucket",
+                bins=DEFAULT_ATOMIC_AGE_BINS,
+                bin_labels=DEFAULT_ATOMIC_AGE_LABELS,
+            ),
+            USMicroplexReducedDimensionSpec(
+                variable="employment_income_before_lsr",
+                label="employment_income_bucket",
+                bins=DEFAULT_ATOMIC_EMPLOYMENT_INCOME_BINS,
+                bin_labels=DEFAULT_ATOMIC_EMPLOYMENT_INCOME_LABELS,
+            ),
+        ),
+        measures=(USMicroplexReducedMeasureSpec(name="weighted_person_count"),),
+    )
+    return (
+        calibration_spec,
         rung0 + default_us_atomic_rung1_benchmarks(),
     )
 
@@ -1101,6 +1146,8 @@ def _safe_ratio(numerator: int, denominator: int) -> float | None:
 __all__ = [
     "DEFAULT_ATOMIC_AGE_BINS",
     "DEFAULT_ATOMIC_AGE_LABELS",
+    "DEFAULT_ATOMIC_EMPLOYMENT_INCOME_BINS",
+    "DEFAULT_ATOMIC_EMPLOYMENT_INCOME_LABELS",
     "USMicroplexReducedCalibrationReport",
     "USMicroplexReducedBenchmarkHarnessConfig",
     "USMicroplexReducedBenchmarkHarnessResult",
@@ -1113,6 +1160,7 @@ __all__ = [
     "default_us_atomic_rung1_benchmarks",
     "default_us_atomic_rung2_calibration",
     "default_us_atomic_rung3_calibration",
+    "default_us_atomic_rung4_calibration",
     "evaluate_us_reduced_benchmark",
     "reduced_benchmark_to_calibration_targets",
     "run_us_microplex_reduced_benchmark_harness",

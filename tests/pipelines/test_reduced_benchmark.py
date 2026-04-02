@@ -27,6 +27,7 @@ from microplex_us.pipelines.reduced_benchmark import (
     default_us_atomic_rung1_benchmarks,
     default_us_atomic_rung2_calibration,
     default_us_atomic_rung3_calibration,
+    default_us_atomic_rung4_calibration,
     evaluate_us_reduced_benchmark,
     reduced_benchmark_to_calibration_targets,
     run_us_microplex_reduced_benchmark_harness,
@@ -591,6 +592,62 @@ def test_default_us_atomic_rung3_calibration_returns_expected_structure():
     assert calibration_spec.name in eval_names
 
 
+def test_default_us_atomic_rung4_calibration_returns_expected_structure():
+    """Rung 4 returns person_count_by_age_employment_income_bucket and rung 0+1 evaluation specs."""
+
+    calibration_spec, evaluation_specs = default_us_atomic_rung4_calibration()
+    assert calibration_spec.name == "person_count_by_age_employment_income_bucket"
+    assert calibration_spec.entity == "person"
+    assert len(calibration_spec.measures) == 1
+    assert calibration_spec.measures[0].aggregation == "weighted_count"
+    assert [dimension.output_name for dimension in calibration_spec.dimensions] == [
+        "age_bucket",
+        "employment_income_bucket",
+    ]
+
+    rung0_names = {spec.name for spec in default_us_atomic_rung0_benchmarks()}
+    rung1_names = {spec.name for spec in default_us_atomic_rung1_benchmarks()}
+    eval_names = {spec.name for spec in evaluation_specs}
+    assert eval_names == rung0_names | rung1_names
+
+
+def test_reduced_benchmark_to_calibration_targets_emits_age_income_bucket_filters(
+    tmp_path,
+):
+    baseline_path = _write_dataset(
+        _sample_bundle(
+            household_weights=(2.0, 1.0),
+            state_fips=(6, 36),
+            ages_by_household=((10.0, 40.0), (70.0,)),
+            employment_income_by_household=((-5.0, 8_000.0), (60_000.0,)),
+        ),
+        tmp_path / "baseline.h5",
+    )
+    calibration_spec, _ = default_us_atomic_rung4_calibration()
+
+    targets = reduced_benchmark_to_calibration_targets(
+        calibration_spec,
+        baseline_path,
+        period=2024,
+    )
+
+    assert len(targets) == 3
+    zero_or_less_target = next(
+        target
+        for target in targets
+        if "age_bucket=0_to_17" in target.name
+        and "employment_income_bucket=zero_or_less" in target.name
+    )
+    assert zero_or_less_target.entity is EntityType.PERSON
+    assert zero_or_less_target.value == pytest.approx(2.0)
+    assert [(item.feature, item.operator, item.value) for item in zero_or_less_target.filters] == [
+        ("age", FilterOperator.GTE, 0.0),
+        ("age", FilterOperator.LT, 18.0),
+        ("employment_income_before_lsr", FilterOperator.GTE, -1_000_000_000.0),
+        ("employment_income_before_lsr", FilterOperator.LT, 0.01),
+    ]
+
+
 def test_calibrate_and_evaluate_us_reduced_benchmarks_improves_state_count_surface(
     tmp_path,
 ):
@@ -679,3 +736,45 @@ def test_calibrate_and_evaluate_us_reduced_benchmarks_materializes_household_sta
     assert report.reweighting_summary["constraint_count"] > 0
     skipped = report.reweighting_summary["skipped_targets"]
     assert not any(reason == "missing_features:state_fips" for _, reason in skipped)
+
+
+def test_calibrate_and_evaluate_us_reduced_benchmarks_improves_age_income_bucket_surface(
+    tmp_path,
+):
+    baseline_path = _write_dataset(
+        _sample_bundle(
+            household_weights=(2.0, 1.0),
+            state_fips=(6, 36),
+            ages_by_household=((10.0, 40.0), (70.0,)),
+            female_by_household=((True, False), (True,)),
+            employment_income_by_household=((-5.0, 8_000.0), (60_000.0,)),
+        ),
+        tmp_path / "baseline.h5",
+    )
+    candidate_path = _write_dataset(
+        _sample_bundle(
+            household_weights=(1.0, 1.0),
+            state_fips=(6, 36),
+            ages_by_household=((10.0, 40.0), (70.0,)),
+            female_by_household=((True, False), (True,)),
+            employment_income_by_household=((-5.0, 8_000.0), (60_000.0,)),
+        ),
+        tmp_path / "candidate.h5",
+    )
+    calibration_spec, _ = default_us_atomic_rung4_calibration()
+
+    report = calibrate_and_evaluate_us_reduced_benchmarks(
+        candidate_path,
+        baseline_path,
+        calibration_spec,
+        evaluation_specs=(calibration_spec,),
+        period=2024,
+    )
+
+    assert report.target_count > 0
+    assert report.reweighting_summary["constraint_count"] == 3
+    spec_name = calibration_spec.name
+    assert (
+        report.benchmark_deltas[spec_name]["post_mean_measure_mare"]
+        < report.benchmark_deltas[spec_name]["pre_mean_measure_mare"]
+    )
