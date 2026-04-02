@@ -428,6 +428,12 @@ DIVIDEND_COMPOSITION_MODEL_COLUMNS = (
     "dividend_income",
     DIVIDEND_SHARE_COLUMN,
 )
+SOCIAL_SECURITY_COMPONENT_COLUMNS = (
+    "social_security_retirement",
+    "social_security_disability",
+    "social_security_survivors",
+    "social_security_dependents",
+)
 
 
 def _nonnegative_series(frame: pd.DataFrame, column: str) -> pd.Series:
@@ -485,6 +491,53 @@ def normalize_dividend_columns(frame: pd.DataFrame) -> pd.DataFrame:
     result["non_qualified_dividend_income"] = non_qualified.astype(float)
     result["ordinary_dividend_income"] = normalized_total.astype(float)
     result["dividend_income"] = normalized_total.astype(float)
+    return result
+
+
+def normalize_social_security_columns(frame: pd.DataFrame) -> pd.DataFrame:
+    """Normalize Social Security onto an explicit component basis.
+
+    The current bridge is intentionally simple: preserve any observed component
+    columns and allocate any residual gross Social Security to retirement.
+    """
+    result = frame.copy()
+    component_series = {
+        column: _nonnegative_series(result, column)
+        for column in SOCIAL_SECURITY_COMPONENT_COLUMNS
+    }
+    component_sum = sum(component_series.values(), start=pd.Series(0.0, index=result.index))
+
+    if "social_security" in result.columns:
+        observed_total = _nonnegative_series(result, "social_security")
+    else:
+        observed_total = _nonnegative_series(result, "gross_social_security")
+    normalized_total = pd.Series(
+        np.maximum(
+            observed_total.to_numpy(dtype=float),
+            component_sum.to_numpy(dtype=float),
+        ),
+        index=result.index,
+        dtype=float,
+    )
+    residual = pd.Series(
+        np.maximum(
+            normalized_total.to_numpy(dtype=float) - component_sum.to_numpy(dtype=float),
+            0.0,
+        ),
+        index=result.index,
+        dtype=float,
+    )
+    component_series["social_security_retirement"] = (
+        component_series["social_security_retirement"] + residual
+    ).astype(float)
+    normalized_total = sum(
+        component_series.values(),
+        start=pd.Series(0.0, index=result.index, dtype=float),
+    )
+
+    for column, values in component_series.items():
+        result[column] = values.astype(float)
+    result["social_security"] = normalized_total.astype(float)
     return result
 
 

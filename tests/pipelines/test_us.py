@@ -316,6 +316,40 @@ class TestUSMicroplexPipeline:
         assert set(seed["state"]) == {"CA", "NY", "TX"}
         assert set(seed["age_group"].astype(str)) == {"0-17", "18-34", "35-54", "65+"}
 
+    def test_prepare_seed_data_normalizes_social_security_components(self):
+        pipeline = USMicroplexPipeline(USMicroplexBuildConfig())
+        households = pd.DataFrame(
+            {
+                "household_id": [1],
+                "state_fips": [6],
+                "county_fips": [6037],
+                "hh_weight": [100.0],
+                "tenure": [1],
+            }
+        )
+        persons = pd.DataFrame(
+            {
+                "person_id": [10],
+                "household_id": [1],
+                "age": [68],
+                "sex": [1],
+                "education": [3],
+                "employment_status": [2],
+                "income": [1_200.0],
+                "gross_social_security": [1_200.0],
+                "social_security_disability": [200.0],
+            }
+        )
+
+        seed = pipeline.prepare_seed_data(persons, households)
+        row = seed.iloc[0]
+
+        assert row["social_security"] == 1_200.0
+        assert row["social_security_retirement"] == 1_000.0
+        assert row["social_security_disability"] == 200.0
+        assert row["social_security_survivors"] == 0.0
+        assert row["social_security_dependents"] == 0.0
+
     def test_build_targets(self, persons, households):
         pipeline = USMicroplexPipeline(USMicroplexBuildConfig())
         seed = pipeline.prepare_seed_data(persons, households)
@@ -553,6 +587,31 @@ class TestUSMicroplexPipeline:
         assert person_row["employment_income_before_lsr"] == 4_000.0
         assert person_row["ssi"] == 9_000.0
         assert person_row["social_security_retirement"] == 2_000.0
+
+    def test_build_policyengine_entity_tables_allocates_social_security_residual_to_retirement(self):
+        pipeline = USMicroplexPipeline(USMicroplexBuildConfig())
+        population = pd.DataFrame(
+            {
+                "person_id": [1],
+                "household_id": [10],
+                "weight": [1.0],
+                "age": [62],
+                "sex": [2],
+                "income": [2_000.0],
+                "gross_social_security": [2_000.0],
+                "social_security_disability": [500.0],
+                "filing_status": ["SINGLE"],
+                "relationship_to_head": [0],
+                "state_fips": [6],
+                "tenure": [1],
+            }
+        )
+
+        tables = pipeline.build_policyengine_entity_tables(population)
+        person_row = tables.persons.iloc[0]
+
+        assert person_row["social_security_retirement"] == 1_500.0
+        assert person_row["social_security_disability"] == 500.0
 
     def test_build_policyengine_entity_tables_derives_dividend_totals_from_atomic_components(self):
         pipeline = USMicroplexPipeline(USMicroplexBuildConfig())

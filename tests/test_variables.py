@@ -18,6 +18,7 @@ from microplex_us.variables import (
     is_condition_var_compatible_with_targets,
     is_projected_condition_var_compatible,
     normalize_dividend_columns,
+    normalize_social_security_columns,
     prune_redundant_variables,
     resolve_condition_entities_for_targets,
     resolve_variable_semantic_capabilities,
@@ -42,6 +43,24 @@ def test_normalize_dividend_columns_prefers_atomic_components_over_totals():
     assert normalized["non_qualified_dividend_income"].tolist() == [12.0]
     assert normalized["ordinary_dividend_income"].tolist() == [42.0]
     assert normalized["dividend_income"].tolist() == [42.0]
+
+
+def test_normalize_social_security_columns_allocates_residual_to_retirement():
+    frame = pd.DataFrame(
+        {
+            "gross_social_security": [1_000.0, 900.0, 0.0],
+            "social_security_disability": [400.0, 0.0, 0.0],
+            "social_security_survivors": [100.0, 0.0, 50.0],
+        }
+    )
+
+    normalized = normalize_social_security_columns(frame)
+
+    assert normalized["social_security"].tolist() == [1_000.0, 900.0, 50.0]
+    assert normalized["social_security_retirement"].tolist() == [500.0, 900.0, 0.0]
+    assert normalized["social_security_disability"].tolist() == [400.0, 0.0, 0.0]
+    assert normalized["social_security_survivors"].tolist() == [100.0, 0.0, 50.0]
+    assert normalized["social_security_dependents"].tolist() == [0.0, 0.0, 0.0]
 
 
 def test_prune_redundant_variables_drops_dividend_totals_when_basis_present():

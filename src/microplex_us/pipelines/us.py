@@ -69,6 +69,7 @@ from microplex_us.variables import (
     donor_imputation_block_specs,
     is_projected_condition_var_compatible,
     normalize_dividend_columns,
+    normalize_social_security_columns,
     prune_redundant_variables,
     score_donor_condition_var,
     variable_semantic_spec_for,
@@ -964,6 +965,7 @@ class USMicroplexPipeline:
         seed_data["state_fips"] = seed_data["state_fips"].fillna(0).astype(int)
         seed_data["county_fips"] = seed_data["county_fips"].fillna(0).astype(int)
         seed_data["income"] = pd.to_numeric(seed_data["income"], errors="coerce").fillna(0.0)
+        seed_data = normalize_social_security_columns(seed_data)
 
         seed_data["state"] = seed_data["state_fips"].map(STATE_FIPS).fillna("UNK")
         seed_data["age_group"] = pd.cut(
@@ -3586,7 +3588,7 @@ class USMicroplexPipeline:
         self,
         persons: pd.DataFrame,
     ) -> pd.DataFrame:
-        result = normalize_dividend_columns(persons)
+        result = normalize_social_security_columns(normalize_dividend_columns(persons))
         zero = pd.Series(0.0, index=result.index, dtype=float)
 
         def first_present(*columns: str) -> pd.Series:
@@ -3721,11 +3723,7 @@ class USMicroplexPipeline:
         result["tax_exempt_public_pension_income"] = first_present(
             "tax_exempt_public_pension_income"
         )
-        result["social_security_retirement"] = first_present(
-            "social_security_retirement",
-            "social_security",
-            "gross_social_security",
-        )
+        result["social_security_retirement"] = first_present("social_security_retirement")
         result["social_security_disability"] = first_present("social_security_disability")
         result["social_security_survivors"] = first_present("social_security_survivors")
         result["social_security_dependents"] = first_present("social_security_dependents")
