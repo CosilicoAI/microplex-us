@@ -321,7 +321,7 @@ def test_employment_income_donor_semantics_zero_retired_senior_wages_without_esi
     assert adjusted["employment_income"].tolist() == [0.0, 80_000.0, 80_000.0]
 
 
-def test_employment_income_donor_semantics_uses_social_security_fallback():
+def test_employment_income_donor_semantics_normalizes_social_security_to_retirement():
     frame = pd.DataFrame(
         {
             "age": [68.0, 68.0, 68.0],
@@ -333,6 +333,7 @@ def test_employment_income_donor_semantics_uses_social_security_fallback():
 
     adjusted = apply_donor_variable_semantics(frame, ("employment_income",))
 
+    assert adjusted["social_security_retirement"].tolist() == [18_000.0, 18_000.0, 0.0]
     assert adjusted["employment_income"].tolist() == [0.0, 80_000.0, 80_000.0]
 
 

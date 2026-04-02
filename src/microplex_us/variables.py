@@ -128,21 +128,14 @@ def suppress_retired_senior_employment_income_without_esi(
     frame: pd.DataFrame,
 ) -> pd.DataFrame:
     """Suppress donor-overridden wage income for retired seniors without ESI."""
-    required_columns = {"employment_income", "age", "has_esi"}
+    required_columns = {"employment_income", "age", "has_esi", "social_security_retirement"}
     if not required_columns.issubset(frame.columns):
         return frame
     ages = pd.to_numeric(frame["age"], errors="coerce")
     if ages.isna().all():
         return frame
-    social_security_source: str | None = None
-    for candidate in ("social_security_retirement", "social_security"):
-        if candidate in frame.columns:
-            social_security_source = candidate
-            break
-    if social_security_source is None:
-        return frame
     social_security_income = (
-        pd.to_numeric(frame[social_security_source], errors="coerce")
+        pd.to_numeric(frame["social_security_retirement"], errors="coerce")
         .fillna(0.0)
         .astype(float)
     )
@@ -169,7 +162,8 @@ def suppress_retired_senior_employment_income_without_esi(
 
 def normalize_employment_income_donor_values(frame: pd.DataFrame) -> pd.DataFrame:
     """Apply donor-side employment income semantic guards in a stable order."""
-    adjusted = zero_minor_employment_income(frame)
+    adjusted = normalize_social_security_columns(frame)
+    adjusted = zero_minor_employment_income(adjusted)
     return suppress_retired_senior_employment_income_without_esi(adjusted)
 
 
