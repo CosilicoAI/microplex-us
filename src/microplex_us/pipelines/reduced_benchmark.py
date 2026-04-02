@@ -11,8 +11,15 @@ from typing import Any, Literal
 
 import numpy as np
 import pandas as pd
-from microplex.core import SourceProvider, SourceQuery
+from microplex.core import EntityType, SourceProvider, SourceQuery
+from microplex.targets import (
+    FilterOperator,
+    TargetAggregation,
+    TargetFilter,
+    TargetSpec,
+)
 
+from microplex_us.pipelines.local_reweighting import reweight_us_household_targets
 from microplex_us.pipelines.performance import (
     USMicroplexPerformanceHarnessConfig,
     USMicroplexPerformanceHarnessResult,
@@ -20,7 +27,9 @@ from microplex_us.pipelines.performance import (
 )
 from microplex_us.policyengine.us import (
     PolicyEngineUSEntityTableBundle,
+    build_policyengine_us_time_period_arrays,
     load_policyengine_us_entity_tables,
+    write_policyengine_us_time_period_dataset,
 )
 
 USReducedBenchmarkEntity = Literal[
@@ -156,6 +165,44 @@ class USMicroplexReducedBenchmarkHarnessResult:
         return destination
 
 
+@dataclass(frozen=True)
+class USMicroplexReducedCalibrationReport:
+    """Pre/post reduced benchmark comparison around a small household reweight step."""
+
+    calibration_spec: USMicroplexReducedBenchmarkSpec
+    evaluation_specs: tuple[USMicroplexReducedBenchmarkSpec, ...]
+    candidate_dataset: str
+    baseline_dataset: str
+    period: int
+    target_count: int
+    reweighting_summary: dict[str, Any]
+    pre_reports: dict[str, USMicroplexReducedBenchmarkReport]
+    post_reports: dict[str, USMicroplexReducedBenchmarkReport]
+    benchmark_deltas: dict[str, dict[str, Any]]
+    reweighted_dataset_path: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "calibration_spec": _json_compatible_value(asdict(self.calibration_spec)),
+            "evaluation_specs": _json_compatible_value(
+                [asdict(spec) for spec in self.evaluation_specs]
+            ),
+            "candidate_dataset": self.candidate_dataset,
+            "baseline_dataset": self.baseline_dataset,
+            "period": self.period,
+            "target_count": self.target_count,
+            "reweighting_summary": _json_compatible_value(self.reweighting_summary),
+            "benchmark_deltas": _json_compatible_value(self.benchmark_deltas),
+            "reweighted_dataset_path": self.reweighted_dataset_path,
+            "pre_reports": {
+                name: report.to_dict() for name, report in self.pre_reports.items()
+            },
+            "post_reports": {
+                name: report.to_dict() for name, report in self.post_reports.items()
+            },
+        }
+
+
 def default_us_atomic_rung0_benchmarks() -> tuple[USMicroplexReducedBenchmarkSpec, ...]:
     """A minimal first rung: counts by state, then by state x age."""
 
@@ -255,6 +302,19 @@ def default_us_atomic_rung1_benchmarks() -> tuple[USMicroplexReducedBenchmarkSpe
     )
 
 
+def default_us_atomic_rung2_calibration() -> tuple[
+    USMicroplexReducedBenchmarkSpec,
+    tuple[USMicroplexReducedBenchmarkSpec, ...],
+]:
+    """Default reduced calibration comparison: fit state household counts, then evaluate rung 0+1."""
+
+    rung0 = default_us_atomic_rung0_benchmarks()
+    return (
+        rung0[0],
+        rung0 + default_us_atomic_rung1_benchmarks(),
+    )
+
+
 def evaluate_us_reduced_benchmark(
     candidate_dataset: str | Path,
     baseline_dataset: str | Path,
@@ -276,6 +336,28 @@ def evaluate_us_reduced_benchmark(
         period=period,
         variables=tuple(sorted(requested_variables)),
     )
+    return _evaluate_us_reduced_benchmark_bundles(
+        candidate_bundle,
+        baseline_bundle,
+        spec,
+        candidate_dataset=candidate_dataset,
+        baseline_dataset=baseline_dataset,
+        period=period,
+    )
+
+
+def _evaluate_us_reduced_benchmark_bundles(
+    candidate_bundle: PolicyEngineUSEntityTableBundle,
+    baseline_bundle: PolicyEngineUSEntityTableBundle,
+    spec: USMicroplexReducedBenchmarkSpec,
+    *,
+    candidate_dataset: str | Path,
+    baseline_dataset: str | Path,
+    period: int,
+) -> USMicroplexReducedBenchmarkReport:
+    """Compare one candidate bundle to one baseline bundle on a small grouped target surface."""
+
+    _validate_reduced_benchmark_spec(spec)
     candidate_grouped, candidate_row_count = _group_reduced_benchmark_bundle(
         candidate_bundle,
         spec,
@@ -326,8 +408,8 @@ def evaluate_us_reduced_benchmark(
                 int(shared_nonzero.sum()),
                 int(baseline_nonzero.sum()),
             ),
-            "mean_abs_relative_error": float(abs_relative_error.mean()),
-            "max_abs_relative_error": float(abs_relative_error.max()),
+            "mean_abs_relative_error": float(np.nanmean(abs_relative_error)),
+            "max_abs_relative_error": float(np.nanmax(abs_relative_error)),
         }
         sort_frame = merged[dimension_names + [candidate_column, baseline_column]].copy()
         sort_frame["delta"] = delta
@@ -363,7 +445,7 @@ def evaluate_us_reduced_benchmark(
         "n_measures": len(spec.measures),
         "n_cells": int(len(merged)),
         "mean_measure_mare": float(
-            np.mean(
+            np.nanmean(
                 [
                     measure_summaries[measure.name]["mean_abs_relative_error"]
                     for measure in spec.measures
@@ -468,6 +550,179 @@ def run_us_microplex_reduced_benchmark_harness(
     if config.output_json_path is not None:
         result.save(config.output_json_path)
     return result
+
+
+def reduced_benchmark_to_calibration_targets(
+    spec: USMicroplexReducedBenchmarkSpec,
+    baseline_dataset: str | Path,
+    *,
+    period: int = 2024,
+) -> list[TargetSpec]:
+    """Convert a reduced weighted-count spec into household reweighting targets from baseline cells."""
+
+    _validate_reduced_benchmark_spec(spec)
+    unsupported = [
+        measure.name
+        for measure in spec.measures
+        if measure.aggregation != "weighted_count"
+    ]
+    if unsupported:
+        raise ValueError(
+            "Reduced calibration currently supports weighted_count measures only: "
+            + ", ".join(unsupported)
+        )
+
+    requested_variables = _required_reduced_benchmark_variables(spec)
+    baseline_bundle = load_policyengine_us_entity_tables(
+        baseline_dataset,
+        period=period,
+        variables=tuple(sorted(requested_variables)),
+    )
+    grouped, _ = _group_reduced_benchmark_bundle(baseline_bundle, spec)
+    entity = _entity_type_for_reduced_entity(spec.entity)
+    targets: list[TargetSpec] = []
+    for _, row in grouped.iterrows():
+        filters: list[TargetFilter] = []
+        name_parts: list[str] = []
+        for dimension in spec.dimensions:
+            value = row[dimension.output_name]
+            filters.extend(_dimension_filters_for_value(dimension, value))
+            name_parts.append(f"{dimension.output_name}={_json_compatible_value(value)}")
+        measure = spec.measures[0]
+        target_value = float(row[measure.name])
+        targets.append(
+            TargetSpec(
+                name=f"{spec.name}::{'|'.join(name_parts)}",
+                entity=entity,
+                value=target_value,
+                period=period,
+                aggregation=TargetAggregation.COUNT,
+                filters=tuple(filters),
+            )
+        )
+    return targets
+
+
+def calibrate_and_evaluate_us_reduced_benchmarks(
+    candidate_dataset: str | Path,
+    baseline_dataset: str | Path,
+    calibration_spec: USMicroplexReducedBenchmarkSpec,
+    evaluation_specs: tuple[USMicroplexReducedBenchmarkSpec, ...],
+    *,
+    period: int = 2024,
+    max_iter: int = 8,
+    tol: float = 1e-4,
+    factor_bounds: tuple[float, float] = (0.5, 2.0),
+    output_reweighted_dataset_path: str | Path | None = None,
+) -> USMicroplexReducedCalibrationReport:
+    """Reweight candidate household weights to a reduced surface, then compare pre/post rung errors."""
+
+    if not evaluation_specs:
+        raise ValueError("Reduced calibration requires at least one evaluation spec")
+
+    candidate_path = Path(candidate_dataset).expanduser().resolve()
+    baseline_path = Path(baseline_dataset).expanduser().resolve()
+    calibration_targets = reduced_benchmark_to_calibration_targets(
+        calibration_spec,
+        baseline_path,
+        period=period,
+    )
+    requested_variables = set().union(
+        _required_reduced_benchmark_variables(calibration_spec),
+        *(_required_reduced_benchmark_variables(spec) for spec in evaluation_specs),
+    )
+    candidate_bundle = load_policyengine_us_entity_tables(
+        candidate_path,
+        period=period,
+        variables=tuple(sorted(requested_variables)),
+    )
+    baseline_bundle = load_policyengine_us_entity_tables(
+        baseline_path,
+        period=period,
+        variables=tuple(sorted(requested_variables)),
+    )
+
+    pre_reports = {
+        spec.name: _evaluate_us_reduced_benchmark_bundles(
+            candidate_bundle,
+            baseline_bundle,
+            spec,
+            candidate_dataset=candidate_path,
+            baseline_dataset=baseline_path,
+            period=period,
+        )
+        for spec in evaluation_specs
+    }
+
+    reweight_result = reweight_us_household_targets(
+        candidate_bundle,
+        targets=calibration_targets,
+        max_iter=max_iter,
+        tol=tol,
+        factor_bounds=factor_bounds,
+    )
+    reweighted_dataset_path: str | None = None
+    if output_reweighted_dataset_path is not None:
+        destination = Path(output_reweighted_dataset_path).expanduser().resolve()
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        write_policyengine_us_time_period_dataset(
+            build_policyengine_us_time_period_arrays(
+                reweight_result.tables,
+                period=period,
+                **_infer_reduced_export_maps(reweight_result.tables),
+            ),
+            destination,
+        )
+        reweighted_dataset_path = str(destination)
+
+    post_candidate_label = reweighted_dataset_path or f"{candidate_path}#reweighted"
+    post_reports = {
+        spec.name: _evaluate_us_reduced_benchmark_bundles(
+            reweight_result.tables,
+            baseline_bundle,
+            spec,
+            candidate_dataset=post_candidate_label,
+            baseline_dataset=baseline_path,
+            period=period,
+        )
+        for spec in evaluation_specs
+    }
+
+    benchmark_deltas = {
+        spec.name: {
+            "pre_mean_measure_mare": float(pre_reports[spec.name].summary["mean_measure_mare"]),
+            "post_mean_measure_mare": float(
+                post_reports[spec.name].summary["mean_measure_mare"]
+            ),
+            "delta_mean_measure_mare": float(
+                post_reports[spec.name].summary["mean_measure_mare"]
+                - pre_reports[spec.name].summary["mean_measure_mare"]
+            ),
+        }
+        for spec in evaluation_specs
+    }
+    reweighting_summary = {
+        "target_count": reweight_result.diagnostics.target_count,
+        "constraint_count": reweight_result.diagnostics.constraint_count,
+        "iterations": reweight_result.diagnostics.iterations,
+        "converged": reweight_result.diagnostics.converged,
+        "mean_abs_relative_error": reweight_result.diagnostics.mean_abs_relative_error,
+        "max_abs_relative_error": reweight_result.diagnostics.max_abs_relative_error,
+        "skipped_targets": list(reweight_result.compilation.skipped_targets),
+    }
+    return USMicroplexReducedCalibrationReport(
+        calibration_spec=calibration_spec,
+        evaluation_specs=evaluation_specs,
+        candidate_dataset=str(candidate_path),
+        baseline_dataset=str(baseline_path),
+        period=int(period),
+        target_count=len(calibration_targets),
+        reweighting_summary=reweighting_summary,
+        pre_reports=pre_reports,
+        post_reports=post_reports,
+        benchmark_deltas=benchmark_deltas,
+        reweighted_dataset_path=reweighted_dataset_path,
+    )
 
 
 def _validate_reduced_benchmark_spec(spec: USMicroplexReducedBenchmarkSpec) -> None:
@@ -602,6 +857,113 @@ def _materialize_entity_frame(
     return table, weights
 
 
+def _entity_type_for_reduced_entity(entity: USReducedBenchmarkEntity) -> EntityType:
+    mapping: dict[USReducedBenchmarkEntity, EntityType] = {
+        "household": EntityType.HOUSEHOLD,
+        "person": EntityType.PERSON,
+        "tax_unit": EntityType.TAX_UNIT,
+        "spm_unit": EntityType.SPM_UNIT,
+        "family": EntityType.FAMILY,
+        "marital_unit": EntityType.TAX_UNIT,
+    }
+    return mapping[entity]
+
+
+def _dimension_filters_for_value(
+    dimension: USMicroplexReducedDimensionSpec,
+    value: Any,
+) -> tuple[TargetFilter, ...]:
+    if dimension.bins is None:
+        filter_value = value
+        if dimension.zero_pad is not None:
+            numeric = pd.to_numeric(pd.Series([value]), errors="coerce").iloc[0]
+            if pd.notna(numeric):
+                filter_value = int(round(float(numeric)))
+        return (
+            TargetFilter(
+                feature=dimension.variable,
+                operator=FilterOperator.EQ,
+                value=filter_value,
+            ),
+        )
+
+    if dimension.bin_labels is None:
+        raise ValueError(
+            f"Reduced calibration requires explicit bin labels for '{dimension.variable}'"
+        )
+    if value not in dimension.bin_labels:
+        raise ValueError(
+            f"Reduced calibration cannot map bucket '{value}' for '{dimension.variable}'"
+        )
+    index = dimension.bin_labels.index(value)
+    lower = dimension.bins[index]
+    upper = dimension.bins[index + 1]
+    filters = [TargetFilter(dimension.variable, FilterOperator.GTE, lower)]
+    if dimension.right:
+        filters.append(TargetFilter(dimension.variable, FilterOperator.LTE, upper))
+    else:
+        filters.append(TargetFilter(dimension.variable, FilterOperator.LT, upper))
+    return tuple(filters)
+
+
+def _infer_reduced_export_maps(
+    tables: PolicyEngineUSEntityTableBundle,
+) -> dict[str, dict[str, str] | None]:
+    return {
+        "household_variable_map": _infer_export_map(
+            tables.households,
+            excluded_columns={"household_id", "household_weight", "weight"},
+        ),
+        "person_variable_map": _infer_export_map(
+            tables.persons,
+            excluded_columns={
+                "person_id",
+                "household_id",
+                "weight",
+                "tax_unit_id",
+                "spm_unit_id",
+                "family_id",
+                "marital_unit_id",
+            },
+        ),
+        "tax_unit_variable_map": _infer_export_map(
+            tables.tax_units,
+            excluded_columns={"tax_unit_id", "household_id", "household_weight", "weight"},
+        ),
+        "spm_unit_variable_map": _infer_export_map(
+            tables.spm_units,
+            excluded_columns={"spm_unit_id", "household_id", "household_weight", "weight"},
+        ),
+        "family_variable_map": _infer_export_map(
+            tables.families,
+            excluded_columns={"family_id", "household_id", "household_weight", "weight"},
+        ),
+        "marital_unit_variable_map": _infer_export_map(
+            tables.marital_units,
+            excluded_columns={
+                "marital_unit_id",
+                "household_id",
+                "household_weight",
+                "weight",
+            },
+        ),
+    }
+
+
+def _infer_export_map(
+    table: pd.DataFrame | None,
+    *,
+    excluded_columns: set[str],
+) -> dict[str, str] | None:
+    if table is None:
+        return None
+    return {
+        column: column
+        for column in table.columns
+        if column not in excluded_columns
+    } or None
+
+
 def _resolve_entity_table_and_weights(
     bundle: PolicyEngineUSEntityTableBundle,
     entity: USReducedBenchmarkEntity,
@@ -697,14 +1059,18 @@ def _safe_ratio(numerator: int, denominator: int) -> float | None:
 __all__ = [
     "DEFAULT_ATOMIC_AGE_BINS",
     "DEFAULT_ATOMIC_AGE_LABELS",
+    "USMicroplexReducedCalibrationReport",
     "USMicroplexReducedBenchmarkHarnessConfig",
     "USMicroplexReducedBenchmarkHarnessResult",
     "USMicroplexReducedBenchmarkReport",
     "USMicroplexReducedBenchmarkSpec",
     "USMicroplexReducedDimensionSpec",
     "USMicroplexReducedMeasureSpec",
+    "calibrate_and_evaluate_us_reduced_benchmarks",
     "default_us_atomic_rung0_benchmarks",
     "default_us_atomic_rung1_benchmarks",
+    "default_us_atomic_rung2_calibration",
     "evaluate_us_reduced_benchmark",
+    "reduced_benchmark_to_calibration_targets",
     "run_us_microplex_reduced_benchmark_harness",
 ]

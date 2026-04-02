@@ -6,8 +6,11 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 
+import numpy as np
 import pandas as pd
 import pytest
+from microplex.core import EntityType
+from microplex.targets import FilterOperator
 
 from microplex_us.pipelines.performance import (
     USMicroplexPerformanceHarnessConfig,
@@ -16,10 +19,14 @@ from microplex_us.pipelines.performance import (
 from microplex_us.pipelines.reduced_benchmark import (
     USMicroplexReducedBenchmarkHarnessConfig,
     USMicroplexReducedBenchmarkSpec,
+    USMicroplexReducedCalibrationReport,
     USMicroplexReducedDimensionSpec,
     USMicroplexReducedMeasureSpec,
+    calibrate_and_evaluate_us_reduced_benchmarks,
     default_us_atomic_rung1_benchmarks,
+    default_us_atomic_rung2_calibration,
     evaluate_us_reduced_benchmark,
+    reduced_benchmark_to_calibration_targets,
     run_us_microplex_reduced_benchmark_harness,
 )
 from microplex_us.pipelines.us import (
@@ -428,6 +435,61 @@ def test_evaluate_us_reduced_benchmark_weighted_mean_by_state_sex(tmp_path):
     )
 
 
+def test_evaluate_us_reduced_benchmark_weighted_mean_asymmetric_cells(tmp_path):
+    """Weighted mean with asymmetric cell coverage produces valid MARE, not NaN."""
+    baseline_path = _write_dataset(
+        _sample_bundle(
+            household_weights=(2.0, 1.0),
+            state_fips=(6, 36),
+            ages_by_household=((10.0, 40.0), (70.0,)),
+            female_by_household=((True, False), (True,)),
+            employment_income_by_household=((100.0, 80.0), (40.0,)),
+        ),
+        tmp_path / "baseline.h5",
+    )
+    # Candidate has only state 06 — state 36 cell will be missing.
+    candidate_path = _write_dataset(
+        _sample_bundle(
+            household_weights=(1.0,),
+            state_fips=(6,),
+            ages_by_household=((40.0, 20.0),),
+            female_by_household=((True, False),),
+            employment_income_by_household=((120.0, 60.0),),
+        ),
+        tmp_path / "candidate.h5",
+    )
+    spec = USMicroplexReducedBenchmarkSpec(
+        name="income_mean_by_state_sex",
+        entity="person",
+        dimensions=(
+            USMicroplexReducedDimensionSpec(variable="state_fips", zero_pad=2),
+            USMicroplexReducedDimensionSpec(variable="is_female"),
+        ),
+        measures=(
+            USMicroplexReducedMeasureSpec(
+                name="weighted_employment_income_mean",
+                aggregation="weighted_mean",
+                variable="employment_income_before_lsr",
+            ),
+        ),
+    )
+
+    report = evaluate_us_reduced_benchmark(
+        candidate_path,
+        baseline_path,
+        spec,
+        period=2024,
+    )
+
+    mare = report.measure_summaries["weighted_employment_income_mean"]
+    assert not np.isnan(mare["mean_abs_relative_error"])
+    assert not np.isnan(mare["max_abs_relative_error"])
+    assert not np.isnan(report.summary["mean_measure_mare"])
+    # The missing (36, True) cell should surface in top gaps with NaN candidate.
+    assert mare["n_cells"] == 3
+    assert mare["shared_nonzero_cell_count"] == 2
+
+
 def test_default_us_atomic_rung1_benchmarks_returns_expected_specs():
     specs = default_us_atomic_rung1_benchmarks()
     assert [spec.name for spec in specs] == [
@@ -435,3 +497,84 @@ def test_default_us_atomic_rung1_benchmarks_returns_expected_specs():
         "employment_income_sum_by_state",
         "employment_income_mean_by_state_sex",
     ]
+
+
+def test_reduced_benchmark_to_calibration_targets_emits_state_count_targets(tmp_path):
+    baseline_path = _write_dataset(
+        _sample_bundle(
+            household_weights=(2.0, 1.0),
+            state_fips=(6, 36),
+            ages_by_household=((10.0,), (70.0,)),
+        ),
+        tmp_path / "baseline.h5",
+    )
+    spec = USMicroplexReducedBenchmarkSpec(
+        name="household_count_by_state",
+        entity="household",
+        dimensions=(
+            USMicroplexReducedDimensionSpec(variable="state_fips", zero_pad=2),
+        ),
+        measures=(USMicroplexReducedMeasureSpec(name="weighted_household_count"),),
+    )
+
+    targets = reduced_benchmark_to_calibration_targets(spec, baseline_path, period=2024)
+
+    assert len(targets) == 2
+    assert all(target.entity is EntityType.HOUSEHOLD for target in targets)
+    assert all(target.aggregation.value == "count" for target in targets)
+    assert {target.value for target in targets} == {1.0, 2.0}
+    state_filters = {
+        target.filters[0].value: target.filters[0].operator for target in targets
+    }
+    assert state_filters == {6: FilterOperator.EQ, 36: FilterOperator.EQ}
+
+
+def test_calibrate_and_evaluate_us_reduced_benchmarks_improves_state_count_surface(
+    tmp_path,
+):
+    baseline_path = _write_dataset(
+        _sample_bundle(
+            household_weights=(2.0, 1.0),
+            state_fips=(6, 36),
+            ages_by_household=((10.0, 40.0), (70.0,)),
+            female_by_household=((True, False), (True,)),
+            employment_income_by_household=((100.0, 80.0), (40.0,)),
+        ),
+        tmp_path / "baseline.h5",
+    )
+    candidate_path = _write_dataset(
+        _sample_bundle(
+            household_weights=(1.0, 1.0),
+            state_fips=(6, 36),
+            ages_by_household=((10.0, 40.0), (70.0,)),
+            female_by_household=((True, False), (True,)),
+            employment_income_by_household=((100.0, 80.0), (40.0,)),
+        ),
+        tmp_path / "candidate.h5",
+    )
+    calibration_spec, evaluation_specs = default_us_atomic_rung2_calibration()
+    output_path = tmp_path / "reweighted.h5"
+
+    report = calibrate_and_evaluate_us_reduced_benchmarks(
+        candidate_path,
+        baseline_path,
+        calibration_spec,
+        evaluation_specs=(evaluation_specs[0], evaluation_specs[1]),
+        period=2024,
+        output_reweighted_dataset_path=output_path,
+    )
+
+    assert isinstance(report, USMicroplexReducedCalibrationReport)
+    assert report.reweighting_summary["constraint_count"] == 2
+    assert report.reweighted_dataset_path == str(output_path.resolve())
+    assert output_path.exists()
+    state_spec_name = evaluation_specs[0].name
+    age_spec_name = evaluation_specs[1].name
+    assert (
+        report.benchmark_deltas[state_spec_name]["post_mean_measure_mare"]
+        < report.benchmark_deltas[state_spec_name]["pre_mean_measure_mare"]
+    )
+    assert (
+        report.benchmark_deltas[age_spec_name]["post_mean_measure_mare"]
+        < report.benchmark_deltas[age_spec_name]["pre_mean_measure_mare"]
+    )
