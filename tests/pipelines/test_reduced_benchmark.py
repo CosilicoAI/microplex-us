@@ -18,6 +18,7 @@ from microplex_us.pipelines.reduced_benchmark import (
     USMicroplexReducedBenchmarkSpec,
     USMicroplexReducedDimensionSpec,
     USMicroplexReducedMeasureSpec,
+    default_us_atomic_rung1_benchmarks,
     evaluate_us_reduced_benchmark,
     run_us_microplex_reduced_benchmark_harness,
 )
@@ -38,6 +39,8 @@ def _sample_bundle(
     household_weights: tuple[float, ...],
     state_fips: tuple[int, ...],
     ages_by_household: tuple[tuple[float, ...], ...],
+    female_by_household: tuple[tuple[bool, ...], ...] | None = None,
+    employment_income_by_household: tuple[tuple[float, ...], ...] | None = None,
 ) -> PolicyEngineUSEntityTableBundle:
     household_ids = list(range(1, len(household_weights) + 1))
     households = pd.DataFrame(
@@ -49,8 +52,25 @@ def _sample_bundle(
     )
     person_rows: list[dict[str, int | float]] = []
     person_id = 10
-    for household_id, ages in zip(household_ids, ages_by_household, strict=True):
-        for age in ages:
+    female_groups = female_by_household or tuple(
+        tuple(False for _ in ages) for ages in ages_by_household
+    )
+    employment_groups = employment_income_by_household or tuple(
+        tuple(0.0 for _ in ages) for ages in ages_by_household
+    )
+    for household_id, ages, female_flags, incomes in zip(
+        household_ids,
+        ages_by_household,
+        female_groups,
+        employment_groups,
+        strict=True,
+    ):
+        for age, is_female, employment_income in zip(
+            ages,
+            female_flags,
+            incomes,
+            strict=True,
+        ):
             person_rows.append(
                 {
                     "person_id": person_id,
@@ -60,6 +80,8 @@ def _sample_bundle(
                     "family_id": household_id * 5000,
                     "marital_unit_id": household_id * 7000,
                     "age": age,
+                    "is_female": is_female,
+                    "employment_income_before_lsr": employment_income,
                 }
             )
             person_id += 1
@@ -75,11 +97,18 @@ def _sample_bundle(
 
 
 def _write_dataset(bundle: PolicyEngineUSEntityTableBundle, path: Path) -> Path:
+    person_variable_map = {"age": "age"}
+    if "is_female" in bundle.persons.columns:
+        person_variable_map["is_female"] = "is_female"
+    if "employment_income_before_lsr" in bundle.persons.columns:
+        person_variable_map["employment_income_before_lsr"] = (
+            "employment_income_before_lsr"
+        )
     arrays = build_policyengine_us_time_period_arrays(
         bundle,
         period=2024,
         household_variable_map={"state_fips": "state_fips"},
-        person_variable_map={"age": "age"},
+        person_variable_map=person_variable_map,
     )
     return write_policyengine_us_time_period_dataset(arrays, path)
 
@@ -343,3 +372,66 @@ def test_validate_duplicate_dimension_output_names():
         )
 
         _validate_reduced_benchmark_spec(spec)
+
+
+def test_evaluate_us_reduced_benchmark_weighted_mean_by_state_sex(tmp_path):
+    baseline_path = _write_dataset(
+        _sample_bundle(
+            household_weights=(2.0, 1.0),
+            state_fips=(6, 36),
+            ages_by_household=((10.0, 40.0), (70.0,)),
+            female_by_household=((True, False), (True,)),
+            employment_income_by_household=((100.0, 80.0), (40.0,)),
+        ),
+        tmp_path / "baseline.h5",
+    )
+    candidate_path = _write_dataset(
+        _sample_bundle(
+            household_weights=(1.0, 1.0),
+            state_fips=(6, 36),
+            ages_by_household=((10.0, 40.0), (70.0,)),
+            female_by_household=((True, False), (True,)),
+            employment_income_by_household=((120.0, 60.0), (20.0,)),
+        ),
+        tmp_path / "candidate.h5",
+    )
+    spec = USMicroplexReducedBenchmarkSpec(
+        name="employment_income_mean_by_state_sex",
+        entity="person",
+        dimensions=(
+            USMicroplexReducedDimensionSpec(variable="state_fips", zero_pad=2),
+            USMicroplexReducedDimensionSpec(variable="is_female"),
+        ),
+        measures=(
+            USMicroplexReducedMeasureSpec(
+                name="weighted_employment_income_mean",
+                aggregation="weighted_mean",
+                variable="employment_income_before_lsr",
+            ),
+        ),
+    )
+
+    report = evaluate_us_reduced_benchmark(
+        candidate_path,
+        baseline_path,
+        spec,
+        period=2024,
+    )
+
+    summary = report.measure_summaries["weighted_employment_income_mean"]
+    assert summary["baseline_nonzero_cell_count"] == 3
+    assert summary["candidate_nonzero_cell_count"] == 3
+    assert report.top_cell_gaps["weighted_employment_income_mean"][0]["state_fips"] == "36"
+    assert report.top_cell_gaps["weighted_employment_income_mean"][0]["is_female"] is True
+    assert report.top_cell_gaps["weighted_employment_income_mean"][0]["delta"] == pytest.approx(
+        -20.0
+    )
+
+
+def test_default_us_atomic_rung1_benchmarks_returns_expected_specs():
+    specs = default_us_atomic_rung1_benchmarks()
+    assert [spec.name for spec in specs] == [
+        "person_count_by_state_sex",
+        "employment_income_sum_by_state",
+        "employment_income_mean_by_state_sex",
+    ]
