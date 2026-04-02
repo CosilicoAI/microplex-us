@@ -128,19 +128,21 @@ def suppress_retired_senior_employment_income_without_esi(
     frame: pd.DataFrame,
 ) -> pd.DataFrame:
     """Suppress donor-overridden wage income for retired seniors without ESI."""
-    required_columns = {
-        "employment_income",
-        "age",
-        "social_security_retirement",
-        "has_esi",
-    }
+    required_columns = {"employment_income", "age", "has_esi"}
     if not required_columns.issubset(frame.columns):
         return frame
     ages = pd.to_numeric(frame["age"], errors="coerce")
     if ages.isna().all():
         return frame
-    ss_retirement = (
-        pd.to_numeric(frame["social_security_retirement"], errors="coerce")
+    social_security_source: str | None = None
+    for candidate in ("social_security_retirement", "social_security"):
+        if candidate in frame.columns:
+            social_security_source = candidate
+            break
+    if social_security_source is None:
+        return frame
+    social_security_income = (
+        pd.to_numeric(frame[social_security_source], errors="coerce")
         .fillna(0.0)
         .astype(float)
     )
@@ -151,7 +153,7 @@ def suppress_retired_senior_employment_income_without_esi(
         .gt(0.0)
     )
     retired_senior_mask = (
-        ages.ge(65).fillna(False) & ss_retirement.gt(0.0) & ~has_esi
+        ages.ge(65).fillna(False) & social_security_income.gt(0.0) & ~has_esi
     )
     if not retired_senior_mask.any():
         return frame
