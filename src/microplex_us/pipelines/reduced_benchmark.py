@@ -216,6 +216,50 @@ class USMicroplexReducedCalibrationReport:
         }
 
 
+@dataclass(frozen=True)
+class USMicroplexReducedMultiCalibrationReport:
+    """Pre/post reduced benchmark comparison around a multi-surface household reweight step."""
+
+    calibration_specs: tuple[USMicroplexReducedBenchmarkSpec, ...]
+    evaluation_specs: tuple[USMicroplexReducedBenchmarkSpec, ...]
+    candidate_dataset: str
+    baseline_dataset: str
+    period: int
+    target_count: int
+    calibration_target_counts: dict[str, int]
+    reweighting_summary: dict[str, Any]
+    pre_reports: dict[str, USMicroplexReducedBenchmarkReport]
+    post_reports: dict[str, USMicroplexReducedBenchmarkReport]
+    benchmark_deltas: dict[str, dict[str, Any]]
+    reweighted_dataset_path: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "calibration_specs": _json_compatible_value(
+                [asdict(spec) for spec in self.calibration_specs]
+            ),
+            "evaluation_specs": _json_compatible_value(
+                [asdict(spec) for spec in self.evaluation_specs]
+            ),
+            "candidate_dataset": self.candidate_dataset,
+            "baseline_dataset": self.baseline_dataset,
+            "period": self.period,
+            "target_count": self.target_count,
+            "calibration_target_counts": _json_compatible_value(
+                self.calibration_target_counts
+            ),
+            "reweighting_summary": _json_compatible_value(self.reweighting_summary),
+            "benchmark_deltas": _json_compatible_value(self.benchmark_deltas),
+            "reweighted_dataset_path": self.reweighted_dataset_path,
+            "pre_reports": {
+                name: report.to_dict() for name, report in self.pre_reports.items()
+            },
+            "post_reports": {
+                name: report.to_dict() for name, report in self.post_reports.items()
+            },
+        }
+
+
 def default_us_atomic_rung0_benchmarks() -> tuple[USMicroplexReducedBenchmarkSpec, ...]:
     """A minimal first rung: counts by state, then by state x age."""
 
@@ -370,6 +414,22 @@ def default_us_atomic_rung4_calibration() -> tuple[
     return (
         calibration_spec,
         rung0 + default_us_atomic_rung1_benchmarks(),
+    )
+
+
+def default_us_atomic_rung5_calibration() -> tuple[
+    tuple[USMicroplexReducedBenchmarkSpec, ...],
+    tuple[USMicroplexReducedBenchmarkSpec, ...],
+]:
+    """Reduced calibration comparison: fit state-age and age-income counts jointly."""
+
+    rung0 = default_us_atomic_rung0_benchmarks()
+    rung1 = default_us_atomic_rung1_benchmarks()
+    rung3_spec, _ = default_us_atomic_rung3_calibration()
+    rung4_spec, _ = default_us_atomic_rung4_calibration()
+    return (
+        (rung3_spec, rung4_spec),
+        rung0 + rung1 + (rung4_spec,),
     )
 
 
@@ -661,6 +721,30 @@ def reduced_benchmark_to_calibration_targets(
     return targets
 
 
+def reduced_benchmark_specs_to_calibration_targets(
+    specs: tuple[USMicroplexReducedBenchmarkSpec, ...],
+    baseline_dataset: str | Path,
+    *,
+    period: int = 2024,
+) -> tuple[list[TargetSpec], dict[str, int]]:
+    """Convert multiple reduced weighted-count specs into one target list."""
+
+    if not specs:
+        raise ValueError("Reduced calibration requires at least one calibration spec")
+
+    targets: list[TargetSpec] = []
+    target_counts: dict[str, int] = {}
+    for spec in specs:
+        spec_targets = reduced_benchmark_to_calibration_targets(
+            spec,
+            baseline_dataset,
+            period=period,
+        )
+        targets.extend(spec_targets)
+        target_counts[spec.name] = len(spec_targets)
+    return targets, target_counts
+
+
 def calibrate_and_evaluate_us_reduced_benchmarks(
     candidate_dataset: str | Path,
     baseline_dataset: str | Path,
@@ -779,6 +863,135 @@ def calibrate_and_evaluate_us_reduced_benchmarks(
         baseline_dataset=str(baseline_path),
         period=int(period),
         target_count=len(calibration_targets),
+        reweighting_summary=reweighting_summary,
+        pre_reports=pre_reports,
+        post_reports=post_reports,
+        benchmark_deltas=benchmark_deltas,
+        reweighted_dataset_path=reweighted_dataset_path,
+    )
+
+
+def calibrate_and_evaluate_us_reduced_benchmark_specs(
+    candidate_dataset: str | Path,
+    baseline_dataset: str | Path,
+    calibration_specs: tuple[USMicroplexReducedBenchmarkSpec, ...],
+    evaluation_specs: tuple[USMicroplexReducedBenchmarkSpec, ...],
+    *,
+    period: int = 2024,
+    max_iter: int = 8,
+    tol: float = 1e-4,
+    factor_bounds: tuple[float, float] = (0.5, 2.0),
+    output_reweighted_dataset_path: str | Path | None = None,
+) -> USMicroplexReducedMultiCalibrationReport:
+    """Reweight candidate household weights to multiple reduced surfaces, then compare pre/post rung errors."""
+
+    if not calibration_specs:
+        raise ValueError("Reduced multi-calibration requires at least one calibration spec")
+    if not evaluation_specs:
+        raise ValueError("Reduced multi-calibration requires at least one evaluation spec")
+
+    candidate_path = Path(candidate_dataset).expanduser().resolve()
+    baseline_path = Path(baseline_dataset).expanduser().resolve()
+    calibration_targets, target_counts = reduced_benchmark_specs_to_calibration_targets(
+        calibration_specs,
+        baseline_path,
+        period=period,
+    )
+    requested_variables = set().union(
+        *(_required_reduced_benchmark_variables(spec) for spec in calibration_specs),
+        *(_required_reduced_benchmark_variables(spec) for spec in evaluation_specs),
+    )
+    candidate_bundle = load_policyengine_us_entity_tables(
+        candidate_path,
+        period=period,
+        variables=tuple(sorted(requested_variables)),
+    )
+    baseline_bundle = load_policyengine_us_entity_tables(
+        baseline_path,
+        period=period,
+        variables=tuple(sorted(requested_variables)),
+    )
+
+    pre_reports = {
+        spec.name: _evaluate_us_reduced_benchmark_bundles(
+            candidate_bundle,
+            baseline_bundle,
+            spec,
+            candidate_dataset=candidate_path,
+            baseline_dataset=baseline_path,
+            period=period,
+        )
+        for spec in evaluation_specs
+    }
+
+    calibration_bundle = _bundle_with_materialized_calibration_specs(
+        candidate_bundle,
+        calibration_specs,
+    )
+    reweight_result = reweight_us_household_targets(
+        calibration_bundle,
+        targets=calibration_targets,
+        max_iter=max_iter,
+        tol=tol,
+        factor_bounds=factor_bounds,
+    )
+    reweighted_dataset_path: str | None = None
+    if output_reweighted_dataset_path is not None:
+        destination = Path(output_reweighted_dataset_path).expanduser().resolve()
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        write_policyengine_us_time_period_dataset(
+            build_policyengine_us_time_period_arrays(
+                reweight_result.tables,
+                period=period,
+                **_infer_reduced_export_maps(reweight_result.tables),
+            ),
+            destination,
+        )
+        reweighted_dataset_path = str(destination)
+
+    post_candidate_label = reweighted_dataset_path or f"{candidate_path}#reweighted"
+    post_reports = {
+        spec.name: _evaluate_us_reduced_benchmark_bundles(
+            reweight_result.tables,
+            baseline_bundle,
+            spec,
+            candidate_dataset=post_candidate_label,
+            baseline_dataset=baseline_path,
+            period=period,
+        )
+        for spec in evaluation_specs
+    }
+
+    benchmark_deltas = {
+        spec.name: {
+            "pre_mean_measure_mare": float(pre_reports[spec.name].summary["mean_measure_mare"]),
+            "post_mean_measure_mare": float(
+                post_reports[spec.name].summary["mean_measure_mare"]
+            ),
+            "delta_mean_measure_mare": float(
+                post_reports[spec.name].summary["mean_measure_mare"]
+                - pre_reports[spec.name].summary["mean_measure_mare"]
+            ),
+        }
+        for spec in evaluation_specs
+    }
+    reweighting_summary = {
+        "target_count": reweight_result.diagnostics.target_count,
+        "constraint_count": reweight_result.diagnostics.constraint_count,
+        "iterations": reweight_result.diagnostics.iterations,
+        "converged": reweight_result.diagnostics.converged,
+        "mean_abs_relative_error": reweight_result.diagnostics.mean_abs_relative_error,
+        "max_abs_relative_error": reweight_result.diagnostics.max_abs_relative_error,
+        "skipped_targets": list(reweight_result.compilation.skipped_targets),
+    }
+    return USMicroplexReducedMultiCalibrationReport(
+        calibration_specs=calibration_specs,
+        evaluation_specs=evaluation_specs,
+        candidate_dataset=str(candidate_path),
+        baseline_dataset=str(baseline_path),
+        period=int(period),
+        target_count=len(calibration_targets),
+        calibration_target_counts=target_counts,
         reweighting_summary=reweighting_summary,
         pre_reports=pre_reports,
         post_reports=post_reports,
@@ -938,6 +1151,19 @@ def _bundle_with_materialized_calibration_variables(
     if spec.entity == "marital_unit":
         return replace(bundle, marital_units=table)
     return bundle
+
+
+def _bundle_with_materialized_calibration_specs(
+    bundle: PolicyEngineUSEntityTableBundle,
+    specs: tuple[USMicroplexReducedBenchmarkSpec, ...],
+) -> PolicyEngineUSEntityTableBundle:
+    materialized_bundle = bundle
+    for spec in specs:
+        materialized_bundle = _bundle_with_materialized_calibration_variables(
+            materialized_bundle,
+            spec,
+        )
+    return materialized_bundle
 
 
 def _entity_type_for_reduced_entity(entity: USReducedBenchmarkEntity) -> EntityType:

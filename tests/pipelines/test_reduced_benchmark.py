@@ -22,13 +22,17 @@ from microplex_us.pipelines.reduced_benchmark import (
     USMicroplexReducedCalibrationReport,
     USMicroplexReducedDimensionSpec,
     USMicroplexReducedMeasureSpec,
+    USMicroplexReducedMultiCalibrationReport,
+    calibrate_and_evaluate_us_reduced_benchmark_specs,
     calibrate_and_evaluate_us_reduced_benchmarks,
     default_us_atomic_rung0_benchmarks,
     default_us_atomic_rung1_benchmarks,
     default_us_atomic_rung2_calibration,
     default_us_atomic_rung3_calibration,
     default_us_atomic_rung4_calibration,
+    default_us_atomic_rung5_calibration,
     evaluate_us_reduced_benchmark,
+    reduced_benchmark_specs_to_calibration_targets,
     reduced_benchmark_to_calibration_targets,
     run_us_microplex_reduced_benchmark_harness,
 )
@@ -611,6 +615,26 @@ def test_default_us_atomic_rung4_calibration_returns_expected_structure():
     assert eval_names == rung0_names | rung1_names
 
 
+def test_default_us_atomic_rung5_calibration_returns_expected_structure():
+    """Rung 5 jointly calibrates age-state and age-income person counts."""
+
+    calibration_specs, evaluation_specs = default_us_atomic_rung5_calibration()
+    calibration_names = [spec.name for spec in calibration_specs]
+    assert calibration_names == [
+        "person_count_by_state_age",
+        "person_count_by_age_employment_income_bucket",
+    ]
+    assert all(spec.entity == "person" for spec in calibration_specs)
+    assert all(spec.measures[0].aggregation == "weighted_count" for spec in calibration_specs)
+
+    rung0_names = {spec.name for spec in default_us_atomic_rung0_benchmarks()}
+    rung1_names = {spec.name for spec in default_us_atomic_rung1_benchmarks()}
+    eval_names = {spec.name for spec in evaluation_specs}
+    assert eval_names == rung0_names | rung1_names | {
+        "person_count_by_age_employment_income_bucket"
+    }
+
+
 def test_reduced_benchmark_to_calibration_targets_emits_age_income_bucket_filters(
     tmp_path,
 ):
@@ -646,6 +670,32 @@ def test_reduced_benchmark_to_calibration_targets_emits_age_income_bucket_filter
         ("employment_income_before_lsr", FilterOperator.GTE, -1_000_000_000.0),
         ("employment_income_before_lsr", FilterOperator.LT, 0.01),
     ]
+
+
+def test_reduced_benchmark_specs_to_calibration_targets_tracks_counts_by_spec(tmp_path):
+    baseline_path = _write_dataset(
+        _sample_bundle(
+            household_weights=(2.0, 1.0),
+            state_fips=(6, 36),
+            ages_by_household=((10.0, 40.0), (70.0,)),
+            female_by_household=((True, False), (True,)),
+            employment_income_by_household=((-5.0, 8_000.0), (60_000.0,)),
+        ),
+        tmp_path / "baseline.h5",
+    )
+    calibration_specs, _ = default_us_atomic_rung5_calibration()
+
+    targets, target_counts = reduced_benchmark_specs_to_calibration_targets(
+        calibration_specs,
+        baseline_path,
+        period=2024,
+    )
+
+    assert len(targets) == sum(target_counts.values())
+    assert target_counts == {
+        "person_count_by_state_age": 3,
+        "person_count_by_age_employment_income_bucket": 3,
+    }
 
 
 def test_calibrate_and_evaluate_us_reduced_benchmarks_improves_state_count_surface(
@@ -778,3 +828,49 @@ def test_calibrate_and_evaluate_us_reduced_benchmarks_improves_age_income_bucket
         report.benchmark_deltas[spec_name]["post_mean_measure_mare"]
         < report.benchmark_deltas[spec_name]["pre_mean_measure_mare"]
     )
+
+
+def test_calibrate_and_evaluate_us_reduced_benchmark_specs_improves_joint_surfaces(
+    tmp_path,
+):
+    baseline_path = _write_dataset(
+        _sample_bundle(
+            household_weights=(2.0, 1.0),
+            state_fips=(6, 36),
+            ages_by_household=((10.0, 40.0), (70.0,)),
+            female_by_household=((True, False), (True,)),
+            employment_income_by_household=((-5.0, 8_000.0), (60_000.0,)),
+        ),
+        tmp_path / "baseline.h5",
+    )
+    candidate_path = _write_dataset(
+        _sample_bundle(
+            household_weights=(1.0, 1.0),
+            state_fips=(6, 36),
+            ages_by_household=((10.0, 40.0), (70.0,)),
+            female_by_household=((True, False), (True,)),
+            employment_income_by_household=((-5.0, 8_000.0), (60_000.0,)),
+        ),
+        tmp_path / "candidate.h5",
+    )
+    calibration_specs, evaluation_specs = default_us_atomic_rung5_calibration()
+
+    report = calibrate_and_evaluate_us_reduced_benchmark_specs(
+        candidate_path,
+        baseline_path,
+        calibration_specs,
+        evaluation_specs=(evaluation_specs[1], evaluation_specs[-1]),
+        period=2024,
+    )
+
+    assert isinstance(report, USMicroplexReducedMultiCalibrationReport)
+    assert report.target_count == 6
+    assert report.calibration_target_counts == {
+        "person_count_by_state_age": 3,
+        "person_count_by_age_employment_income_bucket": 3,
+    }
+    for spec_name in ("person_count_by_state_age", "person_count_by_age_employment_income_bucket"):
+        assert (
+            report.benchmark_deltas[spec_name]["post_mean_measure_mare"]
+            < report.benchmark_deltas[spec_name]["pre_mean_measure_mare"]
+        )
