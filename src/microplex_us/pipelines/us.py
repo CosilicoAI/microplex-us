@@ -65,6 +65,7 @@ from microplex_us.policyengine.us import (
 from microplex_us.variables import (
     DonorMatchStrategy,
     VariableSupportFamily,
+    apply_donor_variable_semantics,
     donor_imputation_block_specs,
     is_projected_condition_var_compatible,
     normalize_dividend_columns,
@@ -2580,6 +2581,10 @@ class USMicroplexPipeline:
                         current[variable] = matched_values
                 if donor_block_spec.restore_frame is not None:
                     current = donor_block_spec.restore_frame(current)
+                current = apply_donor_variable_semantics(
+                    current,
+                    donor_block_spec.restored_variables,
+                )
                 integrated_variables.extend(donor_block_spec.restored_variables)
 
         return {

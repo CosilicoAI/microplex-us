@@ -68,6 +68,7 @@ class VariableSemanticSpec:
     support_family: VariableSupportFamily = VariableSupportFamily.CONTINUOUS
     derived_from: tuple[str, ...] = ()
     donor_match_strategy: DonorMatchStrategy = DonorMatchStrategy.RANK
+    donor_postprocess_frame: Callable[[pd.DataFrame], pd.DataFrame] | None = None
     notes: str | None = None
 
     def is_redundant_given(self, variable_names: Iterable[str]) -> bool:
@@ -255,6 +256,16 @@ VARIABLE_SEMANTIC_SPECS: dict[str, VariableSemanticSpec] = {
         support_family=VariableSupportFamily.ZERO_INFLATED_POSITIVE,
         donor_match_strategy=DonorMatchStrategy.ZERO_INFLATED_POSITIVE,
     ),
+    "employment_income": VariableSemanticSpec(
+        native_entity=EntityType.PERSON,
+        condition_entities=(
+            EntityType.PERSON,
+            EntityType.HOUSEHOLD,
+            EntityType.TAX_UNIT,
+        ),
+        donor_postprocess_frame=lambda frame: zero_minor_employment_income(frame),
+        notes="Employment income donor overrides should not assign positive wages to minors.",
+    ),
     "self_employment_income": VariableSemanticSpec(
         native_entity=EntityType.PERSON,
         condition_entities=(
@@ -310,6 +321,26 @@ DIVIDEND_COMPOSITION_MODEL_COLUMNS = (
     "dividend_income",
     DIVIDEND_SHARE_COLUMN,
 )
+
+
+def zero_minor_employment_income(frame: pd.DataFrame) -> pd.DataFrame:
+    """Enforce zero employment income for minors on donor-integrated seed frames."""
+    if "employment_income" not in frame.columns or "age" not in frame.columns:
+        return frame
+    ages = pd.to_numeric(frame["age"], errors="coerce")
+    if ages.isna().all():
+        return frame
+    result = frame.copy()
+    minor_mask = ages.lt(18).fillna(False)
+    if not minor_mask.any():
+        return result
+    result["employment_income"] = (
+        pd.to_numeric(result["employment_income"], errors="coerce")
+        .fillna(0.0)
+        .astype(float)
+    )
+    result.loc[minor_mask, "employment_income"] = 0.0
+    return result
 
 
 def _nonnegative_series(frame: pd.DataFrame, column: str) -> pd.Series:
@@ -590,6 +621,20 @@ def donor_imputation_blocks(
         block_spec.model_variables
         for block_spec in donor_imputation_block_specs(variable_names)
     )
+
+
+def apply_donor_variable_semantics(
+    frame: pd.DataFrame,
+    variable_names: Iterable[str],
+) -> pd.DataFrame:
+    """Apply post-imputation semantic guards for donor-integrated variables."""
+    result = frame
+    for variable_name in tuple(dict.fromkeys(variable_names)):
+        postprocess = variable_semantic_spec_for(variable_name).donor_postprocess_frame
+        if postprocess is None:
+            continue
+        result = postprocess(result)
+    return result
 
 
 def resolve_variable_semantic_capabilities(

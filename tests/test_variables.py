@@ -11,6 +11,7 @@ from microplex_us.variables import (
     ProjectionAggregation,
     VariableSupportFamily,
     add_dividend_composition_features,
+    apply_donor_variable_semantics,
     donor_imputation_block_specs,
     donor_imputation_blocks,
     is_condition_var_compatible_with_entity,
@@ -270,3 +271,16 @@ def test_self_employment_income_semantics_preserve_signed_support():
 
     assert spec.support_family is VariableSupportFamily.CONTINUOUS
     assert spec.donor_match_strategy is DonorMatchStrategy.RANK
+
+
+def test_employment_income_donor_semantics_zero_minor_wages():
+    frame = pd.DataFrame(
+        {
+            "age": [16.0, 19.0],
+            "employment_income": [50_000.0, 25_000.0],
+        }
+    )
+
+    adjusted = apply_donor_variable_semantics(frame, ("employment_income",))
+
+    assert adjusted["employment_income"].tolist() == [0.0, 25_000.0]
