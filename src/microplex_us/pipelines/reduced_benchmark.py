@@ -315,6 +315,19 @@ def default_us_atomic_rung2_calibration() -> tuple[
     )
 
 
+def default_us_atomic_rung3_calibration() -> tuple[
+    USMicroplexReducedBenchmarkSpec,
+    tuple[USMicroplexReducedBenchmarkSpec, ...],
+]:
+    """Reduced calibration comparison: fit state-by-age person counts, then evaluate rung 0+1."""
+
+    rung0 = default_us_atomic_rung0_benchmarks()
+    return (
+        rung0[1],
+        rung0 + default_us_atomic_rung1_benchmarks(),
+    )
+
+
 def evaluate_us_reduced_benchmark(
     candidate_dataset: str | Path,
     baseline_dataset: str | Path,
@@ -654,8 +667,12 @@ def calibrate_and_evaluate_us_reduced_benchmarks(
         for spec in evaluation_specs
     }
 
-    reweight_result = reweight_us_household_targets(
+    calibration_bundle = _bundle_with_materialized_calibration_variables(
         candidate_bundle,
+        calibration_spec,
+    )
+    reweight_result = reweight_us_household_targets(
+        calibration_bundle,
         targets=calibration_targets,
         max_iter=max_iter,
         tol=tol,
@@ -855,6 +872,27 @@ def _materialize_entity_frame(
             if variable in household_lookup.columns:
                 table[variable] = table["household_id"].map(household_lookup[variable])
     return table, weights
+
+
+def _bundle_with_materialized_calibration_variables(
+    bundle: PolicyEngineUSEntityTableBundle,
+    spec: USMicroplexReducedBenchmarkSpec,
+) -> PolicyEngineUSEntityTableBundle:
+    required_variables = _required_reduced_benchmark_variables(spec)
+    table, _ = _materialize_entity_frame(bundle, spec.entity, required_variables)
+    if spec.entity == "household":
+        return replace(bundle, households=table)
+    if spec.entity == "person":
+        return replace(bundle, persons=table)
+    if spec.entity == "tax_unit":
+        return replace(bundle, tax_units=table)
+    if spec.entity == "spm_unit":
+        return replace(bundle, spm_units=table)
+    if spec.entity == "family":
+        return replace(bundle, families=table)
+    if spec.entity == "marital_unit":
+        return replace(bundle, marital_units=table)
+    return bundle
 
 
 def _entity_type_for_reduced_entity(entity: USReducedBenchmarkEntity) -> EntityType:
@@ -1074,6 +1112,7 @@ __all__ = [
     "default_us_atomic_rung0_benchmarks",
     "default_us_atomic_rung1_benchmarks",
     "default_us_atomic_rung2_calibration",
+    "default_us_atomic_rung3_calibration",
     "evaluate_us_reduced_benchmark",
     "reduced_benchmark_to_calibration_targets",
     "run_us_microplex_reduced_benchmark_harness",

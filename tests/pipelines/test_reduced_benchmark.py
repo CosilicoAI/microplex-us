@@ -26,6 +26,7 @@ from microplex_us.pipelines.reduced_benchmark import (
     default_us_atomic_rung0_benchmarks,
     default_us_atomic_rung1_benchmarks,
     default_us_atomic_rung2_calibration,
+    default_us_atomic_rung3_calibration,
     evaluate_us_reduced_benchmark,
     reduced_benchmark_to_calibration_targets,
     run_us_microplex_reduced_benchmark_harness,
@@ -573,6 +574,23 @@ def test_default_us_atomic_rung2_calibration_returns_expected_structure():
     assert eval_names == rung0_names | rung1_names
 
 
+def test_default_us_atomic_rung3_calibration_returns_expected_structure():
+    """Rung 3 returns person_count_by_state_age calibration spec and rung 0+1 evaluation specs."""
+
+    calibration_spec, evaluation_specs = default_us_atomic_rung3_calibration()
+    assert calibration_spec.name == "person_count_by_state_age"
+    assert calibration_spec.entity == "person"
+    assert len(calibration_spec.measures) == 1
+    assert calibration_spec.measures[0].aggregation == "weighted_count"
+
+    rung0 = default_us_atomic_rung0_benchmarks()
+    rung0_names = {spec.name for spec in rung0}
+    rung1_names = {spec.name for spec in default_us_atomic_rung1_benchmarks()}
+    eval_names = {spec.name for spec in evaluation_specs}
+    assert eval_names == rung0_names | rung1_names
+    assert calibration_spec.name in eval_names
+
+
 def test_calibrate_and_evaluate_us_reduced_benchmarks_improves_state_count_surface(
     tmp_path,
 ):
@@ -622,3 +640,42 @@ def test_calibrate_and_evaluate_us_reduced_benchmarks_improves_state_count_surfa
         report.benchmark_deltas[age_spec_name]["post_mean_measure_mare"]
         < report.benchmark_deltas[age_spec_name]["pre_mean_measure_mare"]
     )
+
+
+def test_calibrate_and_evaluate_us_reduced_benchmarks_materializes_household_state_for_person_targets(
+    tmp_path,
+):
+    baseline_path = _write_dataset(
+        _sample_bundle(
+            household_weights=(2.0, 1.0),
+            state_fips=(6, 36),
+            ages_by_household=((10.0, 40.0), (70.0,)),
+            female_by_household=((True, False), (True,)),
+            employment_income_by_household=((100.0, 80.0), (40.0,)),
+        ),
+        tmp_path / "baseline.h5",
+    )
+    candidate_path = _write_dataset(
+        _sample_bundle(
+            household_weights=(1.0, 1.0),
+            state_fips=(6, 36),
+            ages_by_household=((10.0, 40.0), (70.0,)),
+            female_by_household=((True, False), (True,)),
+            employment_income_by_household=((100.0, 80.0), (40.0,)),
+        ),
+        tmp_path / "candidate.h5",
+    )
+    calibration_spec, evaluation_specs = default_us_atomic_rung3_calibration()
+
+    report = calibrate_and_evaluate_us_reduced_benchmarks(
+        candidate_path,
+        baseline_path,
+        calibration_spec,
+        evaluation_specs=(evaluation_specs[1],),
+        period=2024,
+    )
+
+    assert report.target_count > 0
+    assert report.reweighting_summary["constraint_count"] > 0
+    skipped = report.reweighting_summary["skipped_targets"]
+    assert not any(reason == "missing_features:state_fips" for _, reason in skipped)
