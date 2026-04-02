@@ -864,8 +864,12 @@ def _entity_type_for_reduced_entity(entity: USReducedBenchmarkEntity) -> EntityT
         "tax_unit": EntityType.TAX_UNIT,
         "spm_unit": EntityType.SPM_UNIT,
         "family": EntityType.FAMILY,
-        "marital_unit": EntityType.TAX_UNIT,
     }
+    if entity == "marital_unit":
+        raise ValueError(
+            "Reduced calibration targets do not support marital_unit "
+            "(no corresponding EntityType in microplex core)"
+        )
     return mapping[entity]
 
 

@@ -23,6 +23,7 @@ from microplex_us.pipelines.reduced_benchmark import (
     USMicroplexReducedDimensionSpec,
     USMicroplexReducedMeasureSpec,
     calibrate_and_evaluate_us_reduced_benchmarks,
+    default_us_atomic_rung0_benchmarks,
     default_us_atomic_rung1_benchmarks,
     default_us_atomic_rung2_calibration,
     evaluate_us_reduced_benchmark,
@@ -527,6 +528,49 @@ def test_reduced_benchmark_to_calibration_targets_emits_state_count_targets(tmp_
         target.filters[0].value: target.filters[0].operator for target in targets
     }
     assert state_filters == {6: FilterOperator.EQ, 36: FilterOperator.EQ}
+
+
+def test_reduced_benchmark_to_calibration_targets_rejects_non_count_measures(tmp_path):
+    """weighted_sum / weighted_mean specs are rejected for calibration targets."""
+    baseline_path = _write_dataset(
+        _sample_bundle(
+            household_weights=(2.0, 1.0),
+            state_fips=(6, 36),
+            ages_by_household=((10.0,), (70.0,)),
+            employment_income_by_household=((100.0,), (40.0,)),
+        ),
+        tmp_path / "baseline.h5",
+    )
+    spec = USMicroplexReducedBenchmarkSpec(
+        name="income_sum_by_state",
+        entity="person",
+        dimensions=(
+            USMicroplexReducedDimensionSpec(variable="state_fips", zero_pad=2),
+        ),
+        measures=(
+            USMicroplexReducedMeasureSpec(
+                name="weighted_income_sum",
+                aggregation="weighted_sum",
+                variable="employment_income_before_lsr",
+            ),
+        ),
+    )
+    with pytest.raises(ValueError, match="weighted_count measures only"):
+        reduced_benchmark_to_calibration_targets(spec, baseline_path, period=2024)
+
+
+def test_default_us_atomic_rung2_calibration_returns_expected_structure():
+    """Rung 2 returns household_count_by_state calibration spec and rung 0+1 evaluation specs."""
+    calibration_spec, evaluation_specs = default_us_atomic_rung2_calibration()
+    assert calibration_spec.name == "household_count_by_state"
+    assert calibration_spec.entity == "household"
+    assert len(calibration_spec.measures) == 1
+    assert calibration_spec.measures[0].aggregation == "weighted_count"
+
+    rung0_names = {spec.name for spec in default_us_atomic_rung0_benchmarks()}
+    rung1_names = {spec.name for spec in default_us_atomic_rung1_benchmarks()}
+    eval_names = {spec.name for spec in evaluation_specs}
+    assert eval_names == rung0_names | rung1_names
 
 
 def test_calibrate_and_evaluate_us_reduced_benchmarks_improves_state_count_surface(
