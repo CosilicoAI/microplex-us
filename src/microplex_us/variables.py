@@ -10,9 +10,11 @@ import numpy as np
 import pandas as pd
 from microplex.core import EntityType, SourceVariableCapability
 from microplex.core.semantics import (
+    FrameSemanticCheck,
     FrameSemanticTransform,
     SemanticTransformStage,
     apply_frame_semantic_transforms,
+    evaluate_frame_semantic_checks,
 )
 
 
@@ -74,6 +76,7 @@ class VariableSemanticSpec:
     derived_from: tuple[str, ...] = ()
     donor_match_strategy: DonorMatchStrategy = DonorMatchStrategy.RANK
     donor_transform: FrameSemanticTransform | None = None
+    donor_check: FrameSemanticCheck | None = None
     notes: str | None = None
 
     def is_redundant_given(self, variable_names: Iterable[str]) -> bool:
@@ -118,6 +121,15 @@ def zero_minor_employment_income(frame: pd.DataFrame) -> pd.DataFrame:
     )
     result.loc[minor_mask, "employment_income"] = 0.0
     return result
+
+
+def minor_positive_employment_income_mask(frame: pd.DataFrame) -> pd.Series:
+    """Return rows where minors still carry positive employment income."""
+    if "employment_income" not in frame.columns or "age" not in frame.columns:
+        return pd.Series(False, index=frame.index, dtype=bool)
+    ages = pd.to_numeric(frame["age"], errors="coerce")
+    income = pd.to_numeric(frame["employment_income"], errors="coerce").fillna(0.0)
+    return ages.lt(18).fillna(False) & income.gt(0.0)
 
 
 VARIABLE_SEMANTIC_SPECS: dict[str, VariableSemanticSpec] = {
@@ -294,6 +306,13 @@ VARIABLE_SEMANTIC_SPECS: dict[str, VariableSemanticSpec] = {
             transform_frame=zero_minor_employment_income,
             stage=SemanticTransformStage.POST_DONOR_INTEGRATION,
             notes="Employment income donor overrides should not assign positive wages to minors.",
+        ),
+        donor_check=FrameSemanticCheck(
+            name="minor_positive_employment_income",
+            required_columns=("employment_income", "age"),
+            violation_mask=minor_positive_employment_income_mask,
+            stage=SemanticTransformStage.POST_DONOR_INTEGRATION,
+            notes="Minors should not retain positive donor-overridden wage income.",
         ),
         notes="Employment income donor overrides should not assign positive wages to minors.",
     ),
@@ -648,6 +667,22 @@ def apply_donor_variable_semantics(
         transforms.append(transform)
         seen_transform_names.add(transform.name)
     return apply_frame_semantic_transforms(frame, transforms)
+
+
+def validate_donor_variable_semantics(
+    frame: pd.DataFrame,
+    variable_names: Iterable[str],
+):
+    """Evaluate semantic checks for donor-integrated variables."""
+    checks: list[FrameSemanticCheck] = []
+    seen_check_names: set[str] = set()
+    for variable_name in tuple(dict.fromkeys(variable_names)):
+        check = variable_semantic_spec_for(variable_name).donor_check
+        if check is None or check.name in seen_check_names:
+            continue
+        checks.append(check)
+        seen_check_names.add(check.name)
+    return evaluate_frame_semantic_checks(frame, checks)
 
 
 def resolve_variable_semantic_capabilities(

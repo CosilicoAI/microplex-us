@@ -22,6 +22,7 @@ from microplex_us.variables import (
     resolve_condition_entities_for_targets,
     resolve_variable_semantic_capabilities,
     restore_dividend_components_from_composition,
+    validate_donor_variable_semantics,
 )
 
 
@@ -284,3 +285,36 @@ def test_employment_income_donor_semantics_zero_minor_wages():
     adjusted = apply_donor_variable_semantics(frame, ("employment_income",))
 
     assert adjusted["employment_income"].tolist() == [0.0, 25_000.0]
+
+
+def test_validate_donor_variable_semantics_reports_minor_positive_wages():
+    frame = pd.DataFrame(
+        {
+            "age": [16.0, 19.0],
+            "employment_income": [50_000.0, 25_000.0],
+        }
+    )
+
+    reports = validate_donor_variable_semantics(frame, ("employment_income",))
+
+    assert len(reports) == 1
+    assert reports[0].name == "minor_positive_employment_income"
+    assert reports[0].evaluated is True
+    assert reports[0].violating_row_count == 1
+    assert reports[0].passed is False
+
+
+def test_validate_donor_variable_semantics_passes_after_minor_wage_guard():
+    frame = pd.DataFrame(
+        {
+            "age": [16.0, 19.0],
+            "employment_income": [50_000.0, 25_000.0],
+        }
+    )
+
+    adjusted = apply_donor_variable_semantics(frame, ("employment_income",))
+    reports = validate_donor_variable_semantics(adjusted, ("employment_income",))
+
+    assert len(reports) == 1
+    assert reports[0].violating_row_count == 0
+    assert reports[0].passed is True
