@@ -219,6 +219,8 @@ def test_load_cps_asec_caches_household_geography_on_persons(tmp_path):
     assert "is_disabled" in first.persons.columns
     assert "social_security_disability" in first.persons.columns
     assert "social_security_retirement" in first.persons.columns
+    assert "social_security_survivors" in first.persons.columns
+    assert "social_security_dependents" in first.persons.columns
     assert "receives_wic" in first.persons.columns
     assert "has_marketplace_health_coverage" in first.persons.columns
     assert "has_esi" in first.persons.columns
@@ -228,11 +230,13 @@ def test_load_cps_asec_caches_household_geography_on_persons(tmp_path):
     assert cached_persons["is_hispanic"].to_list() == [False, True, False]
     assert cached_persons["is_disabled"].to_list() == [False, True, False]
     assert cached_persons["social_security_disability"].to_list() == [0.0, 9000.0, 0.0]
-    assert cached_persons["social_security_retirement"].to_list() == [0.0, 0.0, 1200.0]
+    assert cached_persons["social_security_retirement"].to_list() == [0.0, 0.0, 0.0]
+    assert cached_persons["social_security_survivors"].to_list() == [0.0, 0.0, 0.0]
+    assert cached_persons["social_security_dependents"].to_list() == [0.0, 0.0, 0.0]
     assert cached_persons["receives_wic"].to_list() == [True, False, False]
     assert cached_persons["has_marketplace_health_coverage"].to_list() == [True, False, False]
     assert cached_persons["has_esi"].to_list() == [False, True, False]
-    assert second.source.endswith("cps_asec_2023_processed_v20260401.parquet")
+    assert second.source.endswith("cps_asec_2023_processed_v20260403.parquet")
     assert sorted(second.households["state_fips"].to_list()) == [6, 36]
     assert sorted(second.households["county_fips"].to_list()) == [1, 61]
 
@@ -274,11 +278,37 @@ def test_load_cps_asec_derives_policyengine_value_inputs(tmp_path):
     assert persons["disability_benefits"].tolist() == [550, 25]
     assert persons["social_security_disability"].tolist() == [1200, 0]
     assert persons["social_security_retirement"].tolist() == [0, 800]
+    assert persons["social_security_survivors"].tolist() == [0, 0]
+    assert persons["social_security_dependents"].tolist() == [0, 0]
     assert persons["receives_wic"].tolist() == [True, False]
     assert persons["health_insurance_premiums_without_medicare_part_b"].tolist() == [900, 0]
     assert persons["over_the_counter_health_expenses"].tolist() == [120, 0]
     assert persons["other_medical_expenses"].tolist() == [450, 0]
     assert persons["medicare_part_b_premiums"].tolist() == [600, 0]
+
+
+def test_load_cps_asec_derives_survivor_and_dependent_social_security(tmp_path):
+    person_rows = pd.DataFrame(
+        {
+            "PH_SEQ": [1, 1, 1, 1],
+            "A_LINENO": [1, 2, 3, 4],
+            "A_AGE": [70, 40, 12, 10],
+            "A_FNLWGT": [100, 100, 100, 100],
+            "RESNSS1": [3, 5, 4, 6],
+            "RESNSS2": [0, 0, 0, 0],
+            "SS_VAL": [1000, 1100, 1200, 1300],
+        }
+    )
+    with zipfile.ZipFile(tmp_path / "cps_asec_2023.zip", "w") as archive:
+        archive.writestr("pppub23.csv", person_rows.to_csv(index=False))
+
+    dataset = load_cps_asec(year=2023, cache_dir=tmp_path, download=False)
+    persons = dataset.persons.to_pandas().sort_values("person_number").reset_index(drop=True)
+
+    assert persons["social_security_survivors"].tolist() == [1000.0, 1100.0, 0.0, 0.0]
+    assert persons["social_security_dependents"].tolist() == [0.0, 0.0, 1200.0, 1300.0]
+    assert persons["social_security_retirement"].tolist() == [0.0, 0.0, 0.0, 0.0]
+    assert persons["social_security_disability"].tolist() == [0.0, 0.0, 0.0, 0.0]
 
 
 def test_cps_source_provider_repeat_loads_are_deterministic_for_cached_processed_data(
@@ -297,6 +327,9 @@ def test_cps_source_provider_repeat_loads_are_deterministic_for_cached_processed
             "is_hispanic": [False, True, False, False, True],
             "is_disabled": [False, False, False, True, False],
             "social_security_disability": [0.0] * 5,
+            "social_security_retirement": [0.0] * 5,
+            "social_security_survivors": [0.0] * 5,
+            "social_security_dependents": [0.0] * 5,
             "has_esi": [True, False, True, False, False],
             "has_marketplace_health_coverage": [False, True, False, False, True],
             "receives_wic": [False] * 5,

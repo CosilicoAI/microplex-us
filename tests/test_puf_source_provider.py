@@ -7,7 +7,43 @@ from microplex.core import EntityType, SourceArchetype, SourceProvider, SourceQu
 
 import microplex_us.data_sources.puf as puf_module
 from microplex_us.data_sources import PUFSourceProvider, expand_to_persons
-from microplex_us.data_sources.puf import _sample_tax_units, map_puf_variables
+from microplex_us.data_sources.puf import (
+    _impute_puf_social_security_components,
+    _sample_tax_units,
+    map_puf_variables,
+)
+from microplex_us.data_sources.share_imputation import fit_grouped_share_model
+
+
+def _mock_social_security_share_model_loader(*_args):
+    reference = pd.DataFrame(
+        {
+            "age_bucket": [
+                "under_18",
+                "18_to_29",
+                "30_to_44",
+                "45_to_61",
+                "62_to_74",
+                "75_plus",
+            ],
+            "weight": [1.0] * 6,
+            "social_security_retirement": [0.0, 0.0, 0.0, 0.0, 1.0, 1.0],
+            "social_security_disability": [0.0, 1.0, 1.0, 1.0, 0.0, 0.0],
+            "social_security_survivors": [0.0] * 6,
+            "social_security_dependents": [1.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+        }
+    )
+    return fit_grouped_share_model(
+        reference,
+        explicit_component_columns=(
+            "social_security_retirement",
+            "social_security_disability",
+            "social_security_survivors",
+        ),
+        implicit_component_column="social_security_dependents",
+        feature_sets=(("age_bucket",),),
+        weight_column="weight",
+    )
 
 
 def test_expand_to_persons_preserves_joint_tax_unit_monetary_totals():
@@ -72,6 +108,25 @@ def test_expand_to_persons_derives_retirement_social_security_for_older_records(
     assert persons["social_security_retirement"].tolist() == [40.0, 0.0]
 
 
+def test_impute_puf_social_security_components_uses_grouped_cps_shares():
+    persons = pd.DataFrame(
+        {
+            "age": [12, 40, 70],
+            "social_security": [100.0, 200.0, 300.0],
+        }
+    )
+
+    result = _impute_puf_social_security_components(
+        persons,
+        share_model=_mock_social_security_share_model_loader(),
+    )
+
+    assert result["social_security_dependents"].tolist() == [100.0, 0.0, 0.0]
+    assert result["social_security_disability"].tolist() == [0.0, 200.0, 0.0]
+    assert result["social_security_retirement"].tolist() == [0.0, 0.0, 300.0]
+    assert result["social_security_survivors"].tolist() == [0.0, 0.0, 0.0]
+
+
 def test_expand_to_persons_splits_negative_joint_self_employment_losses():
     tax_units = pd.DataFrame(
         {
@@ -115,6 +170,7 @@ def test_puf_source_provider_loads_observation_frame_from_local_files(tmp_path):
         puf_path=puf_path,
         demographics_path=demographics_path,
         target_year=2024,
+        social_security_share_model_loader=_mock_social_security_share_model_loader,
     )
     frame = provider.load_frame(
         SourceQuery(period=2024, provider_filters={"sample_n": 1, "random_seed": 0})
@@ -152,6 +208,7 @@ def test_puf_source_provider_sampling_respects_tax_unit_weights(tmp_path):
         puf_path=puf_path,
         demographics_path=demographics_path,
         target_year=2024,
+        social_security_share_model_loader=_mock_social_security_share_model_loader,
     )
     frame = provider.load_frame(
         SourceQuery(period=2024, provider_filters={"sample_n": 1, "random_seed": 0})
@@ -185,6 +242,7 @@ def test_puf_source_provider_marks_placeholder_and_derived_variables_in_capabili
         puf_path=puf_path,
         demographics_path=demographics_path,
         target_year=2024,
+        social_security_share_model_loader=_mock_social_security_share_model_loader,
     )
     frame = provider.load_frame(SourceQuery(period=2024))
     descriptor = frame.source
@@ -223,6 +281,7 @@ def test_puf_source_provider_does_not_duplicate_joint_tax_unit_financial_income(
         puf_path=puf_path,
         demographics_path=demographics_path,
         target_year=2015,
+        social_security_share_model_loader=_mock_social_security_share_model_loader,
     )
     frame = provider.load_frame(SourceQuery(period=2015))
     persons = frame.tables[EntityType.PERSON]
@@ -351,6 +410,7 @@ def test_puf_source_provider_age_imputation_is_reproducible_with_same_seed(tmp_p
         puf_path=puf_path,
         demographics_path=demographics_path,
         target_year=2024,
+        social_security_share_model_loader=_mock_social_security_share_model_loader,
     )
     query = SourceQuery(period=2024, provider_filters={"sample_n": 3, "random_seed": 7})
     first = provider.load_frame(query)

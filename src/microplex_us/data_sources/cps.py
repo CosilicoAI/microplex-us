@@ -33,7 +33,7 @@ from microplex_us.source_registry import resolve_source_variable_capabilities
 
 # Default cache directory
 DEFAULT_CACHE_DIR = Path.home() / ".cache" / "microplex"
-CPS_ASEC_PROCESSED_CACHE_VERSION = "20260402"
+CPS_ASEC_PROCESSED_CACHE_VERSION = "20260403"
 
 # CPS ASEC data URLs by year
 CPS_URLS = {
@@ -150,6 +150,9 @@ PERSON_NONNEGATIVE_VALUE_COLUMNS = (
     "other_medical_expenses",
     "medicare_part_b_premiums",
     "social_security_disability",
+    "social_security_retirement",
+    "social_security_survivors",
+    "social_security_dependents",
 )
 
 PERSON_ZERO_DEFAULT_VALUE_COLUMNS = (
@@ -162,6 +165,9 @@ PERSON_ZERO_DEFAULT_VALUE_COLUMNS = (
     "other_medical_expenses",
     "medicare_part_b_premiums",
     "social_security_disability",
+    "social_security_retirement",
+    "social_security_survivors",
+    "social_security_dependents",
 )
 
 PERSON_CACHE_REQUIRED_COLUMNS = (
@@ -181,6 +187,9 @@ PERSON_CACHE_REQUIRED_COLUMNS = (
     "over_the_counter_health_expenses",
     "medicare_part_b_premiums",
     "social_security_disability",
+    "social_security_retirement",
+    "social_security_survivors",
+    "social_security_dependents",
     "receives_wic",
 )
 
@@ -197,6 +206,8 @@ WORKERS_COMP_DISABILITY_CODE = 1
 ALIMONY_OTHER_INCOME_CODE = 20
 SOCIAL_SECURITY_RETIREMENT_REASON_CODE = 1
 SOCIAL_SECURITY_DISABILITY_REASON_CODE = 2
+SOCIAL_SECURITY_SURVIVOR_REASON_CODES = (3, 5)
+SOCIAL_SECURITY_DEPENDENT_REASON_CODES = (4, 6, 7)
 MINIMUM_RETIREMENT_AGE = 62
 
 
@@ -784,6 +795,8 @@ def _process_persons(df: pl.DataFrame, year: int) -> pl.DataFrame:
     }.issubset(set(result.columns)) and (
         "social_security_disability" not in result.columns
         or "social_security_retirement" not in result.columns
+        or "social_security_survivors" not in result.columns
+        or "social_security_dependents" not in result.columns
     ):
         reason_1 = pl.col("_social_security_reason_1")
         reason_2 = pl.col("_social_security_reason_2")
@@ -795,10 +808,20 @@ def _process_persons(df: pl.DataFrame, year: int) -> pl.DataFrame:
             (reason_1 == SOCIAL_SECURITY_DISABILITY_REASON_CODE)
             | (reason_2 == SOCIAL_SECURITY_DISABILITY_REASON_CODE)
         )
+        has_survivor_reason = (
+            reason_1.is_in(SOCIAL_SECURITY_SURVIVOR_REASON_CODES)
+            | reason_2.is_in(SOCIAL_SECURITY_SURVIVOR_REASON_CODES)
+        )
+        has_dependent_reason = (
+            reason_1.is_in(SOCIAL_SECURITY_DEPENDENT_REASON_CODES)
+            | reason_2.is_in(SOCIAL_SECURITY_DEPENDENT_REASON_CODES)
+        )
         unclassified_social_security = (
             (pl.col("social_security") > 0)
             & ~has_retirement_reason
             & ~has_disability_reason
+            & ~has_survivor_reason
+            & ~has_dependent_reason
         )
         derived_columns: list[pl.Expr] = []
         if "social_security_disability" not in result.columns:
@@ -828,6 +851,31 @@ def _process_persons(df: pl.DataFrame, year: int) -> pl.DataFrame:
                     .then(pl.col("social_security"))
                     .otherwise(0.0)
                 ).alias("social_security_retirement")
+            )
+        if "social_security_survivors" not in result.columns:
+            derived_columns.append(
+                (
+                    pl.when(
+                        has_survivor_reason
+                        & ~has_retirement_reason
+                        & ~has_disability_reason
+                    )
+                    .then(pl.col("social_security"))
+                    .otherwise(0.0)
+                ).alias("social_security_survivors")
+            )
+        if "social_security_dependents" not in result.columns:
+            derived_columns.append(
+                (
+                    pl.when(
+                        has_dependent_reason
+                        & ~has_retirement_reason
+                        & ~has_disability_reason
+                        & ~has_survivor_reason
+                    )
+                    .then(pl.col("social_security"))
+                    .otherwise(0.0)
+                ).alias("social_security_dependents")
             )
         result = result.with_columns(derived_columns).drop(
             ["_social_security_reason_1", "_social_security_reason_2"]
