@@ -75,6 +75,8 @@ UPRATING_FACTORS = {
     "student_loan_interest": 1.20,
 }
 
+MINIMUM_SOCIAL_SECURITY_RETIREMENT_AGE = 62
+
 JOINT_HEAD_SHARE_ALLOCATION = {
     "employment_income": 0.6,
     "self_employment_income": 0.6,
@@ -325,6 +327,10 @@ def _add_derived_income_columns(df: pd.DataFrame) -> pd.DataFrame:
     )
     taxable_pension_income = _numeric_series(result, "taxable_pension_income")
     gross_social_security = _numeric_series(result, "gross_social_security")
+    if "age" in result.columns:
+        ages = pd.to_numeric(result["age"], errors="coerce").fillna(0.0).astype(float)
+    else:
+        ages = pd.Series(0.0, index=result.index, dtype=float)
     rental_income = _numeric_series(result, "rental_income")
     unemployment_compensation = _numeric_series(
         result,
@@ -341,6 +347,10 @@ def _add_derived_income_columns(df: pd.DataFrame) -> pd.DataFrame:
     )
     result["pension_income"] = taxable_pension_income
     result["social_security"] = gross_social_security
+    result["social_security_retirement"] = (
+        gross_social_security.where(ages >= MINIMUM_SOCIAL_SECURITY_RETIREMENT_AGE, 0.0)
+        .astype(float)
+    )
     result["income"] = (
         employment_income
         + self_employment_income

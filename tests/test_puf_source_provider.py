@@ -49,8 +49,27 @@ def test_expand_to_persons_preserves_joint_tax_unit_monetary_totals():
     assert persons["non_qualified_dividend_income"].sum() == 20.0
     assert persons["dividend_income"].sum() == 30.0
     assert persons["social_security"].sum() == 40.0
+    assert persons["social_security_retirement"].sum() == 0.0
     assert persons["pension_income"].sum() == 60.0
     assert persons["income"].sum() == 470.0
+
+
+def test_expand_to_persons_derives_retirement_social_security_for_older_records():
+    tax_units = pd.DataFrame(
+        {
+            "filing_status": ["SINGLE", "SINGLE"],
+            "gross_social_security": [40.0, 25.0],
+            "age": [68, 45],
+            "weight": [1.0, 1.0],
+            "household_id": ["older-household", "younger-household"],
+            "year": [2024, 2024],
+        }
+    )
+
+    persons = expand_to_persons(tax_units).sort_values("household_id").reset_index(drop=True)
+
+    assert persons["social_security"].tolist() == [40.0, 25.0]
+    assert persons["social_security_retirement"].tolist() == [40.0, 0.0]
 
 
 def test_expand_to_persons_splits_negative_joint_self_employment_losses():
