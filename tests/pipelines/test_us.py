@@ -345,10 +345,11 @@ class TestUSMicroplexPipeline:
         row = seed.iloc[0]
 
         assert row["social_security"] == 1_200.0
-        assert row["social_security_retirement"] == 1_000.0
+        assert row["social_security_retirement"] == 0.0
         assert row["social_security_disability"] == 200.0
         assert row["social_security_survivors"] == 0.0
         assert row["social_security_dependents"] == 0.0
+        assert row["social_security_unclassified"] == 1_000.0
 
     def test_build_targets(self, persons, households):
         pipeline = USMicroplexPipeline(USMicroplexBuildConfig())
@@ -2368,7 +2369,8 @@ class TestUSMicroplexPipeline:
             donor_inputs=[donor_input],
         )
 
-        assert integration["seed_data"]["social_security_retirement"].tolist() == [
+        assert integration["seed_data"]["social_security_retirement"].tolist() == [0.0, 0.0]
+        assert integration["seed_data"]["social_security_unclassified"].tolist() == [
             18_000.0,
             0.0,
         ]

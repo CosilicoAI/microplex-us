@@ -72,6 +72,7 @@ from microplex_us.variables import (
     normalize_social_security_columns,
     prune_redundant_variables,
     score_donor_condition_var,
+    social_security_retirement_compatible_amount,
     variable_semantic_spec_for,
 )
 
@@ -3723,7 +3724,9 @@ class USMicroplexPipeline:
         result["tax_exempt_public_pension_income"] = first_present(
             "tax_exempt_public_pension_income"
         )
-        result["social_security_retirement"] = first_present("social_security_retirement")
+        result["social_security_retirement"] = social_security_retirement_compatible_amount(
+            result
+        )
         result["social_security_disability"] = first_present("social_security_disability")
         result["social_security_survivors"] = first_present("social_security_survivors")
         result["social_security_dependents"] = first_present("social_security_dependents")

@@ -128,17 +128,13 @@ def suppress_retired_senior_employment_income_without_esi(
     frame: pd.DataFrame,
 ) -> pd.DataFrame:
     """Suppress donor-overridden wage income for retired seniors without ESI."""
-    required_columns = {"employment_income", "age", "has_esi", "social_security_retirement"}
+    required_columns = {"employment_income", "age", "has_esi"}
     if not required_columns.issubset(frame.columns):
         return frame
     ages = pd.to_numeric(frame["age"], errors="coerce")
     if ages.isna().all():
         return frame
-    social_security_income = (
-        pd.to_numeric(frame["social_security_retirement"], errors="coerce")
-        .fillna(0.0)
-        .astype(float)
-    )
+    social_security_income = social_security_retirement_compatible_amount(frame)
     has_esi = (
         pd.to_numeric(frame["has_esi"], errors="coerce")
         .fillna(0.0)
@@ -428,6 +424,7 @@ SOCIAL_SECURITY_COMPONENT_COLUMNS = (
     "social_security_survivors",
     "social_security_dependents",
 )
+SOCIAL_SECURITY_UNCLASSIFIED_COLUMN = "social_security_unclassified"
 
 
 def _nonnegative_series(frame: pd.DataFrame, column: str) -> pd.Series:
@@ -491,8 +488,8 @@ def normalize_dividend_columns(frame: pd.DataFrame) -> pd.DataFrame:
 def normalize_social_security_columns(frame: pd.DataFrame) -> pd.DataFrame:
     """Normalize Social Security onto an explicit component basis.
 
-    The current bridge is intentionally simple: preserve any observed component
-    columns and allocate any residual gross Social Security to retirement.
+    Preserve any observed component columns and store any remaining gross
+    Social Security residual as an explicit unclassified amount.
     """
     result = frame.copy()
     component_series = {
@@ -500,6 +497,7 @@ def normalize_social_security_columns(frame: pd.DataFrame) -> pd.DataFrame:
         for column in SOCIAL_SECURITY_COMPONENT_COLUMNS
     }
     component_sum = sum(component_series.values(), start=pd.Series(0.0, index=result.index))
+    existing_unclassified = _nonnegative_series(result, SOCIAL_SECURITY_UNCLASSIFIED_COLUMN)
 
     if "social_security" in result.columns:
         observed_total = _nonnegative_series(result, "social_security")
@@ -508,12 +506,12 @@ def normalize_social_security_columns(frame: pd.DataFrame) -> pd.DataFrame:
     normalized_total = pd.Series(
         np.maximum(
             observed_total.to_numpy(dtype=float),
-            component_sum.to_numpy(dtype=float),
+            (component_sum + existing_unclassified).to_numpy(dtype=float),
         ),
         index=result.index,
         dtype=float,
     )
-    residual = pd.Series(
+    unclassified = pd.Series(
         np.maximum(
             normalized_total.to_numpy(dtype=float) - component_sum.to_numpy(dtype=float),
             0.0,
@@ -521,18 +519,24 @@ def normalize_social_security_columns(frame: pd.DataFrame) -> pd.DataFrame:
         index=result.index,
         dtype=float,
     )
-    component_series["social_security_retirement"] = (
-        component_series["social_security_retirement"] + residual
-    ).astype(float)
-    normalized_total = sum(
-        component_series.values(),
-        start=pd.Series(0.0, index=result.index, dtype=float),
-    )
 
     for column, values in component_series.items():
         result[column] = values.astype(float)
+    result[SOCIAL_SECURITY_UNCLASSIFIED_COLUMN] = unclassified.astype(float)
     result["social_security"] = normalized_total.astype(float)
     return result
+
+
+def social_security_retirement_compatible_amount(frame: pd.DataFrame) -> pd.Series:
+    """Return the PE-compatible retirement component amount.
+
+    PolicyEngine models total Social Security as the sum of the four component
+    variables. Until we have a better backward allocator, treat any
+    unclassified residual as retirement at compatibility points.
+    """
+    retirement = _nonnegative_series(frame, "social_security_retirement")
+    unclassified = _nonnegative_series(frame, SOCIAL_SECURITY_UNCLASSIFIED_COLUMN)
+    return (retirement + unclassified).astype(float)
 
 
 def add_dividend_composition_features(frame: pd.DataFrame) -> pd.DataFrame:

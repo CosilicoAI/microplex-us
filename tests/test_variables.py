@@ -45,7 +45,7 @@ def test_normalize_dividend_columns_prefers_atomic_components_over_totals():
     assert normalized["dividend_income"].tolist() == [42.0]
 
 
-def test_normalize_social_security_columns_allocates_residual_to_retirement():
+def test_normalize_social_security_columns_tracks_unclassified_residual():
     frame = pd.DataFrame(
         {
             "gross_social_security": [1_000.0, 900.0, 0.0],
@@ -57,10 +57,11 @@ def test_normalize_social_security_columns_allocates_residual_to_retirement():
     normalized = normalize_social_security_columns(frame)
 
     assert normalized["social_security"].tolist() == [1_000.0, 900.0, 50.0]
-    assert normalized["social_security_retirement"].tolist() == [500.0, 900.0, 0.0]
+    assert normalized["social_security_retirement"].tolist() == [0.0, 0.0, 0.0]
     assert normalized["social_security_disability"].tolist() == [400.0, 0.0, 0.0]
     assert normalized["social_security_survivors"].tolist() == [100.0, 0.0, 50.0]
     assert normalized["social_security_dependents"].tolist() == [0.0, 0.0, 0.0]
+    assert normalized["social_security_unclassified"].tolist() == [500.0, 900.0, 0.0]
 
 
 def test_prune_redundant_variables_drops_dividend_totals_when_basis_present():
@@ -321,7 +322,7 @@ def test_employment_income_donor_semantics_zero_retired_senior_wages_without_esi
     assert adjusted["employment_income"].tolist() == [0.0, 80_000.0, 80_000.0]
 
 
-def test_employment_income_donor_semantics_normalizes_social_security_to_retirement():
+def test_employment_income_donor_semantics_uses_unclassified_social_security_compatibly():
     frame = pd.DataFrame(
         {
             "age": [68.0, 68.0, 68.0],
@@ -333,7 +334,8 @@ def test_employment_income_donor_semantics_normalizes_social_security_to_retirem
 
     adjusted = apply_donor_variable_semantics(frame, ("employment_income",))
 
-    assert adjusted["social_security_retirement"].tolist() == [18_000.0, 18_000.0, 0.0]
+    assert adjusted["social_security_retirement"].tolist() == [0.0, 0.0, 0.0]
+    assert adjusted["social_security_unclassified"].tolist() == [18_000.0, 18_000.0, 0.0]
     assert adjusted["employment_income"].tolist() == [0.0, 80_000.0, 80_000.0]
 
 
