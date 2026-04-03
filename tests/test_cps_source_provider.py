@@ -218,6 +218,7 @@ def test_load_cps_asec_caches_household_geography_on_persons(tmp_path):
     assert "is_hispanic" in first.persons.columns
     assert "is_disabled" in first.persons.columns
     assert "social_security_disability" in first.persons.columns
+    assert "social_security_retirement" in first.persons.columns
     assert "receives_wic" in first.persons.columns
     assert "has_marketplace_health_coverage" in first.persons.columns
     assert "has_esi" in first.persons.columns
@@ -227,6 +228,7 @@ def test_load_cps_asec_caches_household_geography_on_persons(tmp_path):
     assert cached_persons["is_hispanic"].to_list() == [False, True, False]
     assert cached_persons["is_disabled"].to_list() == [False, True, False]
     assert cached_persons["social_security_disability"].to_list() == [0.0, 9000.0, 0.0]
+    assert cached_persons["social_security_retirement"].to_list() == [0.0, 0.0, 1200.0]
     assert cached_persons["receives_wic"].to_list() == [True, False, False]
     assert cached_persons["has_marketplace_health_coverage"].to_list() == [True, False, False]
     assert cached_persons["has_esi"].to_list() == [False, True, False]
@@ -271,6 +273,7 @@ def test_load_cps_asec_derives_policyengine_value_inputs(tmp_path):
     assert persons["child_support_expense"].tolist() == [700, 0]
     assert persons["disability_benefits"].tolist() == [550, 25]
     assert persons["social_security_disability"].tolist() == [1200, 0]
+    assert persons["social_security_retirement"].tolist() == [0, 800]
     assert persons["receives_wic"].tolist() == [True, False]
     assert persons["health_insurance_premiums_without_medicare_part_b"].tolist() == [900, 0]
     assert persons["over_the_counter_health_expenses"].tolist() == [120, 0]

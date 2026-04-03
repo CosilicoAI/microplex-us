@@ -33,7 +33,7 @@ from microplex_us.source_registry import resolve_source_variable_capabilities
 
 # Default cache directory
 DEFAULT_CACHE_DIR = Path.home() / ".cache" / "microplex"
-CPS_ASEC_PROCESSED_CACHE_VERSION = "20260401"
+CPS_ASEC_PROCESSED_CACHE_VERSION = "20260402"
 
 # CPS ASEC data URLs by year
 CPS_URLS = {
@@ -781,7 +781,10 @@ def _process_persons(df: pl.DataFrame, year: int) -> pl.DataFrame:
         "_social_security_reason_2",
         "social_security",
         "age",
-    }.issubset(set(result.columns)) and "social_security_disability" not in result.columns:
+    }.issubset(set(result.columns)) and (
+        "social_security_disability" not in result.columns
+        or "social_security_retirement" not in result.columns
+    ):
         reason_1 = pl.col("_social_security_reason_1")
         reason_2 = pl.col("_social_security_reason_2")
         has_retirement_reason = (
@@ -797,19 +800,38 @@ def _process_persons(df: pl.DataFrame, year: int) -> pl.DataFrame:
             & ~has_retirement_reason
             & ~has_disability_reason
         )
-        result = result.with_columns(
-            (
-                pl.when(has_disability_reason & ~has_retirement_reason)
-                .then(pl.col("social_security"))
-                .otherwise(0.0)
-                + pl.when(
-                    unclassified_social_security
-                    & (pl.col("age") < MINIMUM_RETIREMENT_AGE)
-                )
-                .then(pl.col("social_security"))
-                .otherwise(0.0)
-            ).alias("social_security_disability")
-        ).drop(["_social_security_reason_1", "_social_security_reason_2"])
+        derived_columns: list[pl.Expr] = []
+        if "social_security_disability" not in result.columns:
+            derived_columns.append(
+                (
+                    pl.when(has_disability_reason & ~has_retirement_reason)
+                    .then(pl.col("social_security"))
+                    .otherwise(0.0)
+                    + pl.when(
+                        unclassified_social_security
+                        & (pl.col("age") < MINIMUM_RETIREMENT_AGE)
+                    )
+                    .then(pl.col("social_security"))
+                    .otherwise(0.0)
+                ).alias("social_security_disability")
+            )
+        if "social_security_retirement" not in result.columns:
+            derived_columns.append(
+                (
+                    pl.when(has_retirement_reason & ~has_disability_reason)
+                    .then(pl.col("social_security"))
+                    .otherwise(0.0)
+                    + pl.when(
+                        unclassified_social_security
+                        & (pl.col("age") >= MINIMUM_RETIREMENT_AGE)
+                    )
+                    .then(pl.col("social_security"))
+                    .otherwise(0.0)
+                ).alias("social_security_retirement")
+            )
+        result = result.with_columns(derived_columns).drop(
+            ["_social_security_reason_1", "_social_security_reason_2"]
+        )
     else:
         drop_columns = [
             column
