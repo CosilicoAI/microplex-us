@@ -103,14 +103,23 @@ def test_grouped_share_benchmark_is_exact_on_group_determined_family():
         train_frac=0.75,
         target_frac=0.1,
         random_seed=42,
+        repeat_count=3,
     )
 
     grouped = report.methods["grouped_share"]
     forest = report.methods["forest_share"]
     assert report.train_row_count + report.eval_row_count + report.target_row_count == report.row_count
+    assert report.repeat_count == 3
+    assert report.split_seeds == (42, 43, 44)
+    assert len(report.repeat_summaries) == 3
     assert grouped.component_group_sum_mare["social_security_retirement"] == 0.0
     assert grouped.component_group_sum_mare["social_security_disability"] == 0.0
     assert grouped.component_group_sum_mare["social_security_dependents"] == 0.0
+    assert grouped.repeat_metric_summary is not None
+    assert (
+        grouped.repeat_metric_summary["mean_component_total_relative_error"]["median"]
+        == grouped.mean_component_total_relative_error
+    )
     assert grouped.pre_target_mean_component_total_relative_error is not None
     assert grouped.pre_target_mean_component_total_relative_error > 0.0
     assert grouped.post_reweight_mean_component_total_relative_error == pytest.approx(0.0)
@@ -163,10 +172,13 @@ def test_qrf_benchmark_returns_expected_metric_surface():
         train_frac=0.75,
         target_frac=0.1,
         random_seed=1,
+        repeat_count=2,
     )
 
     qrf = report.methods["qrf"]
     forest = report.methods["forest_share"]
+    assert report.repeat_count == 2
+    assert len(report.repeat_summaries) == 2
     assert set(qrf.component_total_relative_error) == {
         "social_security_retirement",
         "social_security_disability",
@@ -178,6 +190,7 @@ def test_qrf_benchmark_returns_expected_metric_surface():
     assert qrf.post_reweight_mean_component_total_relative_error is not None
     assert qrf.oracle_pre_target_mean_component_total_relative_error is not None
     assert qrf.oracle_post_reweight_mean_component_total_relative_error is not None
+    assert qrf.repeat_metric_summary is not None
     assert qrf.post_reweight_mean_component_total_error_lift is not None
     assert set(forest.component_total_relative_error) == {
         "social_security_retirement",

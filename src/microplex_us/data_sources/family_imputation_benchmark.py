@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, fields
 from typing import Any
 
 import numpy as np
@@ -78,6 +78,7 @@ class FamilyImputationMethodBenchmark:
     post_reweight_excess_over_oracle_total_error: dict[str, float] | None = None
     post_reweight_mean_component_total_error_excess_over_oracle: float | None = None
     reweighting_summary: dict[str, Any] | None = None
+    repeat_metric_summary: dict[str, dict[str, float]] | None = None
 
 
 @dataclass(frozen=True)
@@ -90,6 +91,9 @@ class FamilyImputationBenchmarkResult:
     eval_row_count: int
     target_row_count: int
     methods: dict[str, FamilyImputationMethodBenchmark]
+    repeat_count: int = 1
+    split_seeds: tuple[int, ...] = ()
+    repeat_summaries: tuple[dict[str, Any], ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
         payload = asdict(self)
@@ -101,6 +105,38 @@ def _numeric_series(frame: pd.DataFrame, column: str) -> pd.Series:
     if column not in frame.columns:
         return pd.Series(0.0, index=frame.index, dtype=float)
     return pd.to_numeric(frame[column], errors="coerce").fillna(0.0).astype(float)
+
+
+def _median_or_none(values: list[float | None]) -> float | None:
+    numeric = [float(value) for value in values if value is not None]
+    if not numeric:
+        return None
+    return float(np.median(numeric))
+
+
+def _max_or_none(values: list[float | None]) -> float | None:
+    numeric = [float(value) for value in values if value is not None]
+    if not numeric:
+        return None
+    return float(max(numeric))
+
+
+def _aggregate_numeric_dicts(
+    dicts: list[dict[str, float] | None],
+) -> dict[str, float] | None:
+    keys = sorted({key for mapping in dicts if mapping is not None for key in mapping})
+    if not keys:
+        return None
+    aggregated = {
+        key: _median_or_none(
+            [
+                None if mapping is None else mapping.get(key)
+                for mapping in dicts
+            ]
+        )
+        for key in keys
+    }
+    return {key: float(value) for key, value in aggregated.items() if value is not None}
 
 
 def _build_positive_family_frame(
@@ -853,17 +889,141 @@ def _summarize_method(
     )
 
 
-def benchmark_decomposable_family_imputers(
+_REPEAT_SCALAR_FIELDS = (
+    "mean_component_total_relative_error",
+    "mean_component_support_relative_error",
+    "mean_component_group_sum_mare",
+    "pre_target_mean_component_total_relative_error",
+    "post_reweight_mean_component_total_relative_error",
+    "post_reweight_mean_component_support_relative_error",
+    "post_reweight_mean_component_group_sum_mare",
+    "post_reweight_mean_component_total_error_lift",
+    "oracle_pre_target_mean_component_total_relative_error",
+    "oracle_post_reweight_mean_component_total_relative_error",
+    "oracle_post_reweight_mean_component_total_error_lift",
+    "post_reweight_mean_component_total_error_excess_over_oracle",
+)
+
+
+def _aggregate_reweighting_summaries(
+    summaries: list[dict[str, Any] | None],
+    *,
+    repeat_count: int,
+) -> dict[str, Any] | None:
+    present = [summary for summary in summaries if summary is not None]
+    if not present:
+        return None
+    first = present[0]
+    aggregated: dict[str, Any] = {
+        "method": first.get("method"),
+        "initial_weight_mode": first.get("initial_weight_mode"),
+        "target_columns": first.get("target_columns"),
+        "target_count": first.get("target_count"),
+        "target_row_count": first.get("target_row_count"),
+        "eval_row_count": first.get("eval_row_count"),
+        "repeat_count": repeat_count,
+        "converged": all(bool(summary.get("converged")) for summary in present),
+        "converged_count": int(sum(bool(summary.get("converged")) for summary in present)),
+    }
+    numeric_fields = (
+        "max_error",
+        "n_iterations",
+        "initial_total_weight",
+        "final_total_weight",
+        "mean_abs_relative_weight_change",
+        "max_abs_relative_weight_change",
+        "share_rows_changed_gt_1pct",
+    )
+    for field_name in numeric_fields:
+        values = [
+            float(summary[field_name])
+            for summary in present
+            if summary.get(field_name) is not None
+        ]
+        if not values:
+            continue
+        aggregated[field_name] = float(np.median(values))
+        aggregated[f"{field_name}_worst"] = float(max(values))
+    return aggregated
+
+
+def _aggregate_method_benchmarks(
+    repeats: list[FamilyImputationMethodBenchmark],
+) -> FamilyImputationMethodBenchmark:
+    aggregated_values: dict[str, Any] = {}
+    repeat_metric_summary: dict[str, dict[str, float]] = {}
+    for field_info in fields(FamilyImputationMethodBenchmark):
+        field_name = field_info.name
+        if field_name in {"reweighting_summary", "repeat_metric_summary"}:
+            continue
+        values = [getattr(result, field_name) for result in repeats]
+        sample = next((value for value in values if value is not None), None)
+        if sample is None:
+            aggregated_values[field_name] = None
+            continue
+        if isinstance(sample, dict):
+            aggregated_values[field_name] = _aggregate_numeric_dicts(values)
+            continue
+        aggregated_values[field_name] = _median_or_none(values)
+        if field_name in _REPEAT_SCALAR_FIELDS and aggregated_values[field_name] is not None:
+            repeat_metric_summary[field_name] = {
+                "median": float(aggregated_values[field_name]),
+                "worst": float(_max_or_none(values)),
+            }
+    aggregated_values["reweighting_summary"] = _aggregate_reweighting_summaries(
+        [result.reweighting_summary for result in repeats],
+        repeat_count=len(repeats),
+    )
+    aggregated_values["repeat_metric_summary"] = repeat_metric_summary or None
+    return FamilyImputationMethodBenchmark(**aggregated_values)
+
+
+def _compact_repeat_summary(
+    result: FamilyImputationBenchmarkResult,
+    *,
+    repeat_index: int,
+    split_seed: int,
+) -> dict[str, Any]:
+    method_fields = (
+        "mean_component_total_relative_error",
+        "mean_component_support_relative_error",
+        "mean_component_group_sum_mare",
+        "pre_target_mean_component_total_relative_error",
+        "post_reweight_mean_component_total_relative_error",
+        "post_reweight_mean_component_support_relative_error",
+        "post_reweight_mean_component_group_sum_mare",
+        "post_reweight_mean_component_total_error_lift",
+        "oracle_pre_target_mean_component_total_relative_error",
+        "oracle_post_reweight_mean_component_total_relative_error",
+        "oracle_post_reweight_mean_component_total_error_lift",
+        "post_reweight_mean_component_total_error_excess_over_oracle",
+    )
+    methods = {
+        method_name: {
+            field_name: getattr(method_result, field_name)
+            for field_name in method_fields
+        }
+        for method_name, method_result in result.methods.items()
+    }
+    return {
+        "repeat_index": repeat_index,
+        "split_seed": split_seed,
+        "train_row_count": result.train_row_count,
+        "eval_row_count": result.eval_row_count,
+        "target_row_count": result.target_row_count,
+        "methods": methods,
+    }
+
+
+def _benchmark_decomposable_family_imputers_once(
     reference: pd.DataFrame,
     *,
     spec: DecomposableFamilyBenchmarkSpec,
-    train_frac: float = 0.8,
-    target_frac: float = 0.1,
-    random_seed: int = 42,
-    qrf_factory: Callable[..., Any] | None = None,
+    train_frac: float,
+    target_frac: float,
+    random_seed: int,
+    qrf_factory: Callable[..., Any] | None,
 ) -> FamilyImputationBenchmarkResult:
-    """Benchmark grouped-share and QRF imputers on a holdout split."""
-
     frame = _build_positive_family_frame(reference, spec=spec)
     train_frame, eval_frame, target_frame = _split_train_eval_target(
         frame,
@@ -917,4 +1077,69 @@ def benchmark_decomposable_family_imputers(
         eval_row_count=int(len(eval_frame)),
         target_row_count=int(len(target_frame)),
         methods=methods,
+    )
+
+
+def benchmark_decomposable_family_imputers(
+    reference: pd.DataFrame,
+    *,
+    spec: DecomposableFamilyBenchmarkSpec,
+    train_frac: float = 0.8,
+    target_frac: float = 0.1,
+    random_seed: int = 42,
+    repeat_count: int = 1,
+    repeat_seed_step: int = 1,
+    qrf_factory: Callable[..., Any] | None = None,
+) -> FamilyImputationBenchmarkResult:
+    """Benchmark grouped-share and QRF imputers on one or more holdout splits."""
+
+    if repeat_count < 1:
+        raise ValueError("repeat_count must be at least 1")
+    if repeat_seed_step < 1:
+        raise ValueError("repeat_seed_step must be at least 1")
+
+    repeat_results: list[FamilyImputationBenchmarkResult] = []
+    split_seeds = tuple(
+        int(random_seed + repeat_index * repeat_seed_step)
+        for repeat_index in range(repeat_count)
+    )
+    for split_seed in split_seeds:
+        repeat_results.append(
+            _benchmark_decomposable_family_imputers_once(
+                reference,
+                spec=spec,
+                train_frac=train_frac,
+                target_frac=target_frac,
+                random_seed=split_seed,
+                qrf_factory=qrf_factory,
+            )
+        )
+
+    first_result = repeat_results[0]
+    methods = {
+        method_name: _aggregate_method_benchmarks(
+            [result.methods[method_name] for result in repeat_results]
+        )
+        for method_name in first_result.methods
+    }
+    repeat_summaries = tuple(
+        _compact_repeat_summary(
+            result,
+            repeat_index=repeat_index,
+            split_seed=split_seed,
+        )
+        for repeat_index, (result, split_seed) in enumerate(
+            zip(repeat_results, split_seeds, strict=True)
+        )
+    )
+    return FamilyImputationBenchmarkResult(
+        spec=first_result.spec,
+        row_count=first_result.row_count,
+        train_row_count=first_result.train_row_count,
+        eval_row_count=first_result.eval_row_count,
+        target_row_count=first_result.target_row_count,
+        methods=methods,
+        repeat_count=repeat_count,
+        split_seeds=split_seeds,
+        repeat_summaries=repeat_summaries,
     )
