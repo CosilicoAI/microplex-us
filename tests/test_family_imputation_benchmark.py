@@ -96,6 +96,8 @@ def test_grouped_share_benchmark_is_exact_on_group_determined_family():
             qrf_condition_vars=("age", "is_male", "social_security"),
             implicit_component_column="social_security_dependents",
             group_eval_columns=("age_bucket",),
+            reweight_feature_sets=(("age_bucket",),),
+            reweight_initial_weight_mode="uniform",
             qrf_n_estimators=20,
         ),
         train_frac=0.75,
@@ -107,9 +109,14 @@ def test_grouped_share_benchmark_is_exact_on_group_determined_family():
     assert grouped.component_group_sum_mare["social_security_retirement"] == 0.0
     assert grouped.component_group_sum_mare["social_security_disability"] == 0.0
     assert grouped.component_group_sum_mare["social_security_dependents"] == 0.0
+    assert grouped.post_reweight_mean_component_total_relative_error == 0.0
+    assert grouped.post_reweight_mean_component_group_sum_mare == 0.0
+    assert grouped.reweighting_summary is not None
+    assert grouped.reweighting_summary["initial_weight_mode"] == "uniform"
     assert forest.component_group_sum_mare["social_security_retirement"] < 1.0
     assert forest.component_group_sum_mare["social_security_disability"] < 1.0
     assert forest.component_group_sum_mare["social_security_dependents"] < 1.0
+    assert forest.post_reweight_mean_component_total_relative_error is not None
 
 
 @pytest.mark.skipif(
@@ -132,6 +139,7 @@ def test_qrf_benchmark_returns_expected_metric_surface():
             qrf_condition_vars=("age", "is_male", "social_security"),
             implicit_component_column="social_security_dependents",
             group_eval_columns=("age_bucket",),
+            reweight_feature_sets=(("age_bucket",),),
             qrf_n_estimators=20,
         ),
         train_frac=0.75,
@@ -147,6 +155,7 @@ def test_qrf_benchmark_returns_expected_metric_surface():
         "social_security_dependents",
     }
     assert qrf.mean_component_total_relative_error >= 0.0
+    assert qrf.post_reweight_mean_component_total_relative_error is not None
     assert set(forest.component_total_relative_error) == {
         "social_security_retirement",
         "social_security_disability",
@@ -154,3 +163,4 @@ def test_qrf_benchmark_returns_expected_metric_surface():
         "social_security_dependents",
     }
     assert forest.mean_component_total_relative_error >= 0.0
+    assert forest.post_reweight_mean_component_total_relative_error is not None

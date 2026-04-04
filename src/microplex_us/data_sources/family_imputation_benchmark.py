@@ -8,6 +8,7 @@ from typing import Any
 
 import numpy as np
 import pandas as pd
+from microplex.calibration import Calibrator
 from sklearn.ensemble import RandomForestRegressor
 
 from microplex_us.data_sources.share_imputation import (
@@ -31,6 +32,11 @@ class DecomposableFamilyBenchmarkSpec:
     forest_condition_vars: tuple[str, ...] = ()
     forest_n_estimators: int = 200
     forest_min_samples_leaf: int = 5
+    reweight_feature_sets: tuple[tuple[str, ...], ...] = ()
+    reweight_method: str = "ipf"
+    reweight_max_iter: int = 100
+    reweight_tol: float = 1e-6
+    reweight_initial_weight_mode: str = "observed"
 
     @property
     def explicit_component_columns(self) -> tuple[str, ...]:
@@ -53,6 +59,13 @@ class FamilyImputationMethodBenchmark:
     mean_component_total_relative_error: float
     mean_component_support_relative_error: float
     mean_component_group_sum_mare: float | None
+    post_reweight_component_total_relative_error: dict[str, float] | None = None
+    post_reweight_component_support_relative_error: dict[str, float] | None = None
+    post_reweight_component_group_sum_mare: dict[str, float] | None = None
+    post_reweight_mean_component_total_relative_error: float | None = None
+    post_reweight_mean_component_support_relative_error: float | None = None
+    post_reweight_mean_component_group_sum_mare: float | None = None
+    reweighting_summary: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -230,6 +243,80 @@ def _component_group_sum_mare(
         ]
         results[column] = float(np.mean(errors)) if errors else 0.0
     return results
+
+
+def _combined_categorical_column(
+    frame: pd.DataFrame,
+    feature_set: tuple[str, ...],
+) -> pd.Series:
+    if len(feature_set) == 1:
+        return frame[feature_set[0]].astype("string").fillna("__MISSING__")
+    combined = frame.loc[:, list(feature_set)].astype("string").fillna("__MISSING__")
+    return combined.agg("||".join, axis=1)
+
+
+def _build_reweighting_targets(
+    frame: pd.DataFrame,
+    *,
+    spec: DecomposableFamilyBenchmarkSpec,
+) -> tuple[pd.DataFrame, dict[str, dict[str, float]]]:
+    if not spec.reweight_feature_sets:
+        return frame.copy(), {}
+    prepared = frame.copy()
+    targets: dict[str, dict[str, float]] = {}
+    weights = _numeric_series(prepared, spec.weight_column)
+    for feature_set in spec.reweight_feature_sets:
+        target_column = "__reweight__" + "__".join(feature_set)
+        prepared[target_column] = _combined_categorical_column(prepared, feature_set)
+        grouped = (
+            pd.DataFrame({target_column: prepared[target_column], "__weight": weights})
+            .groupby(target_column, dropna=False, observed=False)["__weight"]
+            .sum()
+        )
+        targets[target_column] = {
+            str(category): float(total)
+            for category, total in grouped.items()
+        }
+    return prepared, targets
+
+
+def _apply_reweighting(
+    actual_eval: pd.DataFrame,
+    predicted_eval: pd.DataFrame,
+    *,
+    spec: DecomposableFamilyBenchmarkSpec,
+) -> tuple[pd.DataFrame, dict[str, Any]] | None:
+    if not spec.reweight_feature_sets:
+        return None
+    actual_prepared, targets = _build_reweighting_targets(actual_eval, spec=spec)
+    predicted_prepared, _ = _build_reweighting_targets(predicted_eval, spec=spec)
+    if spec.reweight_initial_weight_mode == "uniform":
+        predicted_prepared[spec.weight_column] = 1.0
+    elif spec.reweight_initial_weight_mode != "observed":
+        raise ValueError(
+            "reweight_initial_weight_mode must be 'observed' or 'uniform'"
+        )
+    calibrator = Calibrator(
+        method=spec.reweight_method,
+        tol=spec.reweight_tol,
+        max_iter=spec.reweight_max_iter,
+    )
+    reweighted = calibrator.fit_transform(
+        predicted_prepared,
+        marginal_targets=targets,
+        weight_col=spec.weight_column,
+    )
+    validation = calibrator.validate(predicted_prepared, weight_col=spec.weight_column)
+    keep_columns = [spec.weight_column, *spec.group_eval_columns, *spec.component_columns]
+    return reweighted.loc[:, keep_columns].copy(), {
+        "converged": bool(validation["converged"]),
+        "max_error": float(validation["max_error"]),
+        "n_iterations": int(calibrator.n_iterations_),
+        "target_count": int(sum(len(values) for values in targets.values())),
+        "target_columns": sorted(targets.keys()),
+        "method": spec.reweight_method,
+        "initial_weight_mode": spec.reweight_initial_weight_mode,
+    }
 
 
 def _overall_component_shares(
@@ -469,8 +556,15 @@ def _summarize_method(
     *,
     spec: DecomposableFamilyBenchmarkSpec,
 ) -> FamilyImputationMethodBenchmark:
-    actual_eval = actual.loc[:, [spec.weight_column, *spec.component_columns, *spec.group_eval_columns]].copy()
-    predicted_eval = actual.loc[:, [spec.weight_column, *spec.group_eval_columns]].copy()
+    passthrough_columns = {
+        spec.weight_column,
+        *spec.group_eval_columns,
+        *spec.component_columns,
+    }
+    for feature_set in spec.reweight_feature_sets:
+        passthrough_columns.update(feature_set)
+    actual_eval = actual.loc[:, list(passthrough_columns)].copy()
+    predicted_eval = actual.loc[:, [column for column in passthrough_columns if column not in spec.component_columns]].copy()
     for column in spec.component_columns:
         predicted_eval[column] = _numeric_series(predicted_components, column)
 
@@ -512,6 +606,57 @@ def _summarize_method(
         group_columns=spec.group_eval_columns,
     )
 
+    post_reweight_total_error = None
+    post_reweight_support_error = None
+    post_reweight_group_sum_mare = None
+    post_reweight_mean_total_error = None
+    post_reweight_mean_support_error = None
+    post_reweight_mean_group_sum_mare = None
+    reweighting_summary = None
+    reweighted_result = _apply_reweighting(
+        actual_eval,
+        predicted_eval,
+        spec=spec,
+    )
+    if reweighted_result is not None:
+        reweighted_eval, reweighting_summary = reweighted_result
+        reweighted_totals = _weighted_component_totals(
+            reweighted_eval,
+            component_columns=spec.component_columns,
+            weight_column=spec.weight_column,
+        )
+        post_reweight_total_error = {
+            column: _relative_error(reweighted_totals[column], actual_totals[column])
+            for column in spec.component_columns
+        }
+        reweighted_support = _weighted_component_support(
+            reweighted_eval,
+            component_columns=spec.component_columns,
+            weight_column=spec.weight_column,
+        )
+        post_reweight_support_error = {
+            column: _relative_error(reweighted_support[column], actual_support[column])
+            for column in spec.component_columns
+        }
+        post_reweight_group_sum_mare = _component_group_sum_mare(
+            actual_eval,
+            reweighted_eval,
+            component_columns=spec.component_columns,
+            weight_column=spec.weight_column,
+            group_columns=spec.group_eval_columns,
+        )
+        post_reweight_mean_total_error = float(
+            np.mean(list(post_reweight_total_error.values()))
+        )
+        post_reweight_mean_support_error = float(
+            np.mean(list(post_reweight_support_error.values()))
+        )
+        post_reweight_mean_group_sum_mare = (
+            float(np.mean(list(post_reweight_group_sum_mare.values())))
+            if post_reweight_group_sum_mare
+            else None
+        )
+
     return FamilyImputationMethodBenchmark(
         component_total_relative_error=total_relative_error,
         component_support_relative_error=support_relative_error,
@@ -523,6 +668,13 @@ def _summarize_method(
         mean_component_group_sum_mare=(
             float(np.mean(list(group_sum_mare.values()))) if group_sum_mare else None
         ),
+        post_reweight_component_total_relative_error=post_reweight_total_error,
+        post_reweight_component_support_relative_error=post_reweight_support_error,
+        post_reweight_component_group_sum_mare=post_reweight_group_sum_mare,
+        post_reweight_mean_component_total_relative_error=post_reweight_mean_total_error,
+        post_reweight_mean_component_support_relative_error=post_reweight_mean_support_error,
+        post_reweight_mean_component_group_sum_mare=post_reweight_mean_group_sum_mare,
+        reweighting_summary=reweighting_summary,
     )
 
 
