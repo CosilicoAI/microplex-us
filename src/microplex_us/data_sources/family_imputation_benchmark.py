@@ -59,16 +59,22 @@ class FamilyImputationMethodBenchmark:
     mean_component_total_relative_error: float
     mean_component_support_relative_error: float
     mean_component_group_sum_mare: float | None
+    pre_target_component_total_relative_error: dict[str, float] | None = None
+    pre_target_mean_component_total_relative_error: float | None = None
     post_reweight_component_total_relative_error: dict[str, float] | None = None
     post_reweight_component_support_relative_error: dict[str, float] | None = None
     post_reweight_component_group_sum_mare: dict[str, float] | None = None
     post_reweight_mean_component_total_relative_error: float | None = None
     post_reweight_mean_component_support_relative_error: float | None = None
     post_reweight_mean_component_group_sum_mare: float | None = None
-    post_reweight_total_error_degradation: dict[str, float] | None = None
-    post_reweight_mean_component_total_error_degradation: float | None = None
+    post_reweight_total_error_lift: dict[str, float] | None = None
+    post_reweight_mean_component_total_error_lift: float | None = None
+    oracle_pre_target_component_total_relative_error: dict[str, float] | None = None
+    oracle_pre_target_mean_component_total_relative_error: float | None = None
     oracle_post_reweight_component_total_relative_error: dict[str, float] | None = None
     oracle_post_reweight_mean_component_total_relative_error: float | None = None
+    oracle_post_reweight_total_error_lift: dict[str, float] | None = None
+    oracle_post_reweight_mean_component_total_error_lift: float | None = None
     post_reweight_excess_over_oracle_total_error: dict[str, float] | None = None
     post_reweight_mean_component_total_error_excess_over_oracle: float | None = None
     reweighting_summary: dict[str, Any] | None = None
@@ -340,6 +346,7 @@ def _apply_reweighting(
         raise ValueError(
             "reweight_initial_weight_mode must be 'observed' or 'uniform'"
         )
+    initial_weights = _numeric_series(eval_prepared, spec.weight_column).copy()
     calibrator = Calibrator(
         method=spec.reweight_method,
         tol=spec.reweight_tol,
@@ -351,6 +358,9 @@ def _apply_reweighting(
         weight_col=spec.weight_column,
     )
     validation = calibrator.validate(eval_prepared, weight_col=spec.weight_column)
+    final_weights = _numeric_series(reweighted, spec.weight_column)
+    denom = initial_weights.abs().clip(lower=1e-9)
+    relative_change = (final_weights - initial_weights).abs() / denom
     keep_columns = [spec.weight_column, *spec.group_eval_columns, *spec.component_columns]
     return reweighted.loc[:, keep_columns].copy(), {
         "converged": bool(validation["converged"]),
@@ -362,6 +372,11 @@ def _apply_reweighting(
         "initial_weight_mode": spec.reweight_initial_weight_mode,
         "target_row_count": int(len(target_prepared)),
         "eval_row_count": int(len(eval_prepared)),
+        "initial_total_weight": float(initial_weights.sum()),
+        "final_total_weight": float(final_weights.sum()),
+        "mean_abs_relative_weight_change": float(relative_change.mean()),
+        "max_abs_relative_weight_change": float(relative_change.max()),
+        "share_rows_changed_gt_1pct": float((relative_change > 0.01).mean()),
     }
 
 
@@ -664,6 +679,42 @@ def _summarize_method(
         component_columns=spec.component_columns,
         weight_column=spec.weight_column,
     )
+    if spec.reweight_initial_weight_mode == "uniform":
+        start_weights = pd.Series(1.0, index=actual_eval.index, dtype=float)
+    elif spec.reweight_initial_weight_mode == "observed":
+        start_weights = _numeric_series(actual_eval, spec.weight_column)
+    else:
+        raise ValueError("reweight_initial_weight_mode must be 'observed' or 'uniform'")
+
+    pre_target_eval = predicted_eval.copy()
+    pre_target_eval[spec.weight_column] = start_weights.to_numpy(dtype=float)
+    pre_target_totals = _weighted_component_totals(
+        pre_target_eval,
+        component_columns=spec.component_columns,
+        weight_column=spec.weight_column,
+    )
+    pre_target_total_error = {
+        column: _relative_error(pre_target_totals[column], target_totals[column])
+        for column in spec.component_columns
+    }
+    pre_target_mean_total_error = float(
+        np.mean(list(pre_target_total_error.values()))
+    )
+
+    oracle_pre_target_eval = actual_eval.copy()
+    oracle_pre_target_eval[spec.weight_column] = start_weights.to_numpy(dtype=float)
+    oracle_pre_target_totals = _weighted_component_totals(
+        oracle_pre_target_eval,
+        component_columns=spec.component_columns,
+        weight_column=spec.weight_column,
+    )
+    oracle_pre_target_total_error = {
+        column: _relative_error(oracle_pre_target_totals[column], target_totals[column])
+        for column in spec.component_columns
+    }
+    oracle_pre_target_mean_total_error = float(
+        np.mean(list(oracle_pre_target_total_error.values()))
+    )
 
     post_reweight_total_error = None
     post_reweight_support_error = None
@@ -671,8 +722,10 @@ def _summarize_method(
     post_reweight_mean_total_error = None
     post_reweight_mean_support_error = None
     post_reweight_mean_group_sum_mare = None
-    post_reweight_total_error_degradation = None
-    post_reweight_mean_total_error_degradation = None
+    post_reweight_total_error_lift = None
+    post_reweight_mean_total_error_lift = None
+    oracle_post_reweight_total_error_lift = None
+    oracle_post_reweight_mean_total_error_lift = None
     oracle_post_reweight_total_error = None
     oracle_post_reweight_mean_total_error = None
     post_reweight_excess_over_oracle_total_error = None
@@ -743,6 +796,14 @@ def _summarize_method(
             oracle_post_reweight_mean_total_error = float(
                 np.mean(list(oracle_post_reweight_total_error.values()))
             )
+            oracle_post_reweight_total_error_lift = {
+                column: oracle_post_reweight_total_error[column]
+                - oracle_pre_target_total_error[column]
+                for column in spec.component_columns
+            }
+            oracle_post_reweight_mean_total_error_lift = float(
+                np.mean(list(oracle_post_reweight_total_error_lift.values()))
+            )
             post_reweight_excess_over_oracle_total_error = {
                 column: post_reweight_total_error[column]
                 - oracle_post_reweight_total_error[column]
@@ -751,12 +812,12 @@ def _summarize_method(
             post_reweight_mean_total_error_excess_over_oracle = float(
                 np.mean(list(post_reweight_excess_over_oracle_total_error.values()))
             )
-        post_reweight_total_error_degradation = {
-            column: post_reweight_total_error[column] - total_relative_error[column]
+        post_reweight_total_error_lift = {
+            column: post_reweight_total_error[column] - pre_target_total_error[column]
             for column in spec.component_columns
         }
-        post_reweight_mean_total_error_degradation = float(
-            np.mean(list(post_reweight_total_error_degradation.values()))
+        post_reweight_mean_total_error_lift = float(
+            np.mean(list(post_reweight_total_error_lift.values()))
         )
 
     return FamilyImputationMethodBenchmark(
@@ -770,16 +831,22 @@ def _summarize_method(
         mean_component_group_sum_mare=(
             float(np.mean(list(group_sum_mare.values()))) if group_sum_mare else None
         ),
+        pre_target_component_total_relative_error=pre_target_total_error,
+        pre_target_mean_component_total_relative_error=pre_target_mean_total_error,
         post_reweight_component_total_relative_error=post_reweight_total_error,
         post_reweight_component_support_relative_error=post_reweight_support_error,
         post_reweight_component_group_sum_mare=post_reweight_group_sum_mare,
         post_reweight_mean_component_total_relative_error=post_reweight_mean_total_error,
         post_reweight_mean_component_support_relative_error=post_reweight_mean_support_error,
         post_reweight_mean_component_group_sum_mare=post_reweight_mean_group_sum_mare,
-        post_reweight_total_error_degradation=post_reweight_total_error_degradation,
-        post_reweight_mean_component_total_error_degradation=post_reweight_mean_total_error_degradation,
+        post_reweight_total_error_lift=post_reweight_total_error_lift,
+        post_reweight_mean_component_total_error_lift=post_reweight_mean_total_error_lift,
+        oracle_pre_target_component_total_relative_error=oracle_pre_target_total_error,
+        oracle_pre_target_mean_component_total_relative_error=oracle_pre_target_mean_total_error,
         oracle_post_reweight_component_total_relative_error=oracle_post_reweight_total_error,
         oracle_post_reweight_mean_component_total_relative_error=oracle_post_reweight_mean_total_error,
+        oracle_post_reweight_total_error_lift=oracle_post_reweight_total_error_lift,
+        oracle_post_reweight_mean_component_total_error_lift=oracle_post_reweight_mean_total_error_lift,
         post_reweight_excess_over_oracle_total_error=post_reweight_excess_over_oracle_total_error,
         post_reweight_mean_component_total_error_excess_over_oracle=post_reweight_mean_total_error_excess_over_oracle,
         reweighting_summary=reweighting_summary,
