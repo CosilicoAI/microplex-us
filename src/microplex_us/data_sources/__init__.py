@@ -41,6 +41,13 @@ from microplex_us.data_sources.cps_transform import (
     TransformedDataset,
     transform_cps_to_cosilico,
 )
+from microplex_us.data_sources.family_imputation_benchmark import (
+    DecomposableFamilyBenchmarkSpec,
+    FamilyImputationBenchmarkResult,
+    FamilyImputationMethodBenchmark,
+    benchmark_decomposable_family_imputers,
+    reconcile_component_predictions_to_total,
+)
 from microplex_us.data_sources.psid import (
     PSID_TO_MICROPLEX_VARS,
     PSIDDataset,
@@ -93,6 +100,12 @@ __all__ = [
     # Transform
     "TransformedDataset",
     "transform_cps_to_cosilico",
+    # Family imputation benchmarks
+    "DecomposableFamilyBenchmarkSpec",
+    "FamilyImputationMethodBenchmark",
+    "FamilyImputationBenchmarkResult",
+    "benchmark_decomposable_family_imputers",
+    "reconcile_component_predictions_to_total",
     # PUF loading
     "load_puf",
     "PUFSourceProvider",
