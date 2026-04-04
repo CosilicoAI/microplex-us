@@ -7,6 +7,7 @@ import pytest
 
 from microplex_us.data_sources.family_imputation_benchmark import (
     DecomposableFamilyBenchmarkSpec,
+    _mask_share_predictions_to_supported_components,
     benchmark_decomposable_family_imputers,
     reconcile_component_predictions_to_total,
 )
@@ -80,6 +81,33 @@ def test_reconcile_component_predictions_to_total_respects_total_and_fallback():
     assert reconciled.iloc[1]["dep"] == 2.5
 
 
+def test_support_gated_mask_keeps_top_supported_components():
+    predicted_shares = pd.DataFrame(
+        {
+            "ret": [0.40, 0.40],
+            "dis": [0.35, 0.35],
+            "surv": [0.25, 0.25],
+        }
+    )
+    support_probabilities = pd.DataFrame(
+        {
+            "ret": [0.90, 0.80],
+            "dis": [0.10, 0.70],
+            "surv": [0.20, 0.10],
+        }
+    )
+    masked = _mask_share_predictions_to_supported_components(
+        predicted_shares,
+        support_probabilities,
+        predicted_active_counts=[1, 1],
+        component_columns=("ret", "dis", "surv"),
+        support_gate_probability_threshold=0.5,
+    )
+
+    assert masked.iloc[0].to_dict() == {"ret": 0.40, "dis": 0.0, "surv": 0.0}
+    assert masked.iloc[1].to_dict() == {"ret": 0.40, "dis": 0.35, "surv": 0.0}
+
+
 def test_grouped_share_benchmark_is_exact_on_group_determined_family():
     frame = _toy_family_frame()
     report = benchmark_decomposable_family_imputers(
@@ -108,6 +136,7 @@ def test_grouped_share_benchmark_is_exact_on_group_determined_family():
 
     grouped = report.methods["grouped_share"]
     forest = report.methods["forest_share"]
+    support_gated = report.methods["support_gated_forest_share"]
     assert report.train_row_count + report.eval_row_count + report.target_row_count == report.row_count
     assert report.repeat_count == 3
     assert report.split_seeds == (42, 43, 44)
@@ -144,6 +173,13 @@ def test_grouped_share_benchmark_is_exact_on_group_determined_family():
     assert forest.oracle_post_reweight_mean_component_total_relative_error is not None
     assert forest.post_reweight_mean_component_total_error_lift is not None
     assert forest.post_reweight_mean_component_total_error_excess_over_oracle is not None
+    assert support_gated.mean_component_total_relative_error >= 0.0
+    assert support_gated.mean_component_support_relative_error >= 0.0
+    assert support_gated.pre_target_mean_component_total_relative_error is not None
+    assert support_gated.post_reweight_mean_component_total_relative_error is not None
+    assert support_gated.oracle_pre_target_mean_component_total_relative_error is not None
+    assert support_gated.oracle_post_reweight_mean_component_total_relative_error is not None
+    assert support_gated.post_reweight_mean_component_total_error_excess_over_oracle is not None
 
 
 @pytest.mark.skipif(
@@ -177,6 +213,7 @@ def test_qrf_benchmark_returns_expected_metric_surface():
 
     qrf = report.methods["qrf"]
     forest = report.methods["forest_share"]
+    support_gated = report.methods["support_gated_forest_share"]
     assert report.repeat_count == 2
     assert len(report.repeat_summaries) == 2
     assert set(qrf.component_total_relative_error) == {
@@ -203,3 +240,12 @@ def test_qrf_benchmark_returns_expected_metric_surface():
     assert forest.post_reweight_mean_component_total_relative_error is not None
     assert forest.oracle_pre_target_mean_component_total_relative_error is not None
     assert forest.oracle_post_reweight_mean_component_total_relative_error is not None
+    assert set(support_gated.component_total_relative_error) == {
+        "social_security_retirement",
+        "social_security_disability",
+        "social_security_survivors",
+        "social_security_dependents",
+    }
+    assert support_gated.mean_component_total_relative_error >= 0.0
+    assert support_gated.post_reweight_mean_component_total_relative_error is not None
+    assert support_gated.oracle_post_reweight_mean_component_total_relative_error is not None
