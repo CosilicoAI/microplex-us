@@ -8,6 +8,7 @@ from typing import Any
 
 import numpy as np
 import pandas as pd
+from sklearn.ensemble import RandomForestRegressor
 
 from microplex_us.data_sources.share_imputation import (
     fit_grouped_share_model,
@@ -27,6 +28,9 @@ class DecomposableFamilyBenchmarkSpec:
     weight_column: str = "weight"
     group_eval_columns: tuple[str, ...] = ()
     qrf_n_estimators: int = 100
+    forest_condition_vars: tuple[str, ...] = ()
+    forest_n_estimators: int = 200
+    forest_min_samples_leaf: int = 5
 
     @property
     def explicit_component_columns(self) -> tuple[str, ...]:
@@ -97,6 +101,29 @@ def _build_positive_family_frame(
     if frame.empty:
         raise ValueError("Benchmark requires at least one positive family-total row")
     return frame.reset_index(drop=True)
+
+
+def _encode_condition_frames(
+    train_frame: pd.DataFrame,
+    test_frame: pd.DataFrame,
+    *,
+    condition_columns: tuple[str, ...],
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    encoded_train = pd.DataFrame(index=train_frame.index)
+    encoded_test = pd.DataFrame(index=test_frame.index)
+    for column in condition_columns:
+        train_series = train_frame[column]
+        test_series = test_frame[column]
+        if pd.api.types.is_numeric_dtype(train_series):
+            encoded_train[column] = pd.to_numeric(train_series, errors="coerce").fillna(0.0)
+            encoded_test[column] = pd.to_numeric(test_series, errors="coerce").fillna(0.0)
+            continue
+        train_values = train_series.astype("string").fillna("__MISSING__")
+        test_values = test_series.astype("string").fillna("__MISSING__")
+        categories = pd.Index(train_values.unique(), dtype="object")
+        encoded_train[column] = pd.Categorical(train_values, categories=categories).codes.astype(float)
+        encoded_test[column] = pd.Categorical(test_values, categories=categories).codes.astype(float)
+    return encoded_train, encoded_test
 
 
 def _split_train_test(
@@ -222,6 +249,50 @@ def _overall_component_shares(
     return {column: value / total_sum for column, value in totals.items()}
 
 
+def _component_share_targets(
+    frame: pd.DataFrame,
+    *,
+    spec: DecomposableFamilyBenchmarkSpec,
+) -> pd.DataFrame:
+    total = _numeric_series(frame, spec.total_column)
+    safe_total = total.where(total > 0.0, 1.0)
+    shares = pd.DataFrame(index=frame.index)
+    for column in spec.component_columns:
+        shares[column] = (_numeric_series(frame, column) / safe_total).clip(lower=0.0)
+    row_sum = shares.sum(axis=1)
+    overfull = row_sum > 1.0
+    if overfull.any():
+        shares.loc[overfull, list(spec.component_columns)] = shares.loc[
+            overfull,
+            list(spec.component_columns),
+        ].div(row_sum.loc[overfull], axis=0)
+    shares.loc[total <= 0.0, list(spec.component_columns)] = 0.0
+    return shares.loc[:, list(spec.component_columns)]
+
+
+def _normalize_share_predictions(
+    shares: pd.DataFrame,
+    *,
+    component_columns: tuple[str, ...],
+    fallback_shares: dict[str, float],
+) -> pd.DataFrame:
+    result = pd.DataFrame(index=shares.index)
+    for column in component_columns:
+        result[column] = _numeric_series(shares, column).clip(lower=0.0)
+    row_sum = result.sum(axis=1)
+    positive = row_sum > 0.0
+    if positive.any():
+        result.loc[positive, list(component_columns)] = result.loc[
+            positive,
+            list(component_columns),
+        ].div(row_sum.loc[positive], axis=0)
+    zero_rows = ~positive
+    if zero_rows.any():
+        for column in component_columns:
+            result.loc[zero_rows, column] = float(fallback_shares[column])
+    return result.loc[:, list(component_columns)]
+
+
 def reconcile_component_predictions_to_total(
     predictions: pd.DataFrame,
     *,
@@ -307,15 +378,20 @@ def _qrf_predict(
     qrf_factory: Callable[..., Any] | None,
 ) -> pd.DataFrame:
     factory = qrf_factory or _default_qrf_factory
+    encoded_train, encoded_test = _encode_condition_frames(
+        train_frame,
+        test_frame,
+        condition_columns=spec.qrf_condition_vars,
+    )
     imputer = factory(
         condition_vars=list(spec.qrf_condition_vars),
         target_vars=list(spec.component_columns),
         n_estimators=spec.qrf_n_estimators,
     )
-    fit_frame = train_frame.loc[
-        :,
-        [*spec.qrf_condition_vars, *spec.component_columns, spec.weight_column],
-    ].copy()
+    fit_frame = encoded_train.copy()
+    for column in spec.component_columns:
+        fit_frame[column] = _numeric_series(train_frame, column)
+    fit_frame[spec.weight_column] = _numeric_series(train_frame, spec.weight_column)
     imputer.fit(
         fit_frame,
         weight_col=spec.weight_column,
@@ -325,7 +401,7 @@ def _qrf_predict(
         verbose=False,
     )
     generated = imputer.generate(
-        test_frame.loc[:, list(spec.qrf_condition_vars)].copy(),
+        encoded_test.copy(),
         seed=random_seed,
     )
     return reconcile_component_predictions_to_total(
@@ -334,6 +410,57 @@ def _qrf_predict(
         component_columns=spec.component_columns,
         fallback_shares=_overall_component_shares(train_frame, spec=spec),
     )
+
+
+def _forest_share_predict(
+    train_frame: pd.DataFrame,
+    test_frame: pd.DataFrame,
+    *,
+    spec: DecomposableFamilyBenchmarkSpec,
+    random_seed: int,
+) -> pd.DataFrame:
+    condition_columns = (
+        spec.forest_condition_vars if spec.forest_condition_vars else spec.qrf_condition_vars
+    )
+    encoded_train, encoded_test = _encode_condition_frames(
+        train_frame,
+        test_frame,
+        condition_columns=condition_columns,
+    )
+    model = RandomForestRegressor(
+        n_estimators=spec.forest_n_estimators,
+        min_samples_leaf=spec.forest_min_samples_leaf,
+        random_state=random_seed,
+        n_jobs=-1,
+    )
+    train_targets = _component_share_targets(train_frame, spec=spec)
+    train_weights = _numeric_series(train_frame, spec.weight_column)
+    if train_weights.sum() > 0.0:
+        model.fit(
+            encoded_train.to_numpy(dtype=float),
+            train_targets.to_numpy(dtype=float),
+            sample_weight=train_weights.to_numpy(dtype=float),
+        )
+    else:
+        model.fit(
+            encoded_train.to_numpy(dtype=float),
+            train_targets.to_numpy(dtype=float),
+        )
+    predicted_shares = pd.DataFrame(
+        model.predict(encoded_test.to_numpy(dtype=float)),
+        index=test_frame.index,
+        columns=list(spec.component_columns),
+    )
+    normalized = _normalize_share_predictions(
+        predicted_shares,
+        component_columns=spec.component_columns,
+        fallback_shares=_overall_component_shares(train_frame, spec=spec),
+    )
+    family_total = _numeric_series(test_frame, spec.total_column)
+    result = pd.DataFrame(index=test_frame.index)
+    for column in spec.component_columns:
+        result[column] = normalized[column] * family_total
+    return result.loc[:, list(spec.component_columns)]
 
 
 def _summarize_method(
@@ -433,6 +560,16 @@ def benchmark_decomposable_family_imputers(
         "grouped_share": _summarize_method(
             test_frame,
             grouped_predictions,
+            spec=spec,
+        ),
+        "forest_share": _summarize_method(
+            test_frame,
+            _forest_share_predict(
+                train_frame,
+                test_frame,
+                spec=spec,
+                random_seed=random_seed,
+            ),
             spec=spec,
         ),
         "qrf": _summarize_method(

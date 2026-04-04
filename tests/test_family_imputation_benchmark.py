@@ -103,9 +103,13 @@ def test_grouped_share_benchmark_is_exact_on_group_determined_family():
     )
 
     grouped = report.methods["grouped_share"]
+    forest = report.methods["forest_share"]
     assert grouped.component_group_sum_mare["social_security_retirement"] == 0.0
     assert grouped.component_group_sum_mare["social_security_disability"] == 0.0
     assert grouped.component_group_sum_mare["social_security_dependents"] == 0.0
+    assert forest.component_group_sum_mare["social_security_retirement"] < 1.0
+    assert forest.component_group_sum_mare["social_security_disability"] < 1.0
+    assert forest.component_group_sum_mare["social_security_dependents"] < 1.0
 
 
 @pytest.mark.skipif(
@@ -135,6 +139,7 @@ def test_qrf_benchmark_returns_expected_metric_surface():
     )
 
     qrf = report.methods["qrf"]
+    forest = report.methods["forest_share"]
     assert set(qrf.component_total_relative_error) == {
         "social_security_retirement",
         "social_security_disability",
@@ -142,3 +147,10 @@ def test_qrf_benchmark_returns_expected_metric_surface():
         "social_security_dependents",
     }
     assert qrf.mean_component_total_relative_error >= 0.0
+    assert set(forest.component_total_relative_error) == {
+        "social_security_retirement",
+        "social_security_disability",
+        "social_security_survivors",
+        "social_security_dependents",
+    }
+    assert forest.mean_component_total_relative_error >= 0.0
