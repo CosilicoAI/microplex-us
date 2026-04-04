@@ -101,22 +101,31 @@ def test_grouped_share_benchmark_is_exact_on_group_determined_family():
             qrf_n_estimators=20,
         ),
         train_frac=0.75,
+        target_frac=0.1,
         random_seed=42,
     )
 
     grouped = report.methods["grouped_share"]
     forest = report.methods["forest_share"]
+    assert report.train_row_count + report.eval_row_count + report.target_row_count == report.row_count
     assert grouped.component_group_sum_mare["social_security_retirement"] == 0.0
     assert grouped.component_group_sum_mare["social_security_disability"] == 0.0
     assert grouped.component_group_sum_mare["social_security_dependents"] == 0.0
-    assert grouped.post_reweight_mean_component_total_relative_error == 0.0
-    assert grouped.post_reweight_mean_component_group_sum_mare == 0.0
+    assert grouped.post_reweight_mean_component_total_relative_error == pytest.approx(0.0)
+    assert grouped.post_reweight_mean_component_group_sum_mare == pytest.approx(0.0)
+    assert grouped.post_reweight_mean_component_total_error_degradation == pytest.approx(0.0)
+    assert grouped.oracle_post_reweight_mean_component_total_relative_error == pytest.approx(0.0)
+    assert grouped.post_reweight_mean_component_total_error_excess_over_oracle == pytest.approx(0.0)
     assert grouped.reweighting_summary is not None
     assert grouped.reweighting_summary["initial_weight_mode"] == "uniform"
+    assert grouped.reweighting_summary["target_row_count"] == report.target_row_count
+    assert grouped.reweighting_summary["eval_row_count"] == report.eval_row_count
     assert forest.component_group_sum_mare["social_security_retirement"] < 1.0
     assert forest.component_group_sum_mare["social_security_disability"] < 1.0
     assert forest.component_group_sum_mare["social_security_dependents"] < 1.0
     assert forest.post_reweight_mean_component_total_relative_error is not None
+    assert forest.oracle_post_reweight_mean_component_total_relative_error is not None
+    assert forest.post_reweight_mean_component_total_error_excess_over_oracle is not None
 
 
 @pytest.mark.skipif(
@@ -143,6 +152,7 @@ def test_qrf_benchmark_returns_expected_metric_surface():
             qrf_n_estimators=20,
         ),
         train_frac=0.75,
+        target_frac=0.1,
         random_seed=1,
     )
 
@@ -156,6 +166,8 @@ def test_qrf_benchmark_returns_expected_metric_surface():
     }
     assert qrf.mean_component_total_relative_error >= 0.0
     assert qrf.post_reweight_mean_component_total_relative_error is not None
+    assert qrf.oracle_post_reweight_mean_component_total_relative_error is not None
+    assert qrf.post_reweight_mean_component_total_error_degradation is not None
     assert set(forest.component_total_relative_error) == {
         "social_security_retirement",
         "social_security_disability",
@@ -164,3 +176,4 @@ def test_qrf_benchmark_returns_expected_metric_surface():
     }
     assert forest.mean_component_total_relative_error >= 0.0
     assert forest.post_reweight_mean_component_total_relative_error is not None
+    assert forest.oracle_post_reweight_mean_component_total_relative_error is not None

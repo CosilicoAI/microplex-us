@@ -65,6 +65,12 @@ class FamilyImputationMethodBenchmark:
     post_reweight_mean_component_total_relative_error: float | None = None
     post_reweight_mean_component_support_relative_error: float | None = None
     post_reweight_mean_component_group_sum_mare: float | None = None
+    post_reweight_total_error_degradation: dict[str, float] | None = None
+    post_reweight_mean_component_total_error_degradation: float | None = None
+    oracle_post_reweight_component_total_relative_error: dict[str, float] | None = None
+    oracle_post_reweight_mean_component_total_relative_error: float | None = None
+    post_reweight_excess_over_oracle_total_error: dict[str, float] | None = None
+    post_reweight_mean_component_total_error_excess_over_oracle: float | None = None
     reweighting_summary: dict[str, Any] | None = None
 
 
@@ -75,7 +81,8 @@ class FamilyImputationBenchmarkResult:
     spec: DecomposableFamilyBenchmarkSpec
     row_count: int
     train_row_count: int
-    test_row_count: int
+    eval_row_count: int
+    target_row_count: int
     methods: dict[str, FamilyImputationMethodBenchmark]
 
     def to_dict(self) -> dict[str, Any]:
@@ -139,23 +146,36 @@ def _encode_condition_frames(
     return encoded_train, encoded_test
 
 
-def _split_train_test(
+def _split_train_eval_target(
     frame: pd.DataFrame,
     *,
     train_frac: float,
+    target_frac: float,
     random_seed: int,
-) -> tuple[pd.DataFrame, pd.DataFrame]:
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     if not 0.0 < train_frac < 1.0:
         raise ValueError("train_frac must be between 0 and 1")
-    if len(frame) < 2:
-        raise ValueError("Benchmark requires at least two rows to create a holdout split")
+    if not 0.0 < target_frac < 1.0:
+        raise ValueError("target_frac must be between 0 and 1")
+    if train_frac + target_frac >= 1.0:
+        raise ValueError("train_frac + target_frac must leave room for eval rows")
+    if len(frame) < 3:
+        raise ValueError("Benchmark requires at least three rows to create train/eval/target splits")
     rng = np.random.default_rng(random_seed)
-    mask = rng.random(len(frame)) < train_frac
-    if mask.all():
-        mask[rng.integers(len(frame))] = False
-    if (~mask).all():
-        mask[rng.integers(len(frame))] = True
-    return frame.loc[mask].reset_index(drop=True), frame.loc[~mask].reset_index(drop=True)
+    shuffled = frame.iloc[rng.permutation(len(frame))].reset_index(drop=True)
+    n_rows = len(shuffled)
+    n_train = max(1, int(np.floor(n_rows * train_frac)))
+    n_target = max(1, int(np.floor(n_rows * target_frac)))
+    if n_train + n_target >= n_rows:
+        n_target = max(1, n_rows - n_train - 1)
+    if n_train + n_target >= n_rows:
+        n_train = max(1, n_rows - n_target - 1)
+    train_frame = shuffled.iloc[:n_train].reset_index(drop=True)
+    target_frame = shuffled.iloc[n_train : n_train + n_target].reset_index(drop=True)
+    eval_frame = shuffled.iloc[n_train + n_target :].reset_index(drop=True)
+    if eval_frame.empty:
+        raise ValueError("Benchmark split produced no eval rows")
+    return train_frame, eval_frame, target_frame
 
 
 def _weighted_component_totals(
@@ -259,39 +279,63 @@ def _build_reweighting_targets(
     frame: pd.DataFrame,
     *,
     spec: DecomposableFamilyBenchmarkSpec,
+    required_categories_frame: pd.DataFrame | None = None,
 ) -> tuple[pd.DataFrame, dict[str, dict[str, float]]]:
     if not spec.reweight_feature_sets:
         return frame.copy(), {}
     prepared = frame.copy()
+    required_prepared = (
+        required_categories_frame.copy() if required_categories_frame is not None else None
+    )
     targets: dict[str, dict[str, float]] = {}
     weights = _numeric_series(prepared, spec.weight_column)
     for feature_set in spec.reweight_feature_sets:
         target_column = "__reweight__" + "__".join(feature_set)
         prepared[target_column] = _combined_categorical_column(prepared, feature_set)
+        if required_prepared is not None:
+            required_prepared[target_column] = _combined_categorical_column(
+                required_prepared,
+                feature_set,
+            )
         grouped = (
             pd.DataFrame({target_column: prepared[target_column], "__weight": weights})
             .groupby(target_column, dropna=False, observed=False)["__weight"]
             .sum()
         )
-        targets[target_column] = {
+        target_values = {
             str(category): float(total)
             for category, total in grouped.items()
         }
+        if required_prepared is not None:
+            required_categories = (
+                required_prepared[target_column]
+                .astype("string")
+                .fillna("__MISSING__")
+                .unique()
+                .tolist()
+            )
+            for category in required_categories:
+                target_values.setdefault(str(category), 0.0)
+        targets[target_column] = target_values
     return prepared, targets
 
 
 def _apply_reweighting(
-    actual_eval: pd.DataFrame,
-    predicted_eval: pd.DataFrame,
+    target_frame: pd.DataFrame,
+    eval_frame: pd.DataFrame,
     *,
     spec: DecomposableFamilyBenchmarkSpec,
 ) -> tuple[pd.DataFrame, dict[str, Any]] | None:
     if not spec.reweight_feature_sets:
         return None
-    actual_prepared, targets = _build_reweighting_targets(actual_eval, spec=spec)
-    predicted_prepared, _ = _build_reweighting_targets(predicted_eval, spec=spec)
+    target_prepared, targets = _build_reweighting_targets(
+        target_frame,
+        spec=spec,
+        required_categories_frame=eval_frame,
+    )
+    eval_prepared, _ = _build_reweighting_targets(eval_frame, spec=spec)
     if spec.reweight_initial_weight_mode == "uniform":
-        predicted_prepared[spec.weight_column] = 1.0
+        eval_prepared[spec.weight_column] = 1.0
     elif spec.reweight_initial_weight_mode != "observed":
         raise ValueError(
             "reweight_initial_weight_mode must be 'observed' or 'uniform'"
@@ -302,11 +346,11 @@ def _apply_reweighting(
         max_iter=spec.reweight_max_iter,
     )
     reweighted = calibrator.fit_transform(
-        predicted_prepared,
+        eval_prepared,
         marginal_targets=targets,
         weight_col=spec.weight_column,
     )
-    validation = calibrator.validate(predicted_prepared, weight_col=spec.weight_column)
+    validation = calibrator.validate(eval_prepared, weight_col=spec.weight_column)
     keep_columns = [spec.weight_column, *spec.group_eval_columns, *spec.component_columns]
     return reweighted.loc[:, keep_columns].copy(), {
         "converged": bool(validation["converged"]),
@@ -316,6 +360,8 @@ def _apply_reweighting(
         "target_columns": sorted(targets.keys()),
         "method": spec.reweight_method,
         "initial_weight_mode": spec.reweight_initial_weight_mode,
+        "target_row_count": int(len(target_prepared)),
+        "eval_row_count": int(len(eval_prepared)),
     }
 
 
@@ -551,7 +597,8 @@ def _forest_share_predict(
 
 
 def _summarize_method(
-    actual: pd.DataFrame,
+    actual_eval: pd.DataFrame,
+    target_eval: pd.DataFrame,
     predicted_components: pd.DataFrame,
     *,
     spec: DecomposableFamilyBenchmarkSpec,
@@ -563,8 +610,9 @@ def _summarize_method(
     }
     for feature_set in spec.reweight_feature_sets:
         passthrough_columns.update(feature_set)
-    actual_eval = actual.loc[:, list(passthrough_columns)].copy()
-    predicted_eval = actual.loc[:, [column for column in passthrough_columns if column not in spec.component_columns]].copy()
+    actual_eval = actual_eval.loc[:, list(passthrough_columns)].copy()
+    target_eval = target_eval.loc[:, list(passthrough_columns)].copy()
+    predicted_eval = actual_eval.loc[:, [column for column in passthrough_columns if column not in spec.component_columns]].copy()
     for column in spec.component_columns:
         predicted_eval[column] = _numeric_series(predicted_components, column)
 
@@ -606,15 +654,32 @@ def _summarize_method(
         group_columns=spec.group_eval_columns,
     )
 
+    target_totals = _weighted_component_totals(
+        target_eval,
+        component_columns=spec.component_columns,
+        weight_column=spec.weight_column,
+    )
+    target_support = _weighted_component_support(
+        target_eval,
+        component_columns=spec.component_columns,
+        weight_column=spec.weight_column,
+    )
+
     post_reweight_total_error = None
     post_reweight_support_error = None
     post_reweight_group_sum_mare = None
     post_reweight_mean_total_error = None
     post_reweight_mean_support_error = None
     post_reweight_mean_group_sum_mare = None
+    post_reweight_total_error_degradation = None
+    post_reweight_mean_total_error_degradation = None
+    oracle_post_reweight_total_error = None
+    oracle_post_reweight_mean_total_error = None
+    post_reweight_excess_over_oracle_total_error = None
+    post_reweight_mean_total_error_excess_over_oracle = None
     reweighting_summary = None
     reweighted_result = _apply_reweighting(
-        actual_eval,
+        target_eval,
         predicted_eval,
         spec=spec,
     )
@@ -626,7 +691,7 @@ def _summarize_method(
             weight_column=spec.weight_column,
         )
         post_reweight_total_error = {
-            column: _relative_error(reweighted_totals[column], actual_totals[column])
+            column: _relative_error(reweighted_totals[column], target_totals[column])
             for column in spec.component_columns
         }
         reweighted_support = _weighted_component_support(
@@ -635,11 +700,11 @@ def _summarize_method(
             weight_column=spec.weight_column,
         )
         post_reweight_support_error = {
-            column: _relative_error(reweighted_support[column], actual_support[column])
+            column: _relative_error(reweighted_support[column], target_support[column])
             for column in spec.component_columns
         }
         post_reweight_group_sum_mare = _component_group_sum_mare(
-            actual_eval,
+            target_eval,
             reweighted_eval,
             component_columns=spec.component_columns,
             weight_column=spec.weight_column,
@@ -655,6 +720,43 @@ def _summarize_method(
             float(np.mean(list(post_reweight_group_sum_mare.values())))
             if post_reweight_group_sum_mare
             else None
+        )
+        oracle_reweighted_result = _apply_reweighting(
+            target_eval,
+            actual_eval,
+            spec=spec,
+        )
+        if oracle_reweighted_result is not None:
+            oracle_reweighted_eval, _oracle_summary = oracle_reweighted_result
+            oracle_reweighted_totals = _weighted_component_totals(
+                oracle_reweighted_eval,
+                component_columns=spec.component_columns,
+                weight_column=spec.weight_column,
+            )
+            oracle_post_reweight_total_error = {
+                column: _relative_error(
+                    oracle_reweighted_totals[column],
+                    target_totals[column],
+                )
+                for column in spec.component_columns
+            }
+            oracle_post_reweight_mean_total_error = float(
+                np.mean(list(oracle_post_reweight_total_error.values()))
+            )
+            post_reweight_excess_over_oracle_total_error = {
+                column: post_reweight_total_error[column]
+                - oracle_post_reweight_total_error[column]
+                for column in spec.component_columns
+            }
+            post_reweight_mean_total_error_excess_over_oracle = float(
+                np.mean(list(post_reweight_excess_over_oracle_total_error.values()))
+            )
+        post_reweight_total_error_degradation = {
+            column: post_reweight_total_error[column] - total_relative_error[column]
+            for column in spec.component_columns
+        }
+        post_reweight_mean_total_error_degradation = float(
+            np.mean(list(post_reweight_total_error_degradation.values()))
         )
 
     return FamilyImputationMethodBenchmark(
@@ -674,6 +776,12 @@ def _summarize_method(
         post_reweight_mean_component_total_relative_error=post_reweight_mean_total_error,
         post_reweight_mean_component_support_relative_error=post_reweight_mean_support_error,
         post_reweight_mean_component_group_sum_mare=post_reweight_mean_group_sum_mare,
+        post_reweight_total_error_degradation=post_reweight_total_error_degradation,
+        post_reweight_mean_component_total_error_degradation=post_reweight_mean_total_error_degradation,
+        oracle_post_reweight_component_total_relative_error=oracle_post_reweight_total_error,
+        oracle_post_reweight_mean_component_total_relative_error=oracle_post_reweight_mean_total_error,
+        post_reweight_excess_over_oracle_total_error=post_reweight_excess_over_oracle_total_error,
+        post_reweight_mean_component_total_error_excess_over_oracle=post_reweight_mean_total_error_excess_over_oracle,
         reweighting_summary=reweighting_summary,
     )
 
@@ -683,26 +791,28 @@ def benchmark_decomposable_family_imputers(
     *,
     spec: DecomposableFamilyBenchmarkSpec,
     train_frac: float = 0.8,
+    target_frac: float = 0.1,
     random_seed: int = 42,
     qrf_factory: Callable[..., Any] | None = None,
 ) -> FamilyImputationBenchmarkResult:
     """Benchmark grouped-share and QRF imputers on a holdout split."""
 
     frame = _build_positive_family_frame(reference, spec=spec)
-    train_frame, test_frame = _split_train_test(
+    train_frame, eval_frame, target_frame = _split_train_eval_target(
         frame,
         train_frac=train_frac,
+        target_frac=target_frac,
         random_seed=random_seed,
     )
 
     grouped_predictions = _grouped_share_predict(
         train_frame,
-        test_frame,
+        eval_frame,
         spec=spec,
     )
     qrf_predictions = _qrf_predict(
         train_frame,
-        test_frame,
+        eval_frame,
         spec=spec,
         random_seed=random_seed,
         qrf_factory=qrf_factory,
@@ -710,22 +820,25 @@ def benchmark_decomposable_family_imputers(
 
     methods = {
         "grouped_share": _summarize_method(
-            test_frame,
+            eval_frame,
+            target_frame,
             grouped_predictions,
             spec=spec,
         ),
         "forest_share": _summarize_method(
-            test_frame,
+            eval_frame,
+            target_frame,
             _forest_share_predict(
                 train_frame,
-                test_frame,
+                eval_frame,
                 spec=spec,
                 random_seed=random_seed,
             ),
             spec=spec,
         ),
         "qrf": _summarize_method(
-            test_frame,
+            eval_frame,
+            target_frame,
             qrf_predictions,
             spec=spec,
         ),
@@ -734,6 +847,7 @@ def benchmark_decomposable_family_imputers(
         spec=spec,
         row_count=int(len(frame)),
         train_row_count=int(len(train_frame)),
-        test_row_count=int(len(test_frame)),
+        eval_row_count=int(len(eval_frame)),
+        target_row_count=int(len(target_frame)),
         methods=methods,
     )
