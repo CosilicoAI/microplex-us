@@ -34,6 +34,7 @@ class DecomposableFamilyBenchmarkSpec:
     forest_min_samples_leaf: int = 5
     support_gate_probability_threshold: float = 0.2
     forest_share_min_component_share: float = 0.05
+    qrf_support_augmentation_max_extra_components: int = 1
     reweight_feature_sets: tuple[tuple[str, ...], ...] = ()
     reweight_method: str = "ipf"
     reweight_max_iter: int = 100
@@ -656,6 +657,66 @@ def _mask_share_predictions_to_binary_support(
     return masked.loc[:, list(component_columns)]
 
 
+def _augment_sparse_shares_with_support_prior(
+    sparse_shares: pd.DataFrame,
+    base_share_scores: pd.DataFrame,
+    support_mask: pd.DataFrame,
+    *,
+    component_columns: tuple[str, ...],
+    max_extra_components: int,
+) -> pd.DataFrame:
+    augmented = sparse_shares.loc[:, list(component_columns)].copy()
+    if max_extra_components <= 0:
+        return augmented
+
+    for index in augmented.index:
+        sparse_row = (
+            augmented.loc[index, list(component_columns)].astype(float).clip(lower=0.0)
+        )
+        active_components = [
+            column for column in component_columns if float(sparse_row[column]) > 0.0
+        ]
+        supported_components = [
+            column
+            for column in component_columns
+            if float(support_mask.loc[index, column]) > 0.0
+        ]
+        missing_supported = [
+            column for column in supported_components if column not in active_components
+        ]
+        if not missing_supported:
+            continue
+
+        extra_budget = min(
+            max_extra_components,
+            max(0, len(supported_components) - len(active_components)),
+        )
+        if extra_budget <= 0:
+            continue
+
+        base_row = (
+            base_share_scores.loc[index, list(component_columns)]
+            .astype(float)
+            .clip(lower=0.0)
+        )
+        selected = (
+            base_row.loc[missing_supported]
+            .sort_values(ascending=False)
+            .index[:extra_budget]
+            .tolist()
+        )
+        if not selected:
+            continue
+
+        selected_scores = base_row.loc[selected]
+        if float(selected_scores.sum()) <= 0.0:
+            selected_scores = pd.Series(0.0, index=selected, dtype=float)
+            selected_scores.iloc[0] = 1.0
+        augmented.loc[index, selected] = selected_scores.to_numpy(dtype=float)
+
+    return augmented.loc[:, list(component_columns)]
+
+
 def reconcile_component_predictions_to_total(
     predictions: pd.DataFrame,
     *,
@@ -1014,6 +1075,78 @@ def _qrf_support_masked_forest_share_predict(
     result = pd.DataFrame(index=test_frame.index)
     for column in spec.component_columns:
         result[column] = normalized[column] * family_total
+    return result.loc[:, list(spec.component_columns)]
+
+
+def _qrf_augmented_sparse_forest_share_predict(
+    train_frame: pd.DataFrame,
+    test_frame: pd.DataFrame,
+    *,
+    spec: DecomposableFamilyBenchmarkSpec,
+    random_seed: int,
+    qrf_predictions: pd.DataFrame,
+) -> pd.DataFrame:
+    condition_columns = (
+        spec.forest_condition_vars if spec.forest_condition_vars else spec.qrf_condition_vars
+    )
+    encoded_train, encoded_test = _encode_condition_frames(
+        train_frame,
+        test_frame,
+        condition_columns=condition_columns,
+    )
+    model = RandomForestRegressor(
+        n_estimators=spec.forest_n_estimators,
+        min_samples_leaf=spec.forest_min_samples_leaf,
+        random_state=random_seed,
+        n_jobs=-1,
+    )
+    train_targets = _component_share_targets(train_frame, spec=spec)
+    train_weights = _numeric_series(train_frame, spec.weight_column)
+    if train_weights.sum() > 0.0:
+        model.fit(
+            encoded_train.to_numpy(dtype=float),
+            train_targets.to_numpy(dtype=float),
+            sample_weight=train_weights.to_numpy(dtype=float),
+        )
+    else:
+        model.fit(
+            encoded_train.to_numpy(dtype=float),
+            train_targets.to_numpy(dtype=float),
+        )
+    predicted_shares = pd.DataFrame(
+        model.predict(encoded_test.to_numpy(dtype=float)),
+        index=test_frame.index,
+        columns=list(spec.component_columns),
+    )
+    normalized = _normalize_share_predictions(
+        predicted_shares,
+        component_columns=spec.component_columns,
+        fallback_shares=_overall_component_shares(train_frame, spec=spec),
+    )
+    sparse = _sparsify_normalized_share_predictions(
+        normalized,
+        component_columns=spec.component_columns,
+        min_component_share=spec.forest_share_min_component_share,
+    )
+    qrf_support_mask = pd.DataFrame(index=test_frame.index)
+    for column in spec.component_columns:
+        qrf_support_mask[column] = (_numeric_series(qrf_predictions, column) > 0.0).astype(float)
+    augmented = _augment_sparse_shares_with_support_prior(
+        sparse,
+        normalized,
+        qrf_support_mask,
+        component_columns=spec.component_columns,
+        max_extra_components=spec.qrf_support_augmentation_max_extra_components,
+    )
+    renormalized = _normalize_share_predictions(
+        augmented,
+        component_columns=spec.component_columns,
+        fallback_shares=_overall_component_shares(train_frame, spec=spec),
+    )
+    family_total = _numeric_series(test_frame, spec.total_column)
+    result = pd.DataFrame(index=test_frame.index)
+    for column in spec.component_columns:
+        result[column] = renormalized[column] * family_total
     return result.loc[:, list(spec.component_columns)]
 
 
@@ -1459,6 +1592,18 @@ def _benchmark_decomposable_family_imputers_once(
             eval_frame,
             target_frame,
             _qrf_support_masked_forest_share_predict(
+                train_frame,
+                eval_frame,
+                spec=spec,
+                random_seed=random_seed,
+                qrf_predictions=qrf_predictions,
+            ),
+            spec=spec,
+        ),
+        "qrf_augmented_sparse_forest_share": _summarize_method(
+            eval_frame,
+            target_frame,
+            _qrf_augmented_sparse_forest_share_predict(
                 train_frame,
                 eval_frame,
                 spec=spec,

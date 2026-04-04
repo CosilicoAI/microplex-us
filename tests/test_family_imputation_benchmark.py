@@ -7,6 +7,7 @@ import pytest
 
 from microplex_us.data_sources.family_imputation_benchmark import (
     DecomposableFamilyBenchmarkSpec,
+    _augment_sparse_shares_with_support_prior,
     _mask_share_predictions_to_binary_support,
     _mask_share_predictions_to_supported_components,
     _sparsify_normalized_share_predictions,
@@ -135,6 +136,54 @@ def test_binary_support_mask_keeps_qrf_selected_components():
     assert masked.iloc[1].to_dict() == {"ret": 0.0, "dis": 0.35, "surv": 0.0}
 
 
+def test_sparse_support_augmentation_adds_only_limited_supported_components():
+    sparse_shares = pd.DataFrame(
+        {
+            "ret": [0.90, 0.80],
+            "dis": [0.10, 0.20],
+            "surv": [0.00, 0.00],
+            "dep": [0.00, 0.00],
+        }
+    )
+    base_scores = pd.DataFrame(
+        {
+            "ret": [0.90, 0.80],
+            "dis": [0.10, 0.20],
+            "surv": [0.04, 0.03],
+            "dep": [0.02, 0.01],
+        }
+    )
+    support_mask = pd.DataFrame(
+        {
+            "ret": [1.0, 1.0],
+            "dis": [0.0, 1.0],
+            "surv": [1.0, 1.0],
+            "dep": [1.0, 0.0],
+        }
+    )
+
+    augmented = _augment_sparse_shares_with_support_prior(
+        sparse_shares,
+        base_scores,
+        support_mask,
+        component_columns=("ret", "dis", "surv", "dep"),
+        max_extra_components=1,
+    )
+
+    assert augmented.iloc[0].to_dict() == {
+        "ret": 0.90,
+        "dis": 0.10,
+        "surv": 0.04,
+        "dep": 0.0,
+    }
+    assert augmented.iloc[1].to_dict() == {
+        "ret": 0.80,
+        "dis": 0.20,
+        "surv": 0.03,
+        "dep": 0.0,
+    }
+
+
 def test_sparsify_normalized_shares_drops_tiny_components():
     normalized = pd.DataFrame(
         {
@@ -188,6 +237,7 @@ def test_grouped_share_benchmark_is_exact_on_group_determined_family():
     sparse_forest = report.methods["sparse_forest_share"]
     support_gated = report.methods["support_gated_forest_share"]
     qrf_masked = report.methods["qrf_support_masked_forest_share"]
+    qrf_augmented_sparse = report.methods["qrf_augmented_sparse_forest_share"]
     assert report.train_row_count + report.eval_row_count + report.target_row_count == report.row_count
     assert report.repeat_count == 3
     assert report.split_seeds == (42, 43, 44)
@@ -245,6 +295,13 @@ def test_grouped_share_benchmark_is_exact_on_group_determined_family():
     assert qrf_masked.oracle_pre_target_mean_component_total_relative_error is not None
     assert qrf_masked.oracle_post_reweight_mean_component_total_relative_error is not None
     assert qrf_masked.post_reweight_mean_component_total_error_excess_over_oracle is not None
+    assert qrf_augmented_sparse.mean_component_total_relative_error >= 0.0
+    assert qrf_augmented_sparse.mean_component_support_relative_error >= 0.0
+    assert qrf_augmented_sparse.pre_target_mean_component_total_relative_error is not None
+    assert qrf_augmented_sparse.post_reweight_mean_component_total_relative_error is not None
+    assert qrf_augmented_sparse.oracle_pre_target_mean_component_total_relative_error is not None
+    assert qrf_augmented_sparse.oracle_post_reweight_mean_component_total_relative_error is not None
+    assert qrf_augmented_sparse.post_reweight_mean_component_total_error_excess_over_oracle is not None
 
 
 @pytest.mark.skipif(
