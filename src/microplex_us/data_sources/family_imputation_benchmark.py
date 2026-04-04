@@ -33,6 +33,7 @@ class DecomposableFamilyBenchmarkSpec:
     forest_n_estimators: int = 200
     forest_min_samples_leaf: int = 5
     support_gate_probability_threshold: float = 0.2
+    forest_share_min_component_share: float = 0.05
     reweight_feature_sets: tuple[tuple[str, ...], ...] = ()
     reweight_method: str = "ipf"
     reweight_max_iter: int = 100
@@ -556,6 +557,38 @@ def _normalize_share_predictions(
     return result.loc[:, list(component_columns)]
 
 
+def _sparsify_normalized_share_predictions(
+    shares: pd.DataFrame,
+    *,
+    component_columns: tuple[str, ...],
+    min_component_share: float,
+) -> pd.DataFrame:
+    sparsified = pd.DataFrame(0.0, index=shares.index, columns=list(component_columns))
+    for index in shares.index:
+        share_row = (
+            shares.loc[index, list(component_columns)]
+            .astype(float)
+            .clip(lower=0.0)
+        )
+        selected = share_row[share_row >= min_component_share].index
+        if len(selected) == 0:
+            selected = share_row.sort_values(ascending=False).index[:1]
+        selected_scores = share_row.loc[selected]
+        if float(selected_scores.sum()) <= 0.0:
+            selected_scores = pd.Series(0.0, index=selected, dtype=float)
+            selected_scores.iloc[0] = 1.0
+        sparsified.loc[index, selected] = selected_scores.to_numpy(dtype=float)
+
+    return _normalize_share_predictions(
+        sparsified,
+        component_columns=component_columns,
+        fallback_shares={
+            column: 1.0 / len(component_columns)
+            for column in component_columns
+        },
+    )
+
+
 def _mask_share_predictions_to_supported_components(
     predicted_shares: pd.DataFrame,
     support_probabilities: pd.DataFrame,
@@ -585,6 +618,36 @@ def _mask_share_predictions_to_supported_components(
         selected_scores = share_row.loc[selected]
         if float(selected_scores.sum()) <= 0.0:
             selected_scores = probability_row.loc[selected]
+        if float(selected_scores.sum()) <= 0.0:
+            selected_scores = pd.Series(0.0, index=selected, dtype=float)
+            selected_scores.iloc[0] = 1.0
+        masked.loc[index, selected] = selected_scores.to_numpy(dtype=float)
+
+    return masked.loc[:, list(component_columns)]
+
+
+def _mask_share_predictions_to_binary_support(
+    predicted_shares: pd.DataFrame,
+    support_mask: pd.DataFrame,
+    *,
+    component_columns: tuple[str, ...],
+) -> pd.DataFrame:
+    masked = pd.DataFrame(0.0, index=predicted_shares.index, columns=list(component_columns))
+
+    for index in predicted_shares.index:
+        share_row = (
+            predicted_shares.loc[index, list(component_columns)]
+            .astype(float)
+            .clip(lower=0.0)
+        )
+        selected = [
+            column
+            for column in component_columns
+            if float(support_mask.loc[index, column]) > 0.0
+        ]
+        if not selected:
+            selected = [share_row.sort_values(ascending=False).index[0]]
+        selected_scores = share_row.loc[selected]
         if float(selected_scores.sum()) <= 0.0:
             selected_scores = pd.Series(0.0, index=selected, dtype=float)
             selected_scores.iloc[0] = 1.0
@@ -763,6 +826,62 @@ def _forest_share_predict(
     return result.loc[:, list(spec.component_columns)]
 
 
+def _sparse_forest_share_predict(
+    train_frame: pd.DataFrame,
+    test_frame: pd.DataFrame,
+    *,
+    spec: DecomposableFamilyBenchmarkSpec,
+    random_seed: int,
+) -> pd.DataFrame:
+    condition_columns = (
+        spec.forest_condition_vars if spec.forest_condition_vars else spec.qrf_condition_vars
+    )
+    encoded_train, encoded_test = _encode_condition_frames(
+        train_frame,
+        test_frame,
+        condition_columns=condition_columns,
+    )
+    model = RandomForestRegressor(
+        n_estimators=spec.forest_n_estimators,
+        min_samples_leaf=spec.forest_min_samples_leaf,
+        random_state=random_seed,
+        n_jobs=-1,
+    )
+    train_targets = _component_share_targets(train_frame, spec=spec)
+    train_weights = _numeric_series(train_frame, spec.weight_column)
+    if train_weights.sum() > 0.0:
+        model.fit(
+            encoded_train.to_numpy(dtype=float),
+            train_targets.to_numpy(dtype=float),
+            sample_weight=train_weights.to_numpy(dtype=float),
+        )
+    else:
+        model.fit(
+            encoded_train.to_numpy(dtype=float),
+            train_targets.to_numpy(dtype=float),
+        )
+    predicted_shares = pd.DataFrame(
+        model.predict(encoded_test.to_numpy(dtype=float)),
+        index=test_frame.index,
+        columns=list(spec.component_columns),
+    )
+    normalized = _normalize_share_predictions(
+        predicted_shares,
+        component_columns=spec.component_columns,
+        fallback_shares=_overall_component_shares(train_frame, spec=spec),
+    )
+    sparsified = _sparsify_normalized_share_predictions(
+        normalized,
+        component_columns=spec.component_columns,
+        min_component_share=spec.forest_share_min_component_share,
+    )
+    family_total = _numeric_series(test_frame, spec.total_column)
+    result = pd.DataFrame(index=test_frame.index)
+    for column in spec.component_columns:
+        result[column] = sparsified[column] * family_total
+    return result.loc[:, list(spec.component_columns)]
+
+
 def _support_gated_forest_share_predict(
     train_frame: pd.DataFrame,
     test_frame: pd.DataFrame,
@@ -826,6 +945,65 @@ def _support_gated_forest_share_predict(
         predicted_active_counts,
         component_columns=spec.component_columns,
         support_gate_probability_threshold=spec.support_gate_probability_threshold,
+    )
+    normalized = _normalize_share_predictions(
+        masked_shares,
+        component_columns=spec.component_columns,
+        fallback_shares=_overall_component_shares(train_frame, spec=spec),
+    )
+    family_total = _numeric_series(test_frame, spec.total_column)
+    result = pd.DataFrame(index=test_frame.index)
+    for column in spec.component_columns:
+        result[column] = normalized[column] * family_total
+    return result.loc[:, list(spec.component_columns)]
+
+
+def _qrf_support_masked_forest_share_predict(
+    train_frame: pd.DataFrame,
+    test_frame: pd.DataFrame,
+    *,
+    spec: DecomposableFamilyBenchmarkSpec,
+    random_seed: int,
+    qrf_predictions: pd.DataFrame,
+) -> pd.DataFrame:
+    condition_columns = (
+        spec.forest_condition_vars if spec.forest_condition_vars else spec.qrf_condition_vars
+    )
+    encoded_train, encoded_test = _encode_condition_frames(
+        train_frame,
+        test_frame,
+        condition_columns=condition_columns,
+    )
+    train_weights = _numeric_series(train_frame, spec.weight_column)
+    positive_weights = (
+        train_weights
+        if float(train_weights.sum()) > 0.0
+        else pd.Series(1.0, index=train_frame.index)
+    )
+    predicted_shares = _component_share_targets(train_frame, spec=spec)
+    share_model = RandomForestRegressor(
+        n_estimators=spec.forest_n_estimators,
+        min_samples_leaf=spec.forest_min_samples_leaf,
+        random_state=random_seed,
+        n_jobs=-1,
+    )
+    share_model.fit(
+        encoded_train.to_numpy(dtype=float),
+        predicted_shares.to_numpy(dtype=float),
+        sample_weight=positive_weights.to_numpy(dtype=float),
+    )
+    raw_share_predictions = pd.DataFrame(
+        share_model.predict(encoded_test.to_numpy(dtype=float)),
+        index=test_frame.index,
+        columns=list(spec.component_columns),
+    )
+    qrf_support_mask = pd.DataFrame(index=test_frame.index)
+    for column in spec.component_columns:
+        qrf_support_mask[column] = (_numeric_series(qrf_predictions, column) > 0.0).astype(float)
+    masked_shares = _mask_share_predictions_to_binary_support(
+        raw_share_predictions,
+        qrf_support_mask,
+        component_columns=spec.component_columns,
     )
     normalized = _normalize_share_predictions(
         masked_shares,
@@ -1255,6 +1433,17 @@ def _benchmark_decomposable_family_imputers_once(
             ),
             spec=spec,
         ),
+        "sparse_forest_share": _summarize_method(
+            eval_frame,
+            target_frame,
+            _sparse_forest_share_predict(
+                train_frame,
+                eval_frame,
+                spec=spec,
+                random_seed=random_seed,
+            ),
+            spec=spec,
+        ),
         "support_gated_forest_share": _summarize_method(
             eval_frame,
             target_frame,
@@ -1263,6 +1452,18 @@ def _benchmark_decomposable_family_imputers_once(
                 eval_frame,
                 spec=spec,
                 random_seed=random_seed,
+            ),
+            spec=spec,
+        ),
+        "qrf_support_masked_forest_share": _summarize_method(
+            eval_frame,
+            target_frame,
+            _qrf_support_masked_forest_share_predict(
+                train_frame,
+                eval_frame,
+                spec=spec,
+                random_seed=random_seed,
+                qrf_predictions=qrf_predictions,
             ),
             spec=spec,
         ),

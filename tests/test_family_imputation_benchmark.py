@@ -7,7 +7,9 @@ import pytest
 
 from microplex_us.data_sources.family_imputation_benchmark import (
     DecomposableFamilyBenchmarkSpec,
+    _mask_share_predictions_to_binary_support,
     _mask_share_predictions_to_supported_components,
+    _sparsify_normalized_share_predictions,
     benchmark_decomposable_family_imputers,
     reconcile_component_predictions_to_total,
 )
@@ -108,6 +110,53 @@ def test_support_gated_mask_keeps_top_supported_components():
     assert masked.iloc[1].to_dict() == {"ret": 0.40, "dis": 0.35, "surv": 0.0}
 
 
+def test_binary_support_mask_keeps_qrf_selected_components():
+    predicted_shares = pd.DataFrame(
+        {
+            "ret": [0.40, 0.40],
+            "dis": [0.35, 0.35],
+            "surv": [0.25, 0.25],
+        }
+    )
+    support_mask = pd.DataFrame(
+        {
+            "ret": [1.0, 0.0],
+            "dis": [0.0, 1.0],
+            "surv": [1.0, 0.0],
+        }
+    )
+    masked = _mask_share_predictions_to_binary_support(
+        predicted_shares,
+        support_mask,
+        component_columns=("ret", "dis", "surv"),
+    )
+
+    assert masked.iloc[0].to_dict() == {"ret": 0.40, "dis": 0.0, "surv": 0.25}
+    assert masked.iloc[1].to_dict() == {"ret": 0.0, "dis": 0.35, "surv": 0.0}
+
+
+def test_sparsify_normalized_shares_drops_tiny_components():
+    normalized = pd.DataFrame(
+        {
+            "ret": [0.90, 0.04],
+            "dis": [0.07, 0.03],
+            "surv": [0.03, 0.93],
+        }
+    )
+    sparsified = _sparsify_normalized_share_predictions(
+        normalized,
+        component_columns=("ret", "dis", "surv"),
+        min_component_share=0.05,
+    )
+
+    assert sparsified.iloc[0]["ret"] == pytest.approx(0.9278350515463918)
+    assert sparsified.iloc[0]["dis"] == pytest.approx(0.07216494845360825)
+    assert sparsified.iloc[0]["surv"] == pytest.approx(0.0)
+    assert sparsified.iloc[1]["ret"] == pytest.approx(0.0)
+    assert sparsified.iloc[1]["dis"] == pytest.approx(0.0)
+    assert sparsified.iloc[1]["surv"] == pytest.approx(1.0)
+
+
 def test_grouped_share_benchmark_is_exact_on_group_determined_family():
     frame = _toy_family_frame()
     report = benchmark_decomposable_family_imputers(
@@ -136,7 +185,9 @@ def test_grouped_share_benchmark_is_exact_on_group_determined_family():
 
     grouped = report.methods["grouped_share"]
     forest = report.methods["forest_share"]
+    sparse_forest = report.methods["sparse_forest_share"]
     support_gated = report.methods["support_gated_forest_share"]
+    qrf_masked = report.methods["qrf_support_masked_forest_share"]
     assert report.train_row_count + report.eval_row_count + report.target_row_count == report.row_count
     assert report.repeat_count == 3
     assert report.split_seeds == (42, 43, 44)
@@ -173,6 +224,13 @@ def test_grouped_share_benchmark_is_exact_on_group_determined_family():
     assert forest.oracle_post_reweight_mean_component_total_relative_error is not None
     assert forest.post_reweight_mean_component_total_error_lift is not None
     assert forest.post_reweight_mean_component_total_error_excess_over_oracle is not None
+    assert sparse_forest.mean_component_total_relative_error >= 0.0
+    assert sparse_forest.mean_component_support_relative_error >= 0.0
+    assert sparse_forest.pre_target_mean_component_total_relative_error is not None
+    assert sparse_forest.post_reweight_mean_component_total_relative_error is not None
+    assert sparse_forest.oracle_pre_target_mean_component_total_relative_error is not None
+    assert sparse_forest.oracle_post_reweight_mean_component_total_relative_error is not None
+    assert sparse_forest.post_reweight_mean_component_total_error_excess_over_oracle is not None
     assert support_gated.mean_component_total_relative_error >= 0.0
     assert support_gated.mean_component_support_relative_error >= 0.0
     assert support_gated.pre_target_mean_component_total_relative_error is not None
@@ -180,6 +238,13 @@ def test_grouped_share_benchmark_is_exact_on_group_determined_family():
     assert support_gated.oracle_pre_target_mean_component_total_relative_error is not None
     assert support_gated.oracle_post_reweight_mean_component_total_relative_error is not None
     assert support_gated.post_reweight_mean_component_total_error_excess_over_oracle is not None
+    assert qrf_masked.mean_component_total_relative_error >= 0.0
+    assert qrf_masked.mean_component_support_relative_error >= 0.0
+    assert qrf_masked.pre_target_mean_component_total_relative_error is not None
+    assert qrf_masked.post_reweight_mean_component_total_relative_error is not None
+    assert qrf_masked.oracle_pre_target_mean_component_total_relative_error is not None
+    assert qrf_masked.oracle_post_reweight_mean_component_total_relative_error is not None
+    assert qrf_masked.post_reweight_mean_component_total_error_excess_over_oracle is not None
 
 
 @pytest.mark.skipif(
@@ -213,7 +278,9 @@ def test_qrf_benchmark_returns_expected_metric_surface():
 
     qrf = report.methods["qrf"]
     forest = report.methods["forest_share"]
+    sparse_forest = report.methods["sparse_forest_share"]
     support_gated = report.methods["support_gated_forest_share"]
+    qrf_masked = report.methods["qrf_support_masked_forest_share"]
     assert report.repeat_count == 2
     assert len(report.repeat_summaries) == 2
     assert set(qrf.component_total_relative_error) == {
@@ -240,6 +307,15 @@ def test_qrf_benchmark_returns_expected_metric_surface():
     assert forest.post_reweight_mean_component_total_relative_error is not None
     assert forest.oracle_pre_target_mean_component_total_relative_error is not None
     assert forest.oracle_post_reweight_mean_component_total_relative_error is not None
+    assert set(sparse_forest.component_total_relative_error) == {
+        "social_security_retirement",
+        "social_security_disability",
+        "social_security_survivors",
+        "social_security_dependents",
+    }
+    assert sparse_forest.mean_component_total_relative_error >= 0.0
+    assert sparse_forest.post_reweight_mean_component_total_relative_error is not None
+    assert sparse_forest.oracle_post_reweight_mean_component_total_relative_error is not None
     assert set(support_gated.component_total_relative_error) == {
         "social_security_retirement",
         "social_security_disability",
@@ -249,3 +325,12 @@ def test_qrf_benchmark_returns_expected_metric_surface():
     assert support_gated.mean_component_total_relative_error >= 0.0
     assert support_gated.post_reweight_mean_component_total_relative_error is not None
     assert support_gated.oracle_post_reweight_mean_component_total_relative_error is not None
+    assert set(qrf_masked.component_total_relative_error) == {
+        "social_security_retirement",
+        "social_security_disability",
+        "social_security_survivors",
+        "social_security_dependents",
+    }
+    assert qrf_masked.mean_component_total_relative_error >= 0.0
+    assert qrf_masked.post_reweight_mean_component_total_relative_error is not None
+    assert qrf_masked.oracle_post_reweight_mean_component_total_relative_error is not None
