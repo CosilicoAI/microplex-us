@@ -22,3 +22,8 @@ built on top of the generic `microplex` engine.
 
 The architecture is still evolving, so the docs are deliberately technical and
 operational rather than paper-like.
+
+Method-level decomposable-family bakeoffs now live in the sibling eval repo:
+`/Users/maxghenis/CosilicoAI/microplex-evals`. `microplex-us` should keep the
+runtime helpers and pipeline-adjacent diagnostics, not the long-lived eval
+orchestration and artifact curation.

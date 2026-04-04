@@ -46,6 +46,7 @@ US should not keep local if it generalizes:
 - benchmark suite/result types
 - reweighting math
 - generic target querying/filtering
+- long-lived eval-repo benchmark orchestration for method bakeoffs
 
 ## Important current caveat
 
@@ -87,6 +88,7 @@ US tax filing units may eventually be policy-endogenous. Avoid hard-baking tax-u
 - `tests/policyengine/test_harness.py`
 - `tests/policyengine/test_us.py`
 - `tests/pipelines/test_local_reweighting.py`
+- `tests/test_share_imputation.py`
 
 ## Working rule
 
