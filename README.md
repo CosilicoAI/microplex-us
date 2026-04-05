@@ -9,6 +9,7 @@ built on top of the generic `microplex` engine.
 - [Architecture](./docs/architecture.md)
 - [Source semantics](./docs/source-semantics.md)
 - [Benchmarking](./docs/benchmarking.md)
+- [Superseding `policyengine-us-data`](./docs/superseding-policyengine-us-data.md)
 
 ## Current focus
 
