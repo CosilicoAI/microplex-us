@@ -25,7 +25,8 @@ That profile now also includes:
 
 - the PE-style PUF Social Security QRF split mode
 - the PE-style prespecified donor-predictor mode for source imputations
-- opt-in ACS/SIPP/SCF donor-survey source providers for the rebuild path
+- opt-in ACS/SCF donor providers plus a block-spec-driven SIPP donor provider
+  for the rebuild path
 
 ## Why this rule exists
 

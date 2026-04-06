@@ -6,8 +6,7 @@ from microplex_us.data_sources.cps import CPSASECSourceProvider
 from microplex_us.data_sources.donor_surveys import (
     ACSSourceProvider,
     SCFSourceProvider,
-    SIPPAssetsSourceProvider,
-    SIPPTipsSourceProvider,
+    SIPPSourceProvider,
 )
 from microplex_us.data_sources.puf import (
     SOCIAL_SECURITY_SPLIT_STRATEGY_PE_QRF,
@@ -111,8 +110,10 @@ def test_default_policyengine_us_data_rebuild_source_providers_can_include_donor
     assert isinstance(providers[0], CPSASECSourceProvider)
     assert isinstance(providers[1], PUFSourceProvider)
     assert isinstance(providers[2], ACSSourceProvider)
-    assert isinstance(providers[3], SIPPTipsSourceProvider)
-    assert isinstance(providers[4], SIPPAssetsSourceProvider)
+    assert isinstance(providers[3], SIPPSourceProvider)
+    assert providers[3].block == "tips"
+    assert isinstance(providers[4], SIPPSourceProvider)
+    assert providers[4].block == "assets"
     assert isinstance(providers[5], SCFSourceProvider)
 
 

@@ -1,4 +1,4 @@
-"""Donor-survey source providers aligned with PE-US-data source-impute inputs."""
+"""Spec-driven donor survey providers aligned with PE-US-data source-impute."""
 
 from __future__ import annotations
 
@@ -51,176 +51,193 @@ HOUSEHOLD_OBSERVATION_EXCLUDED_COLUMNS = (
     "household_weight",
     "year",
 )
+
 PE_ACS_LOADER_SCRIPT = dedent(
     """
-    import pickle
-    import sys
-    import numpy as np
-    import pandas as pd
+import pickle
+import sys
+import numpy as np
+import pandas as pd
 
-    from policyengine_us_data.datasets.acs.acs import ACS_2022
+from policyengine_us_data.datasets.acs.acs import ACS_2022
 
-    out_path = sys.argv[1]
-    sample_n = None if sys.argv[2] == "None" else int(sys.argv[2])
-    random_seed = int(sys.argv[3])
+out_path = sys.argv[1]
+sample_n = None if sys.argv[2] == "None" else int(sys.argv[2])
+random_seed = int(sys.argv[3])
 
-    data = ACS_2022().load_dataset()
-    household_index = pd.Index(data["household_id"])
-    person_households = pd.Index(data["person_household_id"])
-    household_to_row = pd.Series(
-        np.arange(len(household_index), dtype=np.int64),
-        index=household_index,
-    )
-    household_rows = household_to_row.loc[person_households].to_numpy()
-    persons = pd.DataFrame(
-        {
-            "person_id": data["person_id"],
-            "household_id": person_households.to_numpy(),
-            "age": data["age"],
-            "sex": np.where(np.asarray(data["is_male"]).astype(bool), 1, 2),
-            "is_male": np.asarray(data["is_male"]).astype(float),
-            "is_household_head": np.asarray(data["is_household_head"]).astype(float),
-            "employment_income": data["employment_income"],
-            "self_employment_income": data["self_employment_income"],
-            "social_security": data["social_security"],
-            "taxable_pension_income": data["taxable_private_pension_income"],
-            "rent": data["rent"],
-            "real_estate_taxes": data["real_estate_taxes"],
-            "state_fips": np.asarray(data["state_fips"])[household_rows],
-            "weight": np.asarray(data["household_weight"])[household_rows],
-            "year": np.full(len(data["person_id"]), 2022, dtype=np.int32),
-        }
-    )
-    tenure_raw = pd.Series(np.asarray(data["tenure_type"])[household_rows]).map(
-        lambda value: value.decode() if isinstance(value, (bytes, bytearray)) else str(value)
-    )
-    persons["tenure_type"] = tenure_raw.map(
-        {
-            "OWNED_WITH_MORTGAGE": 1,
-            "OWNED_OUTRIGHT": 1,
-            "RENTED": 2,
-            "NONE": 0,
-        }
-    ).fillna(0).astype(int)
-    persons["tenure"] = persons["tenure_type"]
-    persons["income"] = (
-        pd.to_numeric(persons["employment_income"], errors="coerce").fillna(0.0)
-        + pd.to_numeric(persons["self_employment_income"], errors="coerce").fillna(0.0)
-        + pd.to_numeric(persons["social_security"], errors="coerce").fillna(0.0)
-        + pd.to_numeric(persons["taxable_pension_income"], errors="coerce").fillna(0.0)
-    )
+data = ACS_2022().load_dataset()
+household_index = pd.Index(data["household_id"])
+person_households = pd.Index(data["person_household_id"])
+household_to_row = pd.Series(
+    np.arange(len(household_index), dtype=np.int64),
+    index=household_index,
+)
+household_rows = household_to_row.loc[person_households].to_numpy()
+persons = pd.DataFrame(
+    {
+        "person_id": data["person_id"],
+        "household_id": person_households.to_numpy(),
+        "age": data["age"],
+        "sex": np.where(np.asarray(data["is_male"]).astype(bool), 1, 2),
+        "is_male": np.asarray(data["is_male"]).astype(float),
+        "is_household_head": np.asarray(data["is_household_head"]).astype(float),
+        "employment_income": data["employment_income"],
+        "self_employment_income": data["self_employment_income"],
+        "social_security": data["social_security"],
+        "taxable_pension_income": data["taxable_private_pension_income"],
+        "rent": data["rent"],
+        "real_estate_taxes": data["real_estate_taxes"],
+        "state_fips": np.asarray(data["state_fips"])[household_rows],
+        "weight": np.asarray(data["household_weight"])[household_rows],
+        "year": np.full(len(data["person_id"]), 2022, dtype=np.int32),
+    }
+)
+tenure_raw = pd.Series(np.asarray(data["tenure_type"])[household_rows]).map(
+    lambda value: value.decode() if isinstance(value, (bytes, bytearray)) else str(value)
+)
+persons["tenure_type"] = tenure_raw.map(
+    {
+        "OWNED_WITH_MORTGAGE": 1,
+        "OWNED_OUTRIGHT": 1,
+        "RENTED": 2,
+        "NONE": 0,
+    }
+).fillna(0).astype(int)
+persons["tenure"] = persons["tenure_type"]
+persons["income"] = (
+    pd.to_numeric(persons["employment_income"], errors="coerce").fillna(0.0)
+    + pd.to_numeric(persons["self_employment_income"], errors="coerce").fillna(0.0)
+    + pd.to_numeric(persons["social_security"], errors="coerce").fillna(0.0)
+    + pd.to_numeric(persons["taxable_pension_income"], errors="coerce").fillna(0.0)
+)
 
-    households = (
-        persons[
-            ["household_id", "state_fips", "tenure", "weight", "year"]
-        ]
-        .rename(columns={"weight": "household_weight"})
-        .drop_duplicates(subset=["household_id"])
+households = (
+    persons[["household_id", "state_fips", "tenure", "weight", "year"]]
+    .rename(columns={"weight": "household_weight"})
+    .drop_duplicates(subset=["household_id"])
+    .reset_index(drop=True)
+)
+
+if sample_n is not None and sample_n < len(households):
+    sampled = households.sample(
+        n=sample_n,
+        random_state=random_seed,
+        replace=False,
+        weights=households["household_weight"],
+    ).copy()
+    keep = set(sampled["household_id"])
+    households = sampled.sort_values(["household_id"]).reset_index(drop=True)
+    persons = (
+        persons[persons["household_id"].isin(keep)]
+        .sort_values(["household_id", "person_id"])
         .reset_index(drop=True)
     )
+else:
+    households = households.sort_values(["household_id"]).reset_index(drop=True)
+    persons = persons.sort_values(["household_id", "person_id"]).reset_index(drop=True)
 
-    if sample_n is not None and sample_n < len(households):
-        sampled = households.sample(
-            n=sample_n,
-            random_state=random_seed,
-            replace=False,
-            weights=households["household_weight"],
-        ).copy()
-        keep = set(sampled["household_id"])
-        households = sampled.sort_values(["household_id"]).reset_index(drop=True)
-        persons = (
-            persons[persons["household_id"].isin(keep)]
-            .sort_values(["household_id", "person_id"])
-            .reset_index(drop=True)
-        )
-    else:
-        households = households.sort_values(["household_id"]).reset_index(drop=True)
-        persons = persons.sort_values(["household_id", "person_id"]).reset_index(drop=True)
-
-    with open(out_path, "wb") as handle:
-        pickle.dump({"households": households, "persons": persons}, handle)
-    """
+with open(out_path, "wb") as handle:
+    pickle.dump({"households": households, "persons": persons}, handle)
+"""
 )
 
 PE_SCF_LOADER_SCRIPT = dedent(
     """
-    import pickle
-    import sys
-    import numpy as np
-    import pandas as pd
+import pickle
+import sys
+import numpy as np
+import pandas as pd
 
-    from policyengine_us_data.datasets.scf.scf import SCF_2022
+from policyengine_us_data.datasets.scf.scf import SCF_2022
 
-    out_path = sys.argv[1]
-    sample_n = None if sys.argv[2] == "None" else int(sys.argv[2])
-    random_seed = int(sys.argv[3])
+out_path = sys.argv[1]
+sample_n = None if sys.argv[2] == "None" else int(sys.argv[2])
+random_seed = int(sys.argv[3])
 
-    data = SCF_2022().load_dataset()
-    persons = pd.DataFrame(
-        {
-            "household_id": np.arange(len(data["age"]), dtype=np.int64) + 1,
-            "age": data["age"],
-            "is_female": np.asarray(data["is_female"]).astype(float),
-            "sex": np.where(np.asarray(data["is_female"]).astype(bool), 2, 1),
-            "cps_race": data["cps_race"],
-            "is_married": np.asarray(data["is_married"]).astype(float),
-            "own_children_in_household": data["own_children_in_household"],
-            "employment_income": data["employment_income"],
-            "interest_dividend_income": data["interest_dividend_income"],
-            "social_security_pension_income": data["social_security_pension_income"],
-            "auto_loan_balance": data["auto_loan_balance"],
-            "auto_loan_interest": data["auto_loan_interest"],
-            "weight": data["wgt"],
-            "year": np.full(len(data["age"]), 2022, dtype=np.int32),
-        }
+data = SCF_2022().load_dataset()
+persons = pd.DataFrame(
+    {
+        "household_id": np.arange(len(data["age"]), dtype=np.int64) + 1,
+        "age": data["age"],
+        "is_female": np.asarray(data["is_female"]).astype(float),
+        "sex": np.where(np.asarray(data["is_female"]).astype(bool), 2, 1),
+        "cps_race": data["cps_race"],
+        "is_married": np.asarray(data["is_married"]).astype(float),
+        "own_children_in_household": data["own_children_in_household"],
+        "employment_income": data["employment_income"],
+        "interest_dividend_income": data["interest_dividend_income"],
+        "social_security_pension_income": data["social_security_pension_income"],
+        "auto_loan_balance": data["auto_loan_balance"],
+        "auto_loan_interest": data["auto_loan_interest"],
+        "weight": data["wgt"],
+        "year": np.full(len(data["age"]), 2022, dtype=np.int32),
+    }
+)
+persons["net_worth"] = data["net_worth"] if "net_worth" in data else data["networth"]
+persons["person_id"] = persons["household_id"]
+persons["state_fips"] = 0
+persons["tenure"] = 0
+persons["income"] = pd.to_numeric(persons["employment_income"], errors="coerce").fillna(0.0)
+
+households = persons[
+    ["household_id", "state_fips", "tenure", "weight", "year"]
+].rename(columns={"weight": "household_weight"})
+
+if sample_n is not None and sample_n < len(households):
+    sampled = households.sample(
+        n=sample_n,
+        random_state=random_seed,
+        replace=False,
+        weights=households["household_weight"],
+    ).copy()
+    keep = set(sampled["household_id"])
+    households = sampled.sort_values(["household_id"]).reset_index(drop=True)
+    persons = (
+        persons[persons["household_id"].isin(keep)]
+        .sort_values(["household_id", "person_id"])
+        .reset_index(drop=True)
     )
-    if "net_worth" in data:
-        persons["net_worth"] = data["net_worth"]
-    else:
-        persons["net_worth"] = data["networth"]
-    persons["person_id"] = persons["household_id"]
-    persons["state_fips"] = 0
-    persons["tenure"] = 0
-    persons["income"] = pd.to_numeric(persons["employment_income"], errors="coerce").fillna(0.0)
+else:
+    households = households.sort_values(["household_id"]).reset_index(drop=True)
+    persons = persons.sort_values(["household_id", "person_id"]).reset_index(drop=True)
 
-    households = (
-        persons[
-            ["household_id", "state_fips", "tenure", "weight", "year"]
-        ]
-        .rename(columns={"weight": "household_weight"})
-        .copy()
-    )
-
-    if sample_n is not None and sample_n < len(households):
-        sampled = households.sample(
-            n=sample_n,
-            random_state=random_seed,
-            replace=False,
-            weights=households["household_weight"],
-        ).copy()
-        keep = set(sampled["household_id"])
-        households = sampled.sort_values(["household_id"]).reset_index(drop=True)
-        persons = (
-            persons[persons["household_id"].isin(keep)]
-            .sort_values(["household_id", "person_id"])
-            .reset_index(drop=True)
-        )
-    else:
-        households = households.sort_values(["household_id"]).reset_index(drop=True)
-        persons = persons.sort_values(["household_id", "person_id"]).reset_index(drop=True)
-
-    with open(out_path, "wb") as handle:
-        pickle.dump({"households": households, "persons": persons}, handle)
-    """
+with open(out_path, "wb") as handle:
+    pickle.dump({"households": households, "persons": persons}, handle)
+"""
 )
 
 
 @dataclass(frozen=True)
 class DonorSurveyTables:
-    """Canonical household/person tables for one donor survey."""
+    """Canonical household/person tables for one donor survey block."""
 
     households: pd.DataFrame
     persons: pd.DataFrame
+
+
+DonorSurveyTablesLoader = Callable[..., DonorSurveyTables]
+
+
+@dataclass(frozen=True)
+class DonorSurveyProviderSpec:
+    """Declarative contract for one donor survey block."""
+
+    survey_name: str
+    block_name: str | None
+    default_year: int
+    archetype: SourceArchetype | None
+    household_variables: tuple[str, ...]
+    person_variables: tuple[str, ...]
+    default_loader: DonorSurveyTablesLoader
+
+    @property
+    def descriptor_name(self) -> str:
+        if self.block_name is None:
+            return self.survey_name
+        return f"{self.survey_name}_{self.block_name}"
+
+    def source_name(self, year: int) -> str:
+        return f"{self.descriptor_name}_{year}"
 
 
 def _descriptor_from_tables(
@@ -265,6 +282,35 @@ def _descriptor_from_tables(
         variable_capabilities=resolve_source_variable_capabilities(
             name,
             (*household_variables, *person_variables),
+        ),
+    )
+
+
+def _build_static_descriptor(
+    *,
+    spec: DonorSurveyProviderSpec,
+    shareability: Shareability,
+) -> SourceDescriptor:
+    return SourceDescriptor(
+        name=spec.descriptor_name,
+        shareability=shareability,
+        time_structure=TimeStructure.REPEATED_CROSS_SECTION,
+        archetype=spec.archetype,
+        observations=(
+            EntityObservation(
+                entity=EntityType.HOUSEHOLD,
+                key_column="household_id",
+                variable_names=spec.household_variables,
+                weight_column="household_weight",
+                period_column="year",
+            ),
+            EntityObservation(
+                entity=EntityType.PERSON,
+                key_column="person_id",
+                variable_names=spec.person_variables,
+                weight_column="weight",
+                period_column="year",
+            ),
         ),
     )
 
@@ -397,9 +443,11 @@ def _default_acs_tables_loader(
     year: int,
     sample_n: int | None,
     random_seed: int,
+    cache_dir: Path | None = None,
     policyengine_us_data_repo: str | Path | None = None,
     policyengine_us_data_python: str | Path | None = None,
 ) -> DonorSurveyTables:
+    _ = cache_dir
     if int(year) != 2022:
         raise ValueError("ACS donor source provider currently supports year=2022 only")
     return _run_policyengine_dataset_loader(
@@ -416,9 +464,11 @@ def _default_scf_tables_loader(
     year: int,
     sample_n: int | None,
     random_seed: int,
+    cache_dir: Path | None = None,
     policyengine_us_data_repo: str | Path | None = None,
     policyengine_us_data_python: str | Path | None = None,
 ) -> DonorSurveyTables:
+    _ = cache_dir
     if int(year) != 2022:
         raise ValueError("SCF donor source provider currently supports year=2022 only")
     return _run_policyengine_dataset_loader(
@@ -455,10 +505,13 @@ def _download_policyengine_us_data_file(
 def _default_sipp_tips_tables_loader(
     *,
     year: int,
-    cache_dir: Path | None,
     sample_n: int | None,
     random_seed: int,
+    cache_dir: Path | None = None,
+    policyengine_us_data_repo: str | Path | None = None,
+    policyengine_us_data_python: str | Path | None = None,
 ) -> DonorSurveyTables:
+    _ = policyengine_us_data_repo, policyengine_us_data_python
     if int(year) != 2023:
         raise ValueError("SIPP tips provider currently supports year=2023 only")
     sipp_path = _download_policyengine_us_data_file(
@@ -525,10 +578,13 @@ def _default_sipp_tips_tables_loader(
 def _default_sipp_assets_tables_loader(
     *,
     year: int,
-    cache_dir: Path | None,
     sample_n: int | None,
     random_seed: int,
+    cache_dir: Path | None = None,
+    policyengine_us_data_repo: str | Path | None = None,
+    policyengine_us_data_python: str | Path | None = None,
 ) -> DonorSurveyTables:
+    _ = policyengine_us_data_repo, policyengine_us_data_python
     if int(year) != 2023:
         raise ValueError("SIPP assets provider currently supports year=2023 only")
     sipp_path = _download_policyengine_us_data_file(
@@ -605,65 +661,144 @@ def _default_sipp_assets_tables_loader(
     return DonorSurveyTables(households=households, persons=persons)
 
 
-@dataclass
-class ACSSourceProvider:
-    """PolicyEngine-aligned ACS donor survey provider."""
+ACS_DONOR_SURVEY_SPEC = DonorSurveyProviderSpec(
+    survey_name="acs",
+    block_name=None,
+    default_year=2022,
+    archetype=SourceArchetype.HOUSEHOLD_INCOME,
+    household_variables=("state_fips", "tenure"),
+    person_variables=(
+        "age",
+        "sex",
+        "is_male",
+        "is_household_head",
+        "tenure_type",
+        "employment_income",
+        "self_employment_income",
+        "social_security",
+        "taxable_pension_income",
+        "rent",
+        "real_estate_taxes",
+        "income",
+    ),
+    default_loader=_default_acs_tables_loader,
+)
 
-    year: int = 2022
-    shareability: Shareability = Shareability.PUBLIC
-    loader: Callable[..., DonorSurveyTables] | None = None
-    policyengine_us_data_repo: str | Path | None = None
-    policyengine_us_data_python: str | Path | None = None
-    _descriptor_cache: SourceDescriptor | None = None
+SIPP_DONOR_SURVEY_SPECS: dict[str, DonorSurveyProviderSpec] = {
+    "tips": DonorSurveyProviderSpec(
+        survey_name="sipp",
+        block_name="tips",
+        default_year=2023,
+        archetype=SourceArchetype.HOUSEHOLD_INCOME,
+        household_variables=("state_fips", "tenure"),
+        person_variables=(
+            "age",
+            "sex",
+            "employment_income",
+            "income",
+            "tip_income",
+            "count_under_18",
+            "count_under_6",
+        ),
+        default_loader=_default_sipp_tips_tables_loader,
+    ),
+    "assets": DonorSurveyProviderSpec(
+        survey_name="sipp",
+        block_name="assets",
+        default_year=2023,
+        archetype=SourceArchetype.HOUSEHOLD_INCOME,
+        household_variables=("state_fips", "tenure"),
+        person_variables=(
+            "age",
+            "sex",
+            "is_female",
+            "is_married",
+            "employment_income",
+            "income",
+            "count_under_18",
+            "bank_account_assets",
+            "stock_assets",
+            "bond_assets",
+        ),
+        default_loader=_default_sipp_assets_tables_loader,
+    ),
+}
+
+SCF_DONOR_SURVEY_SPEC = DonorSurveyProviderSpec(
+    survey_name="scf",
+    block_name=None,
+    default_year=2022,
+    archetype=SourceArchetype.WEALTH,
+    household_variables=("state_fips", "tenure"),
+    person_variables=(
+        "age",
+        "sex",
+        "is_female",
+        "cps_race",
+        "is_married",
+        "own_children_in_household",
+        "employment_income",
+        "income",
+        "interest_dividend_income",
+        "social_security_pension_income",
+        "net_worth",
+        "auto_loan_balance",
+        "auto_loan_interest",
+    ),
+    default_loader=_default_scf_tables_loader,
+)
+
+
+def resolve_sipp_donor_survey_spec(block: str) -> DonorSurveyProviderSpec:
+    try:
+        return SIPP_DONOR_SURVEY_SPECS[block]
+    except KeyError as error:
+        available = ", ".join(sorted(SIPP_DONOR_SURVEY_SPECS))
+        raise ValueError(f"Unknown SIPP donor survey block '{block}'. Expected one of: {available}") from error
+
+
+class DonorSurveySourceProvider:
+    """Generic source provider for one donor survey block."""
+
+    def __init__(
+        self,
+        *,
+        spec: DonorSurveyProviderSpec,
+        year: int | None = None,
+        cache_dir: str | Path | None = None,
+        shareability: Shareability = Shareability.PUBLIC,
+        loader: DonorSurveyTablesLoader | None = None,
+        policyengine_us_data_repo: str | Path | None = None,
+        policyengine_us_data_python: str | Path | None = None,
+    ) -> None:
+        self.spec = spec
+        self.year = int(spec.default_year if year is None else year)
+        self.cache_dir = None if cache_dir is None else Path(cache_dir)
+        self.shareability = shareability
+        self.loader = loader
+        self.policyengine_us_data_repo = policyengine_us_data_repo
+        self.policyengine_us_data_python = policyengine_us_data_python
+        self._descriptor_cache: SourceDescriptor | None = None
 
     @property
     def descriptor(self) -> SourceDescriptor:
         if self._descriptor_cache is not None:
             return self._descriptor_cache
-        return SourceDescriptor(
-            name="acs",
+        return _build_static_descriptor(
+            spec=self.spec,
             shareability=self.shareability,
-            time_structure=TimeStructure.REPEATED_CROSS_SECTION,
-            archetype=SourceArchetype.HOUSEHOLD_INCOME,
-            observations=(
-                EntityObservation(
-                    entity=EntityType.HOUSEHOLD,
-                    key_column="household_id",
-                    variable_names=("state_fips", "tenure"),
-                    weight_column="household_weight",
-                    period_column="year",
-                ),
-                EntityObservation(
-                    entity=EntityType.PERSON,
-                    key_column="person_id",
-                    variable_names=(
-                        "age",
-                        "sex",
-                        "is_male",
-                        "is_household_head",
-                        "tenure_type",
-                        "employment_income",
-                        "self_employment_income",
-                        "social_security",
-                        "taxable_pension_income",
-                        "rent",
-                        "real_estate_taxes",
-                        "income",
-                    ),
-                    weight_column="weight",
-                    period_column="year",
-                ),
-            ),
         )
 
     def load_frame(self, query: SourceQuery | None = None) -> ObservationFrame:
         query = query or SourceQuery()
         provider_filters = query.provider_filters
-        loader = self.loader or _default_acs_tables_loader
+        loader = self.loader or self.spec.default_loader
+        year = int(provider_filters.get("year", self.year))
         tables = loader(
-            year=int(provider_filters.get("year", self.year)),
+            year=year,
             sample_n=provider_filters.get("sample_n"),
             random_seed=int(provider_filters.get("random_seed", 0)),
+            cache_dir=provider_filters.get("cache_dir", self.cache_dir),
             policyengine_us_data_repo=provider_filters.get(
                 "policyengine_us_data_repo",
                 self.policyengine_us_data_repo,
@@ -676,224 +811,115 @@ class ACSSourceProvider:
         frame = _build_observation_frame(
             households=tables.households,
             persons=tables.persons,
-            source_name=f"acs_{int(provider_filters.get('year', self.year))}",
+            source_name=self.spec.source_name(year),
             shareability=self.shareability,
-            archetype=SourceArchetype.HOUSEHOLD_INCOME,
+            archetype=self.spec.archetype,
         )
         self._descriptor_cache = frame.source
         return apply_source_query(frame, query)
 
 
-@dataclass
-class SIPPTipsSourceProvider:
-    """PolicyEngine-aligned SIPP donor provider for tip-income imputation."""
+class ACSSourceProvider(DonorSurveySourceProvider):
+    """PolicyEngine-aligned ACS donor provider."""
 
-    year: int = 2023
-    cache_dir: Path | None = None
-    shareability: Shareability = Shareability.PUBLIC
-    loader: Callable[..., DonorSurveyTables] | None = None
-    _descriptor_cache: SourceDescriptor | None = None
-
-    @property
-    def descriptor(self) -> SourceDescriptor:
-        if self._descriptor_cache is not None:
-            return self._descriptor_cache
-        return SourceDescriptor(
-            name="sipp_tips",
-            shareability=self.shareability,
-            time_structure=TimeStructure.REPEATED_CROSS_SECTION,
-            archetype=SourceArchetype.HOUSEHOLD_INCOME,
-            observations=(
-                EntityObservation(
-                    entity=EntityType.HOUSEHOLD,
-                    key_column="household_id",
-                    variable_names=("state_fips", "tenure"),
-                    weight_column="household_weight",
-                    period_column="year",
-                ),
-                EntityObservation(
-                    entity=EntityType.PERSON,
-                    key_column="person_id",
-                    variable_names=(
-                        "age",
-                        "sex",
-                        "employment_income",
-                        "income",
-                        "tip_income",
-                        "count_under_18",
-                        "count_under_6",
-                    ),
-                    weight_column="weight",
-                    period_column="year",
-                ),
-            ),
+    def __init__(
+        self,
+        *,
+        year: int = ACS_DONOR_SURVEY_SPEC.default_year,
+        shareability: Shareability = Shareability.PUBLIC,
+        loader: DonorSurveyTablesLoader | None = None,
+        policyengine_us_data_repo: str | Path | None = None,
+        policyengine_us_data_python: str | Path | None = None,
+    ) -> None:
+        super().__init__(
+            spec=ACS_DONOR_SURVEY_SPEC,
+            year=year,
+            shareability=shareability,
+            loader=loader,
+            policyengine_us_data_repo=policyengine_us_data_repo,
+            policyengine_us_data_python=policyengine_us_data_python,
         )
 
-    def load_frame(self, query: SourceQuery | None = None) -> ObservationFrame:
-        query = query or SourceQuery()
-        provider_filters = query.provider_filters
-        loader = self.loader or _default_sipp_tips_tables_loader
-        tables = loader(
-            year=int(provider_filters.get("year", self.year)),
-            cache_dir=provider_filters.get("cache_dir", self.cache_dir),
-            sample_n=provider_filters.get("sample_n"),
-            random_seed=int(provider_filters.get("random_seed", 0)),
-        )
-        frame = _build_observation_frame(
-            households=tables.households,
-            persons=tables.persons,
-            source_name=f"sipp_tips_{int(provider_filters.get('year', self.year))}",
-            shareability=self.shareability,
-            archetype=SourceArchetype.HOUSEHOLD_INCOME,
-        )
-        self._descriptor_cache = frame.source
-        return apply_source_query(frame, query)
 
+class SIPPSourceProvider(DonorSurveySourceProvider):
+    """PolicyEngine-aligned SIPP donor provider with block-level specs."""
 
-@dataclass
-class SIPPAssetsSourceProvider:
-    """PolicyEngine-aligned SIPP donor provider for liquid-asset imputations."""
-
-    year: int = 2023
-    cache_dir: Path | None = None
-    shareability: Shareability = Shareability.PUBLIC
-    loader: Callable[..., DonorSurveyTables] | None = None
-    _descriptor_cache: SourceDescriptor | None = None
-
-    @property
-    def descriptor(self) -> SourceDescriptor:
-        if self._descriptor_cache is not None:
-            return self._descriptor_cache
-        return SourceDescriptor(
-            name="sipp_assets",
-            shareability=self.shareability,
-            time_structure=TimeStructure.REPEATED_CROSS_SECTION,
-            archetype=SourceArchetype.HOUSEHOLD_INCOME,
-            observations=(
-                EntityObservation(
-                    entity=EntityType.HOUSEHOLD,
-                    key_column="household_id",
-                    variable_names=("state_fips", "tenure"),
-                    weight_column="household_weight",
-                    period_column="year",
-                ),
-                EntityObservation(
-                    entity=EntityType.PERSON,
-                    key_column="person_id",
-                    variable_names=(
-                        "age",
-                        "sex",
-                        "is_female",
-                        "is_married",
-                        "employment_income",
-                        "income",
-                        "count_under_18",
-                        "bank_account_assets",
-                        "stock_assets",
-                        "bond_assets",
-                    ),
-                    weight_column="weight",
-                    period_column="year",
-                ),
-            ),
+    def __init__(
+        self,
+        *,
+        block: str,
+        year: int | None = None,
+        cache_dir: str | Path | None = None,
+        shareability: Shareability = Shareability.PUBLIC,
+        loader: DonorSurveyTablesLoader | None = None,
+    ) -> None:
+        self.block = block
+        super().__init__(
+            spec=resolve_sipp_donor_survey_spec(block),
+            year=year,
+            cache_dir=cache_dir,
+            shareability=shareability,
+            loader=loader,
         )
 
-    def load_frame(self, query: SourceQuery | None = None) -> ObservationFrame:
-        query = query or SourceQuery()
-        provider_filters = query.provider_filters
-        loader = self.loader or _default_sipp_assets_tables_loader
-        tables = loader(
-            year=int(provider_filters.get("year", self.year)),
-            cache_dir=provider_filters.get("cache_dir", self.cache_dir),
-            sample_n=provider_filters.get("sample_n"),
-            random_seed=int(provider_filters.get("random_seed", 0)),
-        )
-        frame = _build_observation_frame(
-            households=tables.households,
-            persons=tables.persons,
-            source_name=f"sipp_assets_{int(provider_filters.get('year', self.year))}",
-            shareability=self.shareability,
-            archetype=SourceArchetype.HOUSEHOLD_INCOME,
-        )
-        self._descriptor_cache = frame.source
-        return apply_source_query(frame, query)
 
+class SIPPTipsSourceProvider(SIPPSourceProvider):
+    """Backward-compatible alias for the SIPP tips donor block."""
 
-@dataclass
-class SCFSourceProvider:
-    """PolicyEngine-aligned SCF donor survey provider."""
-
-    year: int = 2022
-    shareability: Shareability = Shareability.PUBLIC
-    loader: Callable[..., DonorSurveyTables] | None = None
-    policyengine_us_data_repo: str | Path | None = None
-    policyengine_us_data_python: str | Path | None = None
-    _descriptor_cache: SourceDescriptor | None = None
-
-    @property
-    def descriptor(self) -> SourceDescriptor:
-        if self._descriptor_cache is not None:
-            return self._descriptor_cache
-        return SourceDescriptor(
-            name="scf",
-            shareability=self.shareability,
-            time_structure=TimeStructure.REPEATED_CROSS_SECTION,
-            archetype=SourceArchetype.WEALTH,
-            observations=(
-                EntityObservation(
-                    entity=EntityType.HOUSEHOLD,
-                    key_column="household_id",
-                    variable_names=("state_fips", "tenure"),
-                    weight_column="household_weight",
-                    period_column="year",
-                ),
-                EntityObservation(
-                    entity=EntityType.PERSON,
-                    key_column="person_id",
-                    variable_names=(
-                        "age",
-                        "sex",
-                        "is_female",
-                        "cps_race",
-                        "is_married",
-                        "own_children_in_household",
-                        "employment_income",
-                        "income",
-                        "interest_dividend_income",
-                        "social_security_pension_income",
-                        "net_worth",
-                        "auto_loan_balance",
-                        "auto_loan_interest",
-                    ),
-                    weight_column="weight",
-                    period_column="year",
-                ),
-            ),
+    def __init__(
+        self,
+        *,
+        year: int | None = None,
+        cache_dir: str | Path | None = None,
+        shareability: Shareability = Shareability.PUBLIC,
+        loader: DonorSurveyTablesLoader | None = None,
+    ) -> None:
+        super().__init__(
+            block="tips",
+            year=year,
+            cache_dir=cache_dir,
+            shareability=shareability,
+            loader=loader,
         )
 
-    def load_frame(self, query: SourceQuery | None = None) -> ObservationFrame:
-        query = query or SourceQuery()
-        provider_filters = query.provider_filters
-        loader = self.loader or _default_scf_tables_loader
-        tables = loader(
-            year=int(provider_filters.get("year", self.year)),
-            sample_n=provider_filters.get("sample_n"),
-            random_seed=int(provider_filters.get("random_seed", 0)),
-            policyengine_us_data_repo=provider_filters.get(
-                "policyengine_us_data_repo",
-                self.policyengine_us_data_repo,
-            ),
-            policyengine_us_data_python=provider_filters.get(
-                "policyengine_us_data_python",
-                self.policyengine_us_data_python,
-            ),
+
+class SIPPAssetsSourceProvider(SIPPSourceProvider):
+    """Backward-compatible alias for the SIPP asset donor block."""
+
+    def __init__(
+        self,
+        *,
+        year: int | None = None,
+        cache_dir: str | Path | None = None,
+        shareability: Shareability = Shareability.PUBLIC,
+        loader: DonorSurveyTablesLoader | None = None,
+    ) -> None:
+        super().__init__(
+            block="assets",
+            year=year,
+            cache_dir=cache_dir,
+            shareability=shareability,
+            loader=loader,
         )
-        frame = _build_observation_frame(
-            households=tables.households,
-            persons=tables.persons,
-            source_name=f"scf_{int(provider_filters.get('year', self.year))}",
-            shareability=self.shareability,
-            archetype=SourceArchetype.WEALTH,
+
+
+class SCFSourceProvider(DonorSurveySourceProvider):
+    """PolicyEngine-aligned SCF donor provider."""
+
+    def __init__(
+        self,
+        *,
+        year: int = SCF_DONOR_SURVEY_SPEC.default_year,
+        shareability: Shareability = Shareability.PUBLIC,
+        loader: DonorSurveyTablesLoader | None = None,
+        policyengine_us_data_repo: str | Path | None = None,
+        policyengine_us_data_python: str | Path | None = None,
+    ) -> None:
+        super().__init__(
+            spec=SCF_DONOR_SURVEY_SPEC,
+            year=year,
+            shareability=shareability,
+            loader=loader,
+            policyengine_us_data_repo=policyengine_us_data_repo,
+            policyengine_us_data_python=policyengine_us_data_python,
         )
-        self._descriptor_cache = frame.source
-        return apply_source_query(frame, query)

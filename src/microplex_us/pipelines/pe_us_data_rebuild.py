@@ -106,8 +106,7 @@ def default_policyengine_us_data_rebuild_source_providers(
     from microplex_us.data_sources.donor_surveys import (
         ACSSourceProvider,
         SCFSourceProvider,
-        SIPPAssetsSourceProvider,
-        SIPPTipsSourceProvider,
+        SIPPSourceProvider,
     )
     from microplex_us.data_sources.puf import (
         SOCIAL_SECURITY_SPLIT_STRATEGY_PE_QRF,
@@ -145,11 +144,13 @@ def default_policyengine_us_data_rebuild_source_providers(
                     policyengine_us_data_repo=policyengine_us_data_repo,
                     policyengine_us_data_python=policyengine_us_data_python,
                 ),
-                SIPPTipsSourceProvider(
+                SIPPSourceProvider(
+                    block="tips",
                     year=int(sipp_year),
                     cache_dir=donor_cache,
                 ),
-                SIPPAssetsSourceProvider(
+                SIPPSourceProvider(
+                    block="assets",
                     year=int(sipp_year),
                     cache_dir=donor_cache,
                 ),

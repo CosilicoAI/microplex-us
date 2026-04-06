@@ -9,8 +9,7 @@ from microplex_us.data_sources.donor_surveys import (
     ACSSourceProvider,
     DonorSurveyTables,
     SCFSourceProvider,
-    SIPPAssetsSourceProvider,
-    SIPPTipsSourceProvider,
+    SIPPSourceProvider,
 )
 
 
@@ -152,8 +151,8 @@ def test_acs_source_provider_builds_observation_frame_from_injected_loader() -> 
 
 
 def test_sipp_and_scf_provider_fillers_are_not_usable_as_conditions() -> None:
-    tips_provider = SIPPTipsSourceProvider(loader=_sipp_tips_tables)
-    assets_provider = SIPPAssetsSourceProvider(loader=_sipp_assets_tables)
+    tips_provider = SIPPSourceProvider(block="tips", loader=_sipp_tips_tables)
+    assets_provider = SIPPSourceProvider(block="assets", loader=_sipp_assets_tables)
     scf_provider = SCFSourceProvider(loader=_scf_tables)
 
     tips_frame = tips_provider.load_frame()
