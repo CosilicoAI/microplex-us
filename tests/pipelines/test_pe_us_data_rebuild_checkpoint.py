@@ -23,6 +23,7 @@ from microplex_us.pipelines.pe_us_data_rebuild_checkpoint import (
     default_policyengine_us_data_rebuild_queries,
     run_policyengine_us_data_rebuild_checkpoint,
 )
+from microplex_us.pipelines.registry import load_us_microplex_run_registry
 
 
 def test_default_policyengine_us_data_rebuild_checkpoint_config_sets_pe_context() -> None:
@@ -219,12 +220,35 @@ def test_run_policyengine_us_data_rebuild_checkpoint_builds_bundle_and_parity(
         f"{module_name}.build_and_save_versioned_us_microplex_from_source_providers",
         fake_build_and_save_versioned_us_microplex_from_source_providers,
     )
-    monkeypatch.setattr(
-        f"{module_name}.attach_policyengine_us_data_rebuild_checkpoint_evidence",
-        lambda artifact_dir_arg, **kwargs: SimpleNamespace(
-            artifact_dir=Path(artifact_dir_arg),
-            manifest_path=Path(artifact_dir_arg) / "manifest.json",
-            harness_path=Path(artifact_dir_arg) / "policyengine_harness.json",
+    def fake_attach_policyengine_us_data_rebuild_checkpoint_evidence(
+        artifact_dir_arg,
+        **kwargs,
+    ):
+        artifact_root = Path(artifact_dir_arg)
+        manifest_path = artifact_root / "manifest.json"
+        manifest = json.loads(manifest_path.read_text())
+        manifest["artifacts"]["policyengine_harness"] = "policyengine_harness.json"
+        (artifact_root / "policyengine_harness.json").write_text(
+            json.dumps(
+                {
+                    "summary": {
+                        "candidate_mean_abs_relative_error": 0.08,
+                        "baseline_mean_abs_relative_error": 0.10,
+                        "mean_abs_relative_error_delta": -0.02,
+                    }
+                }
+            )
+        )
+        manifest["policyengine_harness"] = {
+            "candidate_mean_abs_relative_error": 0.08,
+            "baseline_mean_abs_relative_error": 0.10,
+            "mean_abs_relative_error_delta": -0.02,
+        }
+        manifest_path.write_text(json.dumps(manifest))
+        return SimpleNamespace(
+            artifact_dir=artifact_root,
+            manifest_path=manifest_path,
+            harness_path=artifact_root / "policyengine_harness.json",
             native_scores_path=None,
             parity_path=fake_write_policyengine_us_data_rebuild_parity_artifact(
                 artifact_dir_arg,
@@ -234,7 +258,11 @@ def test_run_policyengine_us_data_rebuild_checkpoint_builds_bundle_and_parity(
                 artifact_dir_arg,
                 program=kwargs.get("program"),
             ),
-        ),
+        )
+
+    monkeypatch.setattr(
+        f"{module_name}.attach_policyengine_us_data_rebuild_checkpoint_evidence",
+        fake_attach_policyengine_us_data_rebuild_checkpoint_evidence,
     )
 
     result = run_policyengine_us_data_rebuild_checkpoint(
@@ -268,6 +296,10 @@ def test_run_policyengine_us_data_rebuild_checkpoint_builds_bundle_and_parity(
         "fake_source"
     ]
     assert captured["run_registry_metadata"]["rebuild_profile_expected"] is True
+    assert (
+        result.artifacts.artifact_paths.policyengine_harness
+        == artifact_dir / "policyengine_harness.json"
+    )
 
 
 def test_run_policyengine_us_data_rebuild_checkpoint_rejects_empty_provider_sequence(
@@ -385,6 +417,21 @@ def test_attach_policyengine_us_data_rebuild_checkpoint_evidence_updates_manifes
         },
     }
     (artifact_dir / "manifest.json").write_text(json.dumps(manifest))
+    (artifact_dir / "data_flow_snapshot.json").write_text(
+        json.dumps(
+            {
+                "schemaVersion": 1,
+                "stages": [
+                    {
+                        "id": "benchmark",
+                        "status": "missing",
+                        "metrics": [],
+                        "outputs": [],
+                    }
+                ],
+            }
+        )
+    )
     for name in (
         "seed_data.parquet",
         "synthetic_data.parquet",
@@ -445,9 +492,17 @@ def test_attach_policyengine_us_data_rebuild_checkpoint_evidence_updates_manifes
         compute_native_scores=False,
         precomputed_policyengine_harness_payload=harness_payload,
         precomputed_policyengine_native_scores=native_scores_payload,
+        run_registry_path=tmp_path / "run_registry.jsonl",
+        run_index_path=tmp_path,
+        run_registry_metadata={"checkpoint_test": True},
     )
 
     written_manifest = json.loads((artifact_dir / "manifest.json").read_text())
+    refreshed_snapshot = json.loads((artifact_dir / "data_flow_snapshot.json").read_text())
+    benchmark_stage = next(
+        stage for stage in refreshed_snapshot["stages"] if stage["id"] == "benchmark"
+    )
+    registry_entries = load_us_microplex_run_registry(tmp_path / "run_registry.jsonl")
     assert result.harness_path == artifact_dir / "policyengine_harness.json"
     assert result.native_scores_path == artifact_dir / "policyengine_native_scores.json"
     assert written_manifest["artifacts"]["policyengine_harness"] == "policyengine_harness.json"
@@ -460,3 +515,14 @@ def test_attach_policyengine_us_data_rebuild_checkpoint_evidence_updates_manifes
         written_manifest["policyengine_native_scores"]["enhanced_cps_native_loss_delta"]
         == 0.10
     )
+    assert written_manifest["run_registry"]["artifact_id"] == "artifact"
+    assert written_manifest["run_index"]["artifact_id"] == "artifact"
+    assert (tmp_path / "run_index.duckdb").exists()
+    assert len(registry_entries) == 1
+    assert registry_entries[0].artifact_id == "artifact"
+    assert registry_entries[0].metadata["checkpoint_test"] is True
+    assert benchmark_stage["status"] == "ready"
+    assert benchmark_stage["outputs"] == [
+        "policyengine_harness.json",
+        "policyengine_native_scores.json",
+    ]

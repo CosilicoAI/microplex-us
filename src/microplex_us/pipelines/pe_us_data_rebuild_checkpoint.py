@@ -12,9 +12,11 @@ from microplex.core import SourceQuery
 from microplex.targets import assert_valid_benchmark_artifact_manifest
 
 from microplex_us.pipelines.artifacts import (
+    USMicroplexArtifactPaths,
     USMicroplexVersionedBuildArtifacts,
     build_and_save_versioned_us_microplex_from_source_providers,
 )
+from microplex_us.pipelines.index_db import append_us_microplex_run_index_entry
 from microplex_us.pipelines.pe_us_data_rebuild import (
     PEUSDataRebuildProgram,
     default_policyengine_us_data_rebuild_config,
@@ -24,6 +26,12 @@ from microplex_us.pipelines.pe_us_data_rebuild import (
 from microplex_us.pipelines.pe_us_data_rebuild_parity import (
     build_policyengine_us_data_rebuild_parity_artifact,
     write_policyengine_us_data_rebuild_parity_artifact,
+)
+from microplex_us.pipelines.registry import (
+    append_us_microplex_run_registry_entry,
+    build_us_microplex_run_registry_entry,
+    load_us_microplex_run_registry,
+    select_us_microplex_frontier_entry,
 )
 
 if TYPE_CHECKING:
@@ -145,6 +153,237 @@ def _resolve_policyengine_us_runtime_version() -> str | None:
         return None
 
 
+def _registry_metric_value(entry: Any | None, metric: FrontierMetric) -> float | None:
+    if entry is None:
+        return None
+    return getattr(entry, metric, None)
+
+
+def _resolve_saved_artifact_path(
+    artifact_root: Path,
+    relative_or_absolute: str | Path | None,
+) -> Path | None:
+    if relative_or_absolute is None:
+        return None
+    candidate = Path(relative_or_absolute)
+    if not candidate.is_absolute():
+        candidate = artifact_root / candidate
+    return candidate
+
+
+def _build_checkpoint_benchmark_stage(manifest: dict[str, Any]) -> dict[str, Any]:
+    artifacts = dict(manifest.get("artifacts", {}))
+    harness_summary = dict(manifest.get("policyengine_harness", {}))
+    native_scores_summary = dict(manifest.get("policyengine_native_scores", {}))
+    return {
+        "id": "benchmark",
+        "step": "06",
+        "title": "PolicyEngine benchmark",
+        "summary": "Harness and native-loss diagnostics stay attached to the same artifact bundle.",
+        "status": "ready" if harness_summary or native_scores_summary else "missing",
+        "metrics": [
+            {
+                "label": "Harness delta",
+                "value": harness_summary.get("mean_abs_relative_error_delta"),
+            },
+            {
+                "label": "Native delta",
+                "value": native_scores_summary.get("enhanced_cps_native_loss_delta"),
+            },
+            {
+                "label": "Win rate",
+                "value": harness_summary.get("target_win_rate"),
+            },
+        ],
+        "outputs": [
+            value
+            for value in (
+                artifacts.get("policyengine_harness"),
+                artifacts.get("policyengine_native_scores"),
+            )
+            if value
+        ],
+    }
+
+
+def _refresh_checkpoint_data_flow_snapshot(
+    artifact_root: Path,
+    manifest: dict[str, Any],
+) -> Path | None:
+    snapshot_path = artifact_root / "data_flow_snapshot.json"
+    if not snapshot_path.exists():
+        return None
+    snapshot = json.loads(snapshot_path.read_text())
+    if snapshot.get("schemaVersion") != 1:
+        return snapshot_path
+    stages = list(snapshot.get("stages", []))
+    benchmark_stage = _build_checkpoint_benchmark_stage(manifest)
+    replaced = False
+    for index, stage in enumerate(stages):
+        if isinstance(stage, dict) and stage.get("id") == "benchmark":
+            stages[index] = benchmark_stage
+            replaced = True
+            break
+    if not replaced:
+        stages.append(benchmark_stage)
+    snapshot["stages"] = stages
+    _write_json_atomically(snapshot_path, snapshot)
+    return snapshot_path
+
+
+def _attach_checkpoint_registry_and_index(
+    artifact_root: Path,
+    manifest: dict[str, Any],
+    *,
+    harness_path: Path | None,
+    harness_payload: dict[str, Any] | None,
+    run_registry_path: str | Path | None,
+    run_index_path: str | Path | None,
+    run_registry_metadata: dict[str, Any] | None,
+) -> tuple[Path | None, Path | None]:
+    if (
+        "policyengine_harness" not in manifest
+        and "policyengine_native_scores" not in manifest
+    ):
+        return None, None
+
+    resolved_harness_payload = (
+        dict(harness_payload)
+        if harness_payload is not None
+        else (
+            json.loads(harness_path.read_text())
+            if harness_path is not None and harness_path.exists()
+            else None
+        )
+    )
+    resolved_run_registry_path = Path(
+        run_registry_path or artifact_root.parent / "run_registry.jsonl"
+    )
+    existing_entry = next(
+        (
+            entry
+            for entry in reversed(load_us_microplex_run_registry(resolved_run_registry_path))
+            if entry.artifact_id == artifact_root.name
+        ),
+        None,
+    )
+    if existing_entry is None:
+        run_entry = build_us_microplex_run_registry_entry(
+            artifact_dir=artifact_root,
+            manifest_path=artifact_root / "manifest.json",
+            manifest=manifest,
+            policyengine_harness_path=harness_path,
+            policyengine_harness_payload=resolved_harness_payload,
+            metadata=dict(run_registry_metadata or {}),
+        )
+        recorded_entry = append_us_microplex_run_registry_entry(
+            resolved_run_registry_path,
+            run_entry,
+        )
+    else:
+        recorded_entry = existing_entry
+    resolved_run_index_path = append_us_microplex_run_index_entry(
+        run_index_path or artifact_root.parent,
+        recorded_entry,
+        policyengine_harness_payload=resolved_harness_payload,
+    )
+    manifest["run_registry"] = {
+        "path": str(resolved_run_registry_path),
+        "artifact_id": recorded_entry.artifact_id,
+        "improved_candidate_frontier": recorded_entry.improved_candidate_frontier,
+        "improved_delta_frontier": recorded_entry.improved_delta_frontier,
+        "improved_composite_frontier": recorded_entry.improved_composite_frontier,
+        "improved_native_frontier": recorded_entry.improved_native_frontier,
+        "default_frontier_metric": (
+            "enhanced_cps_native_loss_delta"
+            if "policyengine_native_scores" in manifest
+            else "candidate_composite_parity_loss"
+        ),
+    }
+    manifest["run_index"] = {
+        "path": str(resolved_run_index_path),
+        "artifact_id": recorded_entry.artifact_id,
+    }
+    return resolved_run_registry_path, resolved_run_index_path
+
+
+def _load_checkpoint_versioned_artifacts(
+    *,
+    build_result: Any,
+    artifact_root: Path,
+    frontier_metric: FrontierMetric,
+) -> USMicroplexVersionedBuildArtifacts:
+    manifest_path = artifact_root / "manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    artifacts = dict(manifest.get("artifacts", {}))
+    artifact_paths = USMicroplexArtifactPaths(
+        output_dir=artifact_root,
+        version_id=artifact_root.name,
+        seed_data=artifact_root / str(artifacts["seed_data"]),
+        synthetic_data=artifact_root / str(artifacts["synthetic_data"]),
+        calibrated_data=artifact_root / str(artifacts["calibrated_data"]),
+        targets=artifact_root / str(artifacts["targets"]),
+        manifest=manifest_path,
+        synthesizer=_resolve_saved_artifact_path(
+            artifact_root,
+            artifacts.get("synthesizer"),
+        ),
+        policyengine_dataset=_resolve_saved_artifact_path(
+            artifact_root,
+            artifacts.get("policyengine_dataset"),
+        ),
+        data_flow_snapshot=(
+            artifact_root / "data_flow_snapshot.json"
+            if (artifact_root / "data_flow_snapshot.json").exists()
+            else None
+        ),
+        policyengine_harness=_resolve_saved_artifact_path(
+            artifact_root,
+            artifacts.get("policyengine_harness"),
+        ),
+        policyengine_native_scores=_resolve_saved_artifact_path(
+            artifact_root,
+            artifacts.get("policyengine_native_scores"),
+        ),
+        run_registry=_resolve_saved_artifact_path(
+            artifact_root,
+            dict(manifest.get("run_registry", {})).get("path"),
+        ),
+        run_index_db=_resolve_saved_artifact_path(
+            artifact_root,
+            dict(manifest.get("run_index", {})).get("path"),
+        ),
+    )
+    current_entry = None
+    frontier_entry = None
+    frontier_delta = None
+    if artifact_paths.run_registry is not None:
+        registry_entries = load_us_microplex_run_registry(artifact_paths.run_registry)
+        current_entry = next(
+            (
+                entry
+                for entry in reversed(registry_entries)
+                if entry.artifact_id == artifact_root.name
+            ),
+            None,
+        )
+        frontier_entry = select_us_microplex_frontier_entry(
+            artifact_paths.run_registry,
+            metric=frontier_metric,
+        )
+        current_value = _registry_metric_value(current_entry, frontier_metric)
+        frontier_value = _registry_metric_value(frontier_entry, frontier_metric)
+        if current_value is not None and frontier_value is not None:
+            frontier_delta = current_value - frontier_value
+    return USMicroplexVersionedBuildArtifacts(
+        build_result=build_result,
+        artifact_paths=artifact_paths,
+        current_entry=current_entry,
+        frontier_entry=frontier_entry,
+        frontier_delta=frontier_delta,
+    )
+
+
 def _build_checkpoint_harness_context(
     *,
     manifest: dict[str, Any],
@@ -259,6 +498,9 @@ def attach_policyengine_us_data_rebuild_checkpoint_evidence(
     require_policyengine_native_score: bool = False,
     precomputed_policyengine_harness_payload: dict[str, Any] | None = None,
     precomputed_policyengine_native_scores: dict[str, Any] | None = None,
+    run_registry_path: str | Path | None = None,
+    run_index_path: str | Path | None = None,
+    run_registry_metadata: dict[str, Any] | None = None,
 ) -> PEUSDataRebuildCheckpointEvidenceResult:
     """Attach PE comparison evidence to an already-saved rebuild artifact."""
 
@@ -375,6 +617,15 @@ def attach_policyengine_us_data_rebuild_checkpoint_evidence(
         )
 
     manifest["artifacts"] = artifacts
+    _attach_checkpoint_registry_and_index(
+        artifact_root,
+        manifest,
+        harness_path=harness_path,
+        harness_payload=harness_payload,
+        run_registry_path=run_registry_path,
+        run_index_path=run_index_path,
+        run_registry_metadata=run_registry_metadata,
+    )
     assert_valid_benchmark_artifact_manifest(
         manifest,
         artifact_dir=artifact_root,
@@ -408,6 +659,7 @@ def attach_policyengine_us_data_rebuild_checkpoint_evidence(
             else ()
         ),
     )
+    _refresh_checkpoint_data_flow_snapshot(artifact_root, manifest)
     _write_json_atomically(manifest_path, manifest)
 
     resolved_program = program or default_policyengine_us_data_rebuild_program()
@@ -700,12 +952,20 @@ def run_policyengine_us_data_rebuild_checkpoint(
         require_policyengine_native_score=require_policyengine_native_score,
         precomputed_policyengine_harness_payload=precomputed_policyengine_harness_payload,
         precomputed_policyengine_native_scores=precomputed_policyengine_native_scores,
+        run_registry_path=run_registry_path,
+        run_index_path=run_index_path,
+        run_registry_metadata=resolved_registry_metadata,
+    )
+    refreshed_artifacts = _load_checkpoint_versioned_artifacts(
+        build_result=artifacts.build_result,
+        artifact_root=artifacts.artifact_paths.output_dir,
+        frontier_metric=frontier_metric,
     )
     return PEUSDataRebuildCheckpointResult(
         build_config=resolved_config,
         provider_names=provider_names,
         queries=resolved_queries,
-        artifacts=artifacts,
+        artifacts=refreshed_artifacts,
         parity_path=evidence.parity_path,
         parity_payload=evidence.parity_payload,
     )
