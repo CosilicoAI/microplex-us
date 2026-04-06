@@ -38,7 +38,10 @@ from microplex.synthesizer import Synthesizer
 from microplex.targets import TargetQuery, TargetSpec
 from sklearn.ensemble import RandomForestClassifier
 
-from microplex_us.pe_source_impute_engine import PE_SOURCE_IMPUTE_BLOCK_ENGINE
+from microplex_us.pe_source_impute_engine import (
+    PE_SOURCE_IMPUTE_BLOCK_ENGINE,
+    PESourceImputeBlockRunRequest,
+)
 from microplex_us.pipelines.pe_l0 import PolicyEngineL0Calibrator
 from microplex_us.pipelines.pe_native_optimization import (
     optimize_policyengine_us_native_loss_dataset,
@@ -2521,7 +2524,6 @@ class USMicroplexPipeline:
                     )
                 donor_condition_source = donor_fit_source
                 current_condition_source = current_generation_source
-                prespecified_condition_vars: list[str] | None = None
                 if (
                     self.config.donor_imputer_condition_selection == "pe_prespecified"
                 ):
@@ -2532,16 +2534,35 @@ class USMicroplexPipeline:
                         donor_block=donor_block_spec.model_variables,
                     )
                     if condition_surface is not None:
-                        donor_condition_source = condition_surface.donor_frame
-                        current_condition_source = condition_surface.current_frame
-                        prespecified_condition_vars = condition_surface.compatible_predictors(
+                        result = PE_SOURCE_IMPUTE_BLOCK_ENGINE.run_prepared_block(
+                            surface=condition_surface,
+                            request=PESourceImputeBlockRunRequest(
+                                donor_block_spec=donor_block_spec,
+                                donor_fit_source=donor_fit_source,
+                                current_generation_source=current_generation_source,
+                                current_frame=current,
+                                entity_key=entity_key,
+                            ),
+                            build_imputer=self._build_donor_imputer,
+                            rank_match=self._rank_match_donor_values,
                             compatibility_fn=self._is_compatible_donor_condition,
+                            fit_kwargs={
+                                "epochs": self.config.donor_imputer_epochs,
+                                "batch_size": self.config.donor_imputer_batch_size,
+                                "learning_rate": self.config.donor_imputer_learning_rate,
+                                "verbose": False,
+                            },
+                            seed=self.config.random_seed,
+                            rng=rng,
                         )
+                        if result is not None:
+                            current = result.updated_frame
+                            integrated_variables.extend(result.integrated_variables)
+                        continue
                 donor_condition_vars = self._select_donor_condition_vars(
                     donor_condition_source,
                     shared_vars_for_block,
                     donor_block_spec.model_variables,
-                    prespecified_condition_vars=prespecified_condition_vars,
                 )
                 if not donor_condition_vars:
                     continue
@@ -2620,15 +2641,7 @@ class USMicroplexPipeline:
         donor_frame: pd.DataFrame,
         shared_vars: list[str],
         donor_block: tuple[str, ...],
-        *,
-        prespecified_condition_vars: list[str] | None = None,
     ) -> list[str]:
-        if (
-            self.config.donor_imputer_condition_selection == "pe_prespecified"
-            and prespecified_condition_vars is not None
-        ):
-            return prespecified_condition_vars
-
         condition_vars = [
             variable for variable in shared_vars if variable in donor_frame.columns
         ]
