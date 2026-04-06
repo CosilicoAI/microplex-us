@@ -5,6 +5,9 @@
       "block_name": null,
       "default_year": 2022,
       "archetype": "household_income",
+      "required_monthcode": null,
+      "annualized_variables": [],
+      "household_count_variables": [],
       "household_variables": ["state_fips", "tenure"],
       "person_variables": [
         "age",
@@ -39,6 +42,9 @@
       "block_name": "tips",
       "default_year": 2023,
       "archetype": "household_income",
+      "required_monthcode": null,
+      "annualized_variables": ["tip_income", "employment_income"],
+      "household_count_variables": ["count_under_18", "count_under_6"],
       "household_variables": ["state_fips", "tenure"],
       "person_variables": [
         "age",
@@ -62,6 +68,9 @@
       "block_name": "assets",
       "default_year": 2023,
       "archetype": "household_income",
+      "required_monthcode": 12,
+      "annualized_variables": ["employment_income"],
+      "household_count_variables": ["count_under_18"],
       "household_variables": ["state_fips", "tenure"],
       "person_variables": [
         "age",
@@ -93,6 +102,9 @@
       "block_name": null,
       "default_year": 2022,
       "archetype": "wealth",
+      "required_monthcode": null,
+      "annualized_variables": [],
+      "household_count_variables": [],
       "household_variables": ["state_fips", "tenure"],
       "person_variables": [
         "age",

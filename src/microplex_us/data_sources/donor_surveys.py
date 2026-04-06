@@ -28,6 +28,7 @@ from microplex.core import (
 
 from microplex_us.pe_source_impute_specs import (
     PESourceImputeBlockSpec,
+    apply_pe_source_impute_loader_postprocess,
     get_pe_source_impute_block_spec,
     resolve_sipp_source_impute_block_spec,
 )
@@ -495,6 +496,7 @@ def _default_sipp_tips_tables_loader(
     policyengine_us_data_python: str | Path | None = None,
 ) -> DonorSurveyTables:
     _ = policyengine_us_data_repo, policyengine_us_data_python
+    spec = get_pe_source_impute_block_spec("sipp_tips")
     if int(year) != 2023:
         raise ValueError("SIPP tips provider currently supports year=2023 only")
     sipp_path = _download_policyengine_us_data_file(
@@ -503,8 +505,8 @@ def _default_sipp_tips_tables_loader(
     )
     df = pd.read_csv(sipp_path)
     txamt_columns = [column for column in df.columns if "TXAMT" in column]
-    df["tip_income"] = df[txamt_columns].fillna(0).sum(axis=1) * 12
-    df["employment_income"] = pd.to_numeric(df["TPTOTINC"], errors="coerce").fillna(0.0) * 12
+    df["tip_income"] = df[txamt_columns].fillna(0).sum(axis=1)
+    df["employment_income"] = pd.to_numeric(df["TPTOTINC"], errors="coerce").fillna(0.0)
     df["age"] = pd.to_numeric(df["TAGE"], errors="coerce").fillna(0).astype(int)
     df["sex"] = pd.to_numeric(df["ESEX"], errors="coerce").fillna(0).astype(int)
     df["income"] = df["employment_income"]
@@ -518,16 +520,9 @@ def _default_sipp_tips_tables_loader(
         + df["PNUM"].astype(str)
     )
     df["weight"] = pd.to_numeric(df["WPFINWGT"], errors="coerce").fillna(0.0)
-    df["is_under_18"] = df["age"] < 18
-    df["is_under_6"] = df["age"] < 6
-    df["count_under_18"] = (
-        df.groupby("household_id")["is_under_18"].transform("sum").astype(float)
-    )
-    df["count_under_6"] = (
-        df.groupby("household_id")["is_under_6"].transform("sum").astype(float)
-    )
     df["state_fips"] = 0
     df["tenure"] = 0
+    df = apply_pe_source_impute_loader_postprocess(df, spec)
     households = (
         df[["household_id", "weight", "state_fips", "tenure", "year"]]
         .rename(columns={"weight": "household_weight"})
@@ -568,6 +563,7 @@ def _default_sipp_assets_tables_loader(
     policyengine_us_data_python: str | Path | None = None,
 ) -> DonorSurveyTables:
     _ = policyengine_us_data_repo, policyengine_us_data_python
+    spec = get_pe_source_impute_block_spec("sipp_assets")
     if int(year) != 2023:
         raise ValueError("SIPP assets provider currently supports year=2023 only")
     sipp_path = _download_policyengine_us_data_file(
@@ -591,7 +587,6 @@ def _default_sipp_assets_tables_loader(
             "TVAL_BOND",
         ),
     )
-    df = df[df["MONTHCODE"] == 12].copy()
     df["bank_account_assets"] = pd.to_numeric(df["TVAL_BANK"], errors="coerce").fillna(0.0)
     df["stock_assets"] = pd.to_numeric(df["TVAL_STMF"], errors="coerce").fillna(0.0)
     df["bond_assets"] = pd.to_numeric(df["TVAL_BOND"], errors="coerce").fillna(0.0)
@@ -599,18 +594,15 @@ def _default_sipp_assets_tables_loader(
     df["sex"] = pd.to_numeric(df["ESEX"], errors="coerce").fillna(0).astype(int)
     df["is_female"] = df["sex"].eq(2).astype(float)
     df["is_married"] = pd.to_numeric(df["EMS"], errors="coerce").fillna(0).eq(1).astype(float)
-    df["employment_income"] = pd.to_numeric(df["TPTOTINC"], errors="coerce").fillna(0.0) * 12
+    df["employment_income"] = pd.to_numeric(df["TPTOTINC"], errors="coerce").fillna(0.0)
     df["income"] = df["employment_income"]
     df["year"] = int(year)
     df["household_id"] = df["SSUID"].astype(str)
     df["person_id"] = df["SSUID"].astype(str) + ":" + df["PNUM"].astype(str)
     df["weight"] = pd.to_numeric(df["WPFINWGT"], errors="coerce").fillna(0.0)
-    df["is_under_18"] = df["age"] < 18
-    df["count_under_18"] = (
-        df.groupby("household_id")["is_under_18"].transform("sum").astype(float)
-    )
     df["state_fips"] = 0
     df["tenure"] = 0
+    df = apply_pe_source_impute_loader_postprocess(df, spec)
     households = (
         df[["household_id", "weight", "state_fips", "tenure", "year"]]
         .rename(columns={"weight": "household_weight"})
