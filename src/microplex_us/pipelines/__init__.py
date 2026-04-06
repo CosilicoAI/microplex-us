@@ -59,6 +59,12 @@ from microplex_us.pipelines.pe_us_data_rebuild import (
     default_policyengine_us_data_rebuild_program,
     default_policyengine_us_data_rebuild_source_providers,
 )
+from microplex_us.pipelines.pe_us_data_rebuild_checkpoint import (
+    PEUSDataRebuildCheckpointResult,
+    default_policyengine_us_data_rebuild_checkpoint_config,
+    default_policyengine_us_data_rebuild_queries,
+    run_policyengine_us_data_rebuild_checkpoint,
+)
 from microplex_us.pipelines.pe_us_data_rebuild_parity import (
     build_policyengine_us_data_rebuild_parity_artifact,
     write_policyengine_us_data_rebuild_parity_artifact,
@@ -176,14 +182,17 @@ __all__ = [
     "compute_batch_us_pe_native_scores",
     "compute_policyengine_us_enhanced_cps_native_scores",
     "compute_us_pe_native_scores",
+    "PEUSDataRebuildCheckpointResult",
     "PEUSDataRebuildProgram",
     "PEUSDataRebuildStage",
     "PEUSDataRebuildStatus",
     "build_policyengine_us_data_rebuild_pipeline",
     "build_policyengine_us_data_rebuild_parity_artifact",
     "build_policyengine_us_data_rebuild_markdown",
+    "default_policyengine_us_data_rebuild_checkpoint_config",
     "default_policyengine_us_data_rebuild_config",
     "default_policyengine_us_data_rebuild_program",
+    "default_policyengine_us_data_rebuild_queries",
     "default_policyengine_us_data_rebuild_source_providers",
     "build_us_pre_sim_parity_audit",
     "DEFAULT_ATOMIC_AGE_BINS",
@@ -194,6 +203,7 @@ __all__ = [
     "resolve_policyengine_us_data_python",
     "resolve_policyengine_us_data_repo_root",
     "resolve_us_microplex_frontier_artifact_dir",
+    "run_policyengine_us_data_rebuild_checkpoint",
     "score_policyengine_us_native_broad_loss",
     "select_us_microplex_frontier_index_row",
     "select_us_microplex_frontier_entry",

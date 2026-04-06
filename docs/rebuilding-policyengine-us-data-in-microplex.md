@@ -18,6 +18,13 @@ The rebuild track now has explicit code-owned runtime entry points in
 - `default_policyengine_us_data_rebuild_source_providers(...)`
 - `build_policyengine_us_data_rebuild_pipeline(...)`
 
+And it now has one concrete saved-run checkpoint runner in
+[`pe_us_data_rebuild_checkpoint.py`](/Users/maxghenis/CosilicoAI/microplex-us/src/microplex_us/pipelines/pe_us_data_rebuild_checkpoint.py):
+
+- `default_policyengine_us_data_rebuild_checkpoint_config(...)`
+- `default_policyengine_us_data_rebuild_queries(...)`
+- `run_policyengine_us_data_rebuild_checkpoint(...)`
+
 These are meant to make the incumbent-parity path callable as a first-class
 Microplex profile rather than a loose collection of remembered settings.
 
@@ -49,6 +56,9 @@ That profile now also includes:
     [`pe_us_data_rebuild_parity.py`](/Users/maxghenis/CosilicoAI/microplex-us/src/microplex_us/pipelines/pe_us_data_rebuild_parity.py)
     that records profile conformance, the exact PE-US-data baseline slice, and
     the harness / PE-native verdicts for one artifact bundle
+  - one checkpoint runner that saves a normal versioned Microplex artifact
+    bundle first and then materializes that parity sidecar from the bundle,
+    instead of relying on an ad hoc notebook or shell sequence
 
 ## Why this rule exists
 
