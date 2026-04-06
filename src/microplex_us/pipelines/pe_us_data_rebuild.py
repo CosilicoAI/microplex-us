@@ -292,6 +292,7 @@ def default_policyengine_us_data_rebuild_program() -> PEUSDataRebuildProgram:
                 microplex_owner_modules=(
                     "microplex_us.data_sources.family_imputation_benchmark",
                     "microplex_us.data_sources.puf",
+                    "microplex_us.pe_source_impute_engine",
                     "microplex_us.pipelines.us",
                 ),
                 parity_contract=(
@@ -304,8 +305,9 @@ def default_policyengine_us_data_rebuild_program() -> PEUSDataRebuildProgram:
                     "prespecified predictor mode, real ACS/SIPP/SCF donor "
                     "providers, and one shared donor-block manifest for "
                     "provider specs, predictor surfaces, condition prep, SIPP "
-                    "postprocessing rules, raw SIPP extraction details, and "
-                    "ACS/SCF subprocess dataset-loader mappings. The remaining "
+                    "postprocessing rules, raw SIPP extraction details, "
+                    "ACS/SCF subprocess dataset-loader mappings, and a "
+                    "centralized PE source-impute block engine. The remaining "
                     "gap is the full extended CPS splice and line-by-line "
                     "stage parity."
                 ),

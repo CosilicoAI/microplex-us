@@ -40,6 +40,9 @@ That profile now also includes:
     raw column mappings, and simple indicator derivations
   - ACS/SCF subprocess dataset-loader details such as dataset module/class,
     table-builder mode, and canonical variable mappings
+  - one explicit PE source-impute execution boundary in
+    [`pe_source_impute_engine.py`](/Users/maxghenis/CosilicoAI/microplex-us/src/microplex_us/pe_source_impute_engine.py)
+    so `us.py` no longer owns PE block resolution and condition-surface prep
 
 ## Why this rule exists
 

@@ -63,6 +63,13 @@ def test_resolve_pe_source_impute_block_key_uses_source_name_and_targets() -> No
         )
         is None
     )
+    assert (
+        resolve_pe_source_impute_block_key(
+            donor_source_name="sipp_2023",
+            donor_block=("tip_income",),
+        )
+        is None
+    )
 
 
 def test_resolve_sipp_source_impute_block_spec_and_named_lookup() -> None:
@@ -72,6 +79,8 @@ def test_resolve_sipp_source_impute_block_spec_and_named_lookup() -> None:
     assert tips.key == "sipp_tips"
     assert tips.descriptor_name == "sipp_tips"
     assert scf.descriptor_name == "scf"
+    assert tips.matches_source_name("sipp_tips_2023") is True
+    assert tips.matches_source_name("sipp_2023") is False
 
 
 def test_prepare_pe_source_impute_condition_frame_derives_manifest_backed_predictors() -> None:

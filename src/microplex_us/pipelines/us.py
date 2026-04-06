@@ -38,11 +38,7 @@ from microplex.synthesizer import Synthesizer
 from microplex.targets import TargetQuery, TargetSpec
 from sklearn.ensemble import RandomForestClassifier
 
-from microplex_us.pe_source_impute_specs import (
-    load_pe_source_impute_block_specs,
-    prepare_pe_source_impute_condition_frame,
-    resolve_pe_source_impute_block_key,
-)
+from microplex_us.pe_source_impute_engine import PE_SOURCE_IMPUTE_BLOCK_ENGINE
 from microplex_us.pipelines.pe_l0 import PolicyEngineL0Calibrator
 from microplex_us.pipelines.pe_native_optimization import (
     optimize_policyengine_us_native_loss_dataset,
@@ -251,7 +247,6 @@ class ColumnwiseQRFDonorImputer:
 AGE_LABELS = ["0-17", "18-34", "35-54", "55-64", "65+"]
 INCOME_BINS = [-np.inf, 25_000, 50_000, 100_000, np.inf]
 INCOME_LABELS = ["<25k", "25-50k", "50-100k", "100k+"]
-PE_SOURCE_IMPUTE_BLOCK_SPECS = load_pe_source_impute_block_specs()
 ENTITY_ID_COLUMNS = {
     EntityType.PERSON: "person_id",
     EntityType.HOUSEHOLD: "household_id",
@@ -2526,33 +2521,27 @@ class USMicroplexPipeline:
                     )
                 donor_condition_source = donor_fit_source
                 current_condition_source = current_generation_source
+                prespecified_condition_vars: list[str] | None = None
                 if (
                     self.config.donor_imputer_condition_selection == "pe_prespecified"
                 ):
-                    source_key = self._pe_source_impute_source_key(
+                    condition_surface = PE_SOURCE_IMPUTE_BLOCK_ENGINE.prepare_condition_surface(
+                        donor_frame=donor_fit_source,
+                        current_frame=current_generation_source,
                         donor_source_name=donor_input.frame.source.name,
                         donor_block=donor_block_spec.model_variables,
                     )
-                    if source_key is not None:
-                        spec = PE_SOURCE_IMPUTE_BLOCK_SPECS[source_key]
-                        donor_condition_source = (
-                            self._prepare_pe_source_impute_condition_frame(
-                                donor_fit_source,
-                                spec=spec,
-                            )
-                        )
-                        current_condition_source = (
-                            self._prepare_pe_source_impute_condition_frame(
-                                current_generation_source,
-                                spec=spec,
-                            )
+                    if condition_surface is not None:
+                        donor_condition_source = condition_surface.donor_frame
+                        current_condition_source = condition_surface.current_frame
+                        prespecified_condition_vars = condition_surface.compatible_predictors(
+                            compatibility_fn=self._is_compatible_donor_condition,
                         )
                 donor_condition_vars = self._select_donor_condition_vars(
                     donor_condition_source,
                     shared_vars_for_block,
                     donor_block_spec.model_variables,
-                    current_frame=current_condition_source,
-                    donor_source_name=donor_input.frame.source.name,
+                    prespecified_condition_vars=prespecified_condition_vars,
                 )
                 if not donor_condition_vars:
                     continue
@@ -2632,21 +2621,13 @@ class USMicroplexPipeline:
         shared_vars: list[str],
         donor_block: tuple[str, ...],
         *,
-        current_frame: pd.DataFrame | None = None,
-        donor_source_name: str | None = None,
+        prespecified_condition_vars: list[str] | None = None,
     ) -> list[str]:
         if (
             self.config.donor_imputer_condition_selection == "pe_prespecified"
-            and current_frame is not None
+            and prespecified_condition_vars is not None
         ):
-            prespecified = self._resolve_pe_source_impute_condition_vars(
-                donor_frame=donor_frame,
-                current_frame=current_frame,
-                donor_source_name=donor_source_name,
-                donor_block=donor_block,
-            )
-            if prespecified:
-                return prespecified
+            return prespecified_condition_vars
 
         condition_vars = [
             variable for variable in shared_vars if variable in donor_frame.columns
@@ -2689,59 +2670,6 @@ class USMicroplexPipeline:
             variable
             for _, variable in scored_conditions[:max_condition_vars]
         ]
-
-    def _resolve_pe_source_impute_condition_vars(
-        self,
-        *,
-        donor_frame: pd.DataFrame,
-        current_frame: pd.DataFrame,
-        donor_source_name: str | None,
-        donor_block: tuple[str, ...],
-    ) -> list[str]:
-        source_key = self._pe_source_impute_source_key(
-            donor_source_name=donor_source_name,
-            donor_block=donor_block,
-        )
-        if source_key is None:
-            return []
-        spec = PE_SOURCE_IMPUTE_BLOCK_SPECS[source_key]
-        donor_prepared = self._prepare_pe_source_impute_condition_frame(
-            donor_frame,
-            spec=spec,
-        )
-        current_prepared = self._prepare_pe_source_impute_condition_frame(
-            current_frame,
-            spec=spec,
-        )
-        return [
-            variable
-            for variable in spec.predictors
-            if variable in donor_prepared.columns
-            and variable in current_prepared.columns
-            and self._is_compatible_donor_condition(
-                donor_prepared[variable],
-                current_prepared[variable],
-            )
-        ]
-
-    def _pe_source_impute_source_key(
-        self,
-        *,
-        donor_source_name: str | None,
-        donor_block: tuple[str, ...],
-    ) -> str | None:
-        return resolve_pe_source_impute_block_key(
-            donor_source_name=donor_source_name,
-            donor_block=donor_block,
-        )
-
-    def _prepare_pe_source_impute_condition_frame(
-        self,
-        frame: pd.DataFrame,
-        *,
-        spec,
-    ) -> pd.DataFrame:
-        return prepare_pe_source_impute_condition_frame(frame, spec)
 
     def _entity_key_column(self, entity: EntityType) -> str | None:
         return ENTITY_ID_COLUMNS.get(entity)

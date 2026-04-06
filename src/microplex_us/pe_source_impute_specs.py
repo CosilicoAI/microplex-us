@@ -93,6 +93,12 @@ class PESourceImputeBlockSpec:
     def source_name(self, year: int) -> str:
         return f"{self.descriptor_name}_{year}"
 
+    def matches_source_name(self, source_name: str | None) -> bool:
+        """Return whether one runtime source name matches this donor block."""
+        normalized = (source_name or "").strip().lower()
+        descriptor_name = self.descriptor_name.lower()
+        return normalized == descriptor_name or normalized.startswith(f"{descriptor_name}_")
+
 
 def _manifest_path() -> Path:
     return Path(__file__).resolve().parent / "manifests" / "pe_source_impute_blocks.json"
@@ -258,10 +264,9 @@ def resolve_pe_source_impute_block_key(
     donor_block: tuple[str, ...],
 ) -> str | None:
     """Map a donor source name and target block to one manifest block key."""
-    normalized_name = (donor_source_name or "").strip().lower()
     block_set = set(donor_block)
     for key, spec in load_pe_source_impute_block_specs().items():
-        if spec.survey_name not in normalized_name:
+        if not spec.matches_source_name(donor_source_name):
             continue
         if block_set <= set(spec.target_variables):
             return key
