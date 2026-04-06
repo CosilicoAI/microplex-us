@@ -59,6 +59,10 @@ from microplex_us.pipelines.pe_us_data_rebuild import (
     default_policyengine_us_data_rebuild_program,
     default_policyengine_us_data_rebuild_source_providers,
 )
+from microplex_us.pipelines.pe_us_data_rebuild_parity import (
+    build_policyengine_us_data_rebuild_parity_artifact,
+    write_policyengine_us_data_rebuild_parity_artifact,
+)
 from microplex_us.pipelines.performance import (
     USMicroplexPerformanceHarnessConfig,
     USMicroplexPerformanceHarnessRequest,
@@ -176,6 +180,7 @@ __all__ = [
     "PEUSDataRebuildStage",
     "PEUSDataRebuildStatus",
     "build_policyengine_us_data_rebuild_pipeline",
+    "build_policyengine_us_data_rebuild_parity_artifact",
     "build_policyengine_us_data_rebuild_markdown",
     "default_policyengine_us_data_rebuild_config",
     "default_policyengine_us_data_rebuild_program",
@@ -203,6 +208,7 @@ __all__ = [
     "reduced_benchmark_specs_to_calibration_targets",
     "run_us_microplex_reduced_benchmark_harness",
     "write_us_pe_native_scores",
+    "write_policyengine_us_data_rebuild_parity_artifact",
     "write_us_pre_sim_parity_audit",
     "write_us_microplex_site_snapshot",
     "USMicroplexBuildConfig",

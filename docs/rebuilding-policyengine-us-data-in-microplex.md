@@ -45,6 +45,10 @@ That profile now also includes:
     so `us.py` no longer owns PE block resolution, PE block-frame preparation /
     entity projection, condition-surface prep, the prespecified block
     fit/generate/match loop, or a second duplicated generic donor execution loop
+  - one saved-run rebuild parity sidecar in
+    [`pe_us_data_rebuild_parity.py`](/Users/maxghenis/CosilicoAI/microplex-us/src/microplex_us/pipelines/pe_us_data_rebuild_parity.py)
+    that records profile conformance, the exact PE-US-data baseline slice, and
+    the harness / PE-native verdicts for one artifact bundle
 
 ## Why this rule exists
 

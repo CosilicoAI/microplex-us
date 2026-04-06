@@ -11,6 +11,13 @@ It is intentionally narrower than benchmark performance:
 
 The point is to avoid mixing these claims.
 
+Saved-run parity evidence should now be written as a sidecar with
+[`write_policyengine_us_data_rebuild_parity_artifact(...)`](/Users/maxghenis/CosilicoAI/microplex-us/src/microplex_us/pipelines/pe_us_data_rebuild_parity.py),
+so one artifact bundle records:
+- whether the run actually matched the default rebuild profile
+- which exact `policyengine-us-data` baseline slice it used
+- what the harness and PE-native broad-loss comparisons said
+
 ## Status legend
 
 - `Exact`: same construction contract to the best of the current audit
