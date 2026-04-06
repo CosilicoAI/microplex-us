@@ -9,12 +9,14 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from microplex.core import SourceQuery
+from microplex.targets import assert_valid_benchmark_artifact_manifest
 
 from microplex_us.pipelines.artifacts import (
     USMicroplexVersionedBuildArtifacts,
     build_and_save_versioned_us_microplex_from_source_providers,
 )
 from microplex_us.pipelines.pe_us_data_rebuild import (
+    PEUSDataRebuildProgram,
     default_policyengine_us_data_rebuild_config,
     default_policyengine_us_data_rebuild_program,
     default_policyengine_us_data_rebuild_source_providers,
@@ -44,6 +46,18 @@ class PEUSDataRebuildCheckpointResult:
     provider_names: tuple[str, ...]
     queries: dict[str, SourceQuery]
     artifacts: USMicroplexVersionedBuildArtifacts
+    parity_path: Path
+    parity_payload: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class PEUSDataRebuildCheckpointEvidenceResult:
+    """Comparison evidence attached to one saved rebuild artifact."""
+
+    artifact_dir: Path
+    manifest_path: Path
+    harness_path: Path | None
+    native_scores_path: Path | None
     parity_path: Path
     parity_payload: dict[str, Any]
 
@@ -114,6 +128,305 @@ def _validate_query_keys(
             "Checkpoint queries include unknown provider keys: "
             f"{unexpected_text}. Expected one of: {allowed}"
         )
+
+
+def _write_json_atomically(path: Path, payload: dict[str, Any]) -> None:
+    temp_path = path.with_name(f".{path.name}.tmp")
+    temp_path.write_text(json.dumps(payload, indent=2, sort_keys=True))
+    temp_path.replace(path)
+
+
+def _resolve_policyengine_us_runtime_version() -> str | None:
+    from importlib.metadata import PackageNotFoundError, version
+
+    try:
+        return version("policyengine-us")
+    except PackageNotFoundError:
+        return None
+
+
+def _build_checkpoint_harness_context(
+    *,
+    manifest: dict[str, Any],
+    policyengine_target_provider: TargetProvider | None,
+    policyengine_baseline_dataset: str | Path | None,
+    policyengine_harness_slices: (
+        tuple[PolicyEngineUSHarnessSlice, ...]
+        | list[PolicyEngineUSHarnessSlice]
+        | None
+    ),
+    policyengine_harness_metadata: dict[str, Any] | None,
+    policyengine_comparison_cache: PolicyEngineUSComparisonCache | None,
+) -> tuple[
+    TargetProvider | None,
+    str | Path | None,
+    tuple[PolicyEngineUSHarnessSlice, ...],
+    dict[str, Any],
+]:
+    from microplex_us.policyengine.harness import (
+        default_policyengine_us_db_all_target_slices,
+        default_policyengine_us_harness_slices,
+        filter_nonempty_policyengine_us_harness_slices,
+    )
+    from microplex_us.policyengine.us import PolicyEngineUSDBTargetProvider
+
+    config = dict(manifest.get("config", {}))
+    resolved_target_provider = policyengine_target_provider
+    if resolved_target_provider is None and config.get("policyengine_targets_db") is not None:
+        resolved_target_provider = PolicyEngineUSDBTargetProvider(
+            config["policyengine_targets_db"]
+        )
+    resolved_baseline_dataset = (
+        policyengine_baseline_dataset or config.get("policyengine_baseline_dataset")
+    )
+    harness_period = (
+        config.get("policyengine_dataset_year")
+        or config.get("policyengine_target_period")
+        or 2024
+    )
+    if policyengine_harness_slices is not None:
+        resolved_harness_slices = tuple(policyengine_harness_slices)
+    elif config.get("policyengine_targets_db") is not None:
+        resolved_harness_slices = default_policyengine_us_db_all_target_slices(
+            period=int(harness_period),
+            reform_id=int(config.get("policyengine_target_reform_id", 0) or 0),
+        )
+    else:
+        resolved_harness_slices = default_policyengine_us_harness_slices(
+            period=int(harness_period)
+        )
+    if resolved_target_provider is not None and resolved_harness_slices:
+        resolved_harness_slices = filter_nonempty_policyengine_us_harness_slices(
+            resolved_target_provider,
+            resolved_harness_slices,
+            cache=policyengine_comparison_cache,
+        )
+    resolved_harness_metadata = {
+        "baseline_dataset": (
+            Path(resolved_baseline_dataset).name
+            if resolved_baseline_dataset is not None
+            else None
+        ),
+        "targets_db": (
+            Path(config["policyengine_targets_db"]).name
+            if config.get("policyengine_targets_db") is not None
+            else None
+        ),
+        "target_period": config.get("policyengine_target_period"),
+        "target_variables": list(config.get("policyengine_target_variables", ())),
+        "target_domains": list(config.get("policyengine_target_domains", ())),
+        "target_geo_levels": list(config.get("policyengine_target_geo_levels", ())),
+        "target_profile": config.get("policyengine_target_profile"),
+        "calibration_target_profile": config.get(
+            "policyengine_calibration_target_profile"
+        ),
+        "target_reform_id": config.get("policyengine_target_reform_id"),
+        "harness_slice_names": [slice_spec.name for slice_spec in resolved_harness_slices],
+        "policyengine_us_runtime_version": _resolve_policyengine_us_runtime_version(),
+        "harness_suite": (
+            "policyengine_us_all_targets"
+            if config.get("policyengine_targets_db") is not None
+            and policyengine_harness_slices is None
+            else None
+        ),
+        **dict(policyengine_harness_metadata or {}),
+    }
+    return (
+        resolved_target_provider,
+        resolved_baseline_dataset,
+        resolved_harness_slices,
+        resolved_harness_metadata,
+    )
+
+
+def attach_policyengine_us_data_rebuild_checkpoint_evidence(
+    artifact_dir: str | Path,
+    *,
+    program: PEUSDataRebuildProgram | None = None,
+    policyengine_comparison_cache: PolicyEngineUSComparisonCache | None = None,
+    policyengine_target_provider: TargetProvider | None = None,
+    policyengine_baseline_dataset: str | Path | None = None,
+    policyengine_harness_slices: (
+        tuple[PolicyEngineUSHarnessSlice, ...]
+        | list[PolicyEngineUSHarnessSlice]
+        | None
+    ) = None,
+    policyengine_harness_metadata: dict[str, Any] | None = None,
+    policyengine_us_data_repo: str | Path | None = None,
+    policyengine_us_data_python: str | Path | None = None,
+    compute_harness: bool = True,
+    compute_native_scores: bool = True,
+    require_policyengine_native_score: bool = False,
+    precomputed_policyengine_harness_payload: dict[str, Any] | None = None,
+    precomputed_policyengine_native_scores: dict[str, Any] | None = None,
+) -> PEUSDataRebuildCheckpointEvidenceResult:
+    """Attach PE comparison evidence to an already-saved rebuild artifact."""
+
+    from microplex_us.pipelines.pe_native_scores import compute_us_pe_native_scores
+    from microplex_us.policyengine.harness import evaluate_policyengine_us_harness
+    from microplex_us.policyengine.us import load_policyengine_us_entity_tables
+
+    artifact_root = Path(artifact_dir)
+    manifest_path = artifact_root / "manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    config = dict(manifest.get("config", {}))
+    artifacts = dict(manifest.get("artifacts", {}))
+    dataset_name = artifacts.get("policyengine_dataset")
+    dataset_path = artifact_root / dataset_name if isinstance(dataset_name, str) else None
+    if dataset_path is None or not dataset_path.exists():
+        raise FileNotFoundError(
+            "Saved rebuild artifact is missing policyengine_dataset output"
+        )
+
+    harness_path: Path | None = None
+    harness_payload = (
+        dict(precomputed_policyengine_harness_payload)
+        if precomputed_policyengine_harness_payload is not None
+        else None
+    )
+    if harness_payload is None and compute_harness:
+        (
+            resolved_target_provider,
+            resolved_baseline_dataset,
+            resolved_harness_slices,
+            resolved_harness_metadata,
+        ) = _build_checkpoint_harness_context(
+            manifest=manifest,
+            policyengine_target_provider=policyengine_target_provider,
+            policyengine_baseline_dataset=policyengine_baseline_dataset,
+            policyengine_harness_slices=policyengine_harness_slices,
+            policyengine_harness_metadata=policyengine_harness_metadata,
+            policyengine_comparison_cache=policyengine_comparison_cache,
+        )
+        if resolved_target_provider is None:
+            raise ValueError(
+                "Cannot compute rebuild checkpoint harness without a target provider"
+            )
+        if resolved_baseline_dataset is None:
+            raise ValueError(
+                "Cannot compute rebuild checkpoint harness without a baseline dataset"
+            )
+        if not resolved_harness_slices:
+            raise ValueError(
+                "Cannot compute rebuild checkpoint harness because no nonempty slices resolved"
+            )
+        candidate_tables = load_policyengine_us_entity_tables(
+            dataset_path,
+            period=(
+                config.get("policyengine_dataset_year")
+                or config.get("policyengine_target_period")
+                or 2024
+            ),
+        )
+        harness_run = evaluate_policyengine_us_harness(
+            candidate_tables,
+            resolved_target_provider,
+            resolved_harness_slices,
+            baseline_dataset=str(resolved_baseline_dataset),
+            dataset_year=config.get("policyengine_dataset_year"),
+            simulation_cls=None,
+            candidate_label="microplex",
+            baseline_label="policyengine_us_data",
+            metadata=resolved_harness_metadata,
+            cache=policyengine_comparison_cache,
+        )
+        harness_payload = harness_run.to_dict()
+    if harness_payload is not None:
+        harness_path = artifact_root / "policyengine_harness.json"
+        _write_json_atomically(harness_path, harness_payload)
+        artifacts["policyengine_harness"] = harness_path.name
+        manifest["policyengine_harness"] = dict(harness_payload.get("summary", {}))
+
+    native_scores_path: Path | None = None
+    native_scores_payload = (
+        dict(precomputed_policyengine_native_scores)
+        if precomputed_policyengine_native_scores is not None
+        else None
+    )
+    if native_scores_payload is None and compute_native_scores:
+        resolved_baseline_dataset = (
+            policyengine_baseline_dataset or config.get("policyengine_baseline_dataset")
+        )
+        if resolved_baseline_dataset is None:
+            raise ValueError(
+                "Cannot compute PE-native scores without a baseline dataset"
+            )
+        native_scores_payload = compute_us_pe_native_scores(
+            candidate_dataset_path=dataset_path,
+            baseline_dataset_path=resolved_baseline_dataset,
+            period=(
+                config.get("policyengine_dataset_year")
+                or config.get("policyengine_target_period")
+                or 2024
+            ),
+            policyengine_us_data_repo=policyengine_us_data_repo,
+            policyengine_us_data_python=policyengine_us_data_python,
+        )
+    if native_scores_payload is not None:
+        native_scores_path = artifact_root / "policyengine_native_scores.json"
+        _write_json_atomically(native_scores_path, native_scores_payload)
+        artifacts["policyengine_native_scores"] = native_scores_path.name
+        manifest["policyengine_native_scores"] = dict(
+            native_scores_payload.get("summary", {})
+        )
+    elif require_policyengine_native_score:
+        raise ValueError(
+            "require_policyengine_native_score=True but no PE-native scores were computed"
+        )
+
+    manifest["artifacts"] = artifacts
+    assert_valid_benchmark_artifact_manifest(
+        manifest,
+        artifact_dir=artifact_root,
+        manifest_path=manifest_path,
+        summary_section=(
+            "policyengine_harness" if "policyengine_harness" in manifest else None
+        ),
+        required_artifact_keys=(
+            "seed_data",
+            "synthetic_data",
+            "calibrated_data",
+            "targets",
+            *(
+                ("policyengine_harness",)
+                if artifacts.get("policyengine_harness") is not None
+                else ()
+            ),
+            *(
+                ("policyengine_native_scores",)
+                if artifacts.get("policyengine_native_scores") is not None
+                else ()
+            ),
+        ),
+        required_summary_keys=(
+            (
+                "candidate_mean_abs_relative_error",
+                "baseline_mean_abs_relative_error",
+                "mean_abs_relative_error_delta",
+            )
+            if "policyengine_harness" in manifest
+            else ()
+        ),
+    )
+    _write_json_atomically(manifest_path, manifest)
+
+    resolved_program = program or default_policyengine_us_data_rebuild_program()
+    parity_path = write_policyengine_us_data_rebuild_parity_artifact(
+        artifact_root,
+        program=resolved_program,
+    )
+    parity_payload = build_policyengine_us_data_rebuild_parity_artifact(
+        artifact_root,
+        program=resolved_program,
+    )
+    return PEUSDataRebuildCheckpointEvidenceResult(
+        artifact_dir=artifact_root,
+        manifest_path=manifest_path,
+        harness_path=harness_path,
+        native_scores_path=native_scores_path,
+        parity_path=parity_path,
+        parity_payload=parity_payload,
+    )
 
 
 def default_policyengine_us_data_rebuild_checkpoint_config(
@@ -363,30 +676,38 @@ def run_policyengine_us_data_rebuild_checkpoint(
         policyengine_harness_slices=policyengine_harness_slices,
         policyengine_harness_metadata=resolved_harness_metadata,
         policyengine_us_data_repo=policyengine_us_data_repo,
-        defer_policyengine_harness=defer_policyengine_harness,
+        defer_policyengine_harness=True,
         require_policyengine_native_score=require_policyengine_native_score,
-        defer_policyengine_native_score=defer_policyengine_native_score,
-        precomputed_policyengine_harness_payload=precomputed_policyengine_harness_payload,
-        precomputed_policyengine_native_scores=precomputed_policyengine_native_scores,
+        defer_policyengine_native_score=True,
+        precomputed_policyengine_harness_payload=None,
+        precomputed_policyengine_native_scores=None,
         run_registry_path=run_registry_path,
         run_index_path=run_index_path,
         run_registry_metadata=resolved_registry_metadata,
     )
-    parity_path = write_policyengine_us_data_rebuild_parity_artifact(
+    evidence = attach_policyengine_us_data_rebuild_checkpoint_evidence(
         artifacts.artifact_paths.output_dir,
         program=program,
-    )
-    parity_payload = build_policyengine_us_data_rebuild_parity_artifact(
-        artifacts.artifact_paths.output_dir,
-        program=program,
+        policyengine_comparison_cache=policyengine_comparison_cache,
+        policyengine_target_provider=policyengine_target_provider,
+        policyengine_baseline_dataset=resolved_config.policyengine_baseline_dataset,
+        policyengine_harness_slices=policyengine_harness_slices,
+        policyengine_harness_metadata=resolved_harness_metadata,
+        policyengine_us_data_repo=policyengine_us_data_repo,
+        policyengine_us_data_python=policyengine_us_data_python,
+        compute_harness=not defer_policyengine_harness,
+        compute_native_scores=not defer_policyengine_native_score,
+        require_policyengine_native_score=require_policyengine_native_score,
+        precomputed_policyengine_harness_payload=precomputed_policyengine_harness_payload,
+        precomputed_policyengine_native_scores=precomputed_policyengine_native_scores,
     )
     return PEUSDataRebuildCheckpointResult(
         build_config=resolved_config,
         provider_names=provider_names,
         queries=resolved_queries,
         artifacts=artifacts,
-        parity_path=parity_path,
-        parity_payload=parity_payload,
+        parity_path=evidence.parity_path,
+        parity_payload=evidence.parity_payload,
     )
 
 

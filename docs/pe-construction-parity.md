@@ -20,8 +20,9 @@ so one artifact bundle records:
 
 The intended way to create those bundles is now
 [`run_policyengine_us_data_rebuild_checkpoint(...)`](/Users/maxghenis/CosilicoAI/microplex-us/src/microplex_us/pipelines/pe_us_data_rebuild_checkpoint.py),
-which runs the explicit rebuild profile, saves a normal versioned artifact, and
-then writes the parity sidecar from that saved bundle.
+which runs the explicit rebuild profile, saves a normal versioned artifact,
+attaches harness / optional PE-native evidence from the saved dataset, and then
+writes the parity sidecar from that saved bundle.
 
 ## Status legend
 

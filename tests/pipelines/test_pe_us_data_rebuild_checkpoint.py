@@ -18,6 +18,7 @@ from microplex_us.pipelines.pe_us_data_rebuild import (
     default_policyengine_us_data_rebuild_source_providers,
 )
 from microplex_us.pipelines.pe_us_data_rebuild_checkpoint import (
+    attach_policyengine_us_data_rebuild_checkpoint_evidence,
     default_policyengine_us_data_rebuild_checkpoint_config,
     default_policyengine_us_data_rebuild_queries,
     run_policyengine_us_data_rebuild_checkpoint,
@@ -126,8 +127,36 @@ def test_run_policyengine_us_data_rebuild_checkpoint_builds_bundle_and_parity(
                 "policyengine_baseline_dataset": policyengine_baseline_dataset,
                 "policyengine_harness_metadata": policyengine_harness_metadata,
                 "run_registry_metadata": run_registry_metadata,
+                "defer_policyengine_harness": defer_policyengine_harness,
+                "defer_policyengine_native_score": defer_policyengine_native_score,
             }
         )
+        manifest = {
+            "created_at": "2026-04-06T00:00:00+00:00",
+            "config": config.to_dict(),
+            "rows": {"seed": 10, "synthetic": 20, "calibrated": 20},
+            "weights": {"nonzero": 20, "total": 20.0},
+            "targets": {"n_marginal_groups": 1, "n_continuous": 0},
+            "synthesis": {
+                "scaffold_source": "fake_source",
+                "source_names": ["fake_source"],
+                "backend": "seed",
+                "condition_vars": [],
+                "target_vars": [],
+                "donor_integrated_variables": [],
+                "state_program_support_proxies": {"available": [], "missing": []},
+            },
+            "calibration": {"converged": True, "n_loaded_targets": 1, "n_supported_targets": 1},
+            "artifacts": {
+                "seed_data": "seed_data.parquet",
+                "synthetic_data": "synthetic_data.parquet",
+                "calibrated_data": "calibrated_data.parquet",
+                "targets": "targets.json",
+                "policyengine_dataset": "policyengine_us.h5",
+            },
+        }
+        (artifact_dir / "manifest.json").write_text(json.dumps(manifest))
+        (artifact_dir / "policyengine_us.h5").write_text("dataset")
         return USMicroplexVersionedBuildArtifacts(
             build_result=SimpleNamespace(config=config),
             artifact_paths=USMicroplexArtifactPaths(
@@ -191,12 +220,21 @@ def test_run_policyengine_us_data_rebuild_checkpoint_builds_bundle_and_parity(
         fake_build_and_save_versioned_us_microplex_from_source_providers,
     )
     monkeypatch.setattr(
-        f"{module_name}.write_policyengine_us_data_rebuild_parity_artifact",
-        fake_write_policyengine_us_data_rebuild_parity_artifact,
-    )
-    monkeypatch.setattr(
-        f"{module_name}.build_policyengine_us_data_rebuild_parity_artifact",
-        fake_build_policyengine_us_data_rebuild_parity_artifact,
+        f"{module_name}.attach_policyengine_us_data_rebuild_checkpoint_evidence",
+        lambda artifact_dir_arg, **kwargs: SimpleNamespace(
+            artifact_dir=Path(artifact_dir_arg),
+            manifest_path=Path(artifact_dir_arg) / "manifest.json",
+            harness_path=Path(artifact_dir_arg) / "policyengine_harness.json",
+            native_scores_path=None,
+            parity_path=fake_write_policyengine_us_data_rebuild_parity_artifact(
+                artifact_dir_arg,
+                program=kwargs.get("program"),
+            ),
+            parity_payload=fake_build_policyengine_us_data_rebuild_parity_artifact(
+                artifact_dir_arg,
+                program=kwargs.get("program"),
+            ),
+        ),
     )
 
     result = run_policyengine_us_data_rebuild_checkpoint(
@@ -220,6 +258,8 @@ def test_run_policyengine_us_data_rebuild_checkpoint_builds_bundle_and_parity(
         captured["policyengine_baseline_dataset"] == "/tmp/enhanced_cps_2024.h5"
     )
     assert captured["config"].policyengine_targets_db == "/tmp/policy_data.db"
+    assert captured["defer_policyengine_harness"] is True
+    assert captured["defer_policyengine_native_score"] is True
     assert captured["policyengine_harness_metadata"]["rebuild_checkpoint"] is True
     assert captured["policyengine_harness_metadata"]["rebuild_program_id"] == (
         "pe-us-data-rebuild-v1"
@@ -308,3 +348,115 @@ def test_run_policyengine_us_data_rebuild_checkpoint_rejects_custom_python_witho
         assert "defer_policyengine_native_score=True" in str(exc)
     else:
         raise AssertionError("Expected unsupported custom PE Python path to fail")
+
+
+def test_attach_policyengine_us_data_rebuild_checkpoint_evidence_updates_manifest(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    artifact_dir = tmp_path / "artifact"
+    artifact_dir.mkdir()
+    manifest = {
+        "created_at": "2026-04-06T00:00:00+00:00",
+        "config": default_policyengine_us_data_rebuild_checkpoint_config(
+            policyengine_baseline_dataset="/tmp/enhanced_cps_2024.h5",
+            policyengine_targets_db="/tmp/policy_data.db",
+            target_period=2024,
+        ).to_dict(),
+        "rows": {"seed": 10, "synthetic": 20, "calibrated": 20},
+        "weights": {"nonzero": 20, "total": 20.0},
+        "targets": {"n_marginal_groups": 1, "n_continuous": 0},
+        "synthesis": {
+            "scaffold_source": "cps_asec_2023",
+            "source_names": ["cps_asec_2023", "irs_soi_puf"],
+            "backend": "seed",
+            "condition_vars": [],
+            "target_vars": [],
+            "donor_integrated_variables": [],
+            "state_program_support_proxies": {"available": [], "missing": []},
+        },
+        "calibration": {"converged": True, "n_loaded_targets": 1, "n_supported_targets": 1},
+        "artifacts": {
+            "seed_data": "seed_data.parquet",
+            "synthetic_data": "synthetic_data.parquet",
+            "calibrated_data": "calibrated_data.parquet",
+            "targets": "targets.json",
+            "policyengine_dataset": "policyengine_us.h5",
+        },
+    }
+    (artifact_dir / "manifest.json").write_text(json.dumps(manifest))
+    for name in (
+        "seed_data.parquet",
+        "synthetic_data.parquet",
+        "calibrated_data.parquet",
+        "targets.json",
+        "policyengine_us.h5",
+    ):
+        (artifact_dir / name).write_text("{}")
+
+    harness_payload = {
+        "candidate_label": "microplex",
+        "baseline_label": "policyengine_us_data",
+        "period": 2024,
+        "metadata": {"slice_profile": "pe_native_broad"},
+        "summary": {
+            "candidate_mean_abs_relative_error": 0.08,
+            "baseline_mean_abs_relative_error": 0.10,
+            "mean_abs_relative_error_delta": -0.02,
+            "candidate_composite_parity_loss": 0.14,
+            "baseline_composite_parity_loss": 0.15,
+            "composite_parity_loss_delta": -0.01,
+            "slice_win_rate": 0.55,
+            "target_win_rate": 0.58,
+            "supported_target_rate": 0.98,
+            "baseline_supported_target_rate": 0.99,
+            "tag_summaries": {},
+            "parity_scorecard": {},
+            "attribute_cell_summaries": {},
+        },
+    }
+    native_scores_payload = {
+        "metric": "enhanced_cps_native_loss",
+        "period": 2024,
+        "summary": {
+            "candidate_enhanced_cps_native_loss": 0.30,
+            "baseline_enhanced_cps_native_loss": 0.20,
+            "enhanced_cps_native_loss_delta": 0.10,
+            "candidate_beats_baseline": False,
+        },
+    }
+
+    module_name = "microplex_us.pipelines.pe_us_data_rebuild_checkpoint"
+    monkeypatch.setattr(
+        f"{module_name}.write_policyengine_us_data_rebuild_parity_artifact",
+        lambda artifact_dir_arg, **kwargs: (Path(artifact_dir_arg) / "pe_us_data_rebuild_parity.json"),
+    )
+    monkeypatch.setattr(
+        f"{module_name}.build_policyengine_us_data_rebuild_parity_artifact",
+        lambda artifact_dir_arg, **kwargs: {
+            "artifactId": Path(artifact_dir_arg).name,
+            "verdict": {"hasRealPolicyEngineComparison": True},
+        },
+    )
+
+    result = attach_policyengine_us_data_rebuild_checkpoint_evidence(
+        artifact_dir,
+        compute_harness=False,
+        compute_native_scores=False,
+        precomputed_policyengine_harness_payload=harness_payload,
+        precomputed_policyengine_native_scores=native_scores_payload,
+    )
+
+    written_manifest = json.loads((artifact_dir / "manifest.json").read_text())
+    assert result.harness_path == artifact_dir / "policyengine_harness.json"
+    assert result.native_scores_path == artifact_dir / "policyengine_native_scores.json"
+    assert written_manifest["artifacts"]["policyengine_harness"] == "policyengine_harness.json"
+    assert (
+        written_manifest["artifacts"]["policyengine_native_scores"]
+        == "policyengine_native_scores.json"
+    )
+    assert written_manifest["policyengine_harness"]["mean_abs_relative_error_delta"] == -0.02
+    assert (
+        written_manifest["policyengine_native_scores"]["enhanced_cps_native_loss_delta"]
+        == 0.10
+    )

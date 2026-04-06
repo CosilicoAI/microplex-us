@@ -23,6 +23,7 @@ And it now has one concrete saved-run checkpoint runner in
 
 - `default_policyengine_us_data_rebuild_checkpoint_config(...)`
 - `default_policyengine_us_data_rebuild_queries(...)`
+- `attach_policyengine_us_data_rebuild_checkpoint_evidence(...)`
 - `run_policyengine_us_data_rebuild_checkpoint(...)`
 
 These are meant to make the incumbent-parity path callable as a first-class
@@ -57,8 +58,9 @@ That profile now also includes:
     that records profile conformance, the exact PE-US-data baseline slice, and
     the harness / PE-native verdicts for one artifact bundle
   - one checkpoint runner that saves a normal versioned Microplex artifact
-    bundle first and then materializes that parity sidecar from the bundle,
-    instead of relying on an ad hoc notebook or shell sequence
+    bundle first, then attaches harness/native parity evidence from the saved
+    dataset, and finally materializes the rebuild parity sidecar from the
+    updated bundle instead of relying on an ad hoc notebook or shell sequence
 
 ## Why this rule exists
 

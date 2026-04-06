@@ -60,7 +60,9 @@ from microplex_us.pipelines.pe_us_data_rebuild import (
     default_policyengine_us_data_rebuild_source_providers,
 )
 from microplex_us.pipelines.pe_us_data_rebuild_checkpoint import (
+    PEUSDataRebuildCheckpointEvidenceResult,
     PEUSDataRebuildCheckpointResult,
+    attach_policyengine_us_data_rebuild_checkpoint_evidence,
     default_policyengine_us_data_rebuild_checkpoint_config,
     default_policyengine_us_data_rebuild_queries,
     run_policyengine_us_data_rebuild_checkpoint,
@@ -182,6 +184,7 @@ __all__ = [
     "compute_batch_us_pe_native_scores",
     "compute_policyengine_us_enhanced_cps_native_scores",
     "compute_us_pe_native_scores",
+    "PEUSDataRebuildCheckpointEvidenceResult",
     "PEUSDataRebuildCheckpointResult",
     "PEUSDataRebuildProgram",
     "PEUSDataRebuildStage",
@@ -189,6 +192,7 @@ __all__ = [
     "build_policyengine_us_data_rebuild_pipeline",
     "build_policyengine_us_data_rebuild_parity_artifact",
     "build_policyengine_us_data_rebuild_markdown",
+    "attach_policyengine_us_data_rebuild_checkpoint_evidence",
     "default_policyengine_us_data_rebuild_checkpoint_config",
     "default_policyengine_us_data_rebuild_config",
     "default_policyengine_us_data_rebuild_program",
