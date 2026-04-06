@@ -74,7 +74,7 @@ def default_policyengine_us_data_rebuild_config(
         synthesis_backend="seed",
         calibration_backend="entropy",
         donor_imputer_backend="qrf",
-        donor_imputer_condition_selection="all_shared",
+        donor_imputer_condition_selection="pe_prespecified",
         donor_imputer_qrf_zero_threshold=0.05,
         prefer_cached_cps_asec_source=False,
     )
@@ -259,13 +259,16 @@ def default_policyengine_us_data_rebuild_program() -> PEUSDataRebuildProgram:
                     "Use the same model family and training/prediction split where "
                     "the intent is parity, even if the code is reorganized."
                 ),
-                current_status=PEUSDataRebuildStatus.NOT_STARTED,
+                current_status=PEUSDataRebuildStatus.PARTIAL,
                 notes=(
-                    "This is one of the biggest remaining gaps between a Microplex "
-                    "architecture and a true PE-US-data rebuild."
+                    "The donor-survey side now has an explicit PE-style "
+                    "prespecified predictor mode in the main pipeline, but the "
+                    "full extended CPS splice and donor-source adapter set are "
+                    "still missing."
                 ),
                 next_steps=(
-                    "Isolate PE-data stage-1 and stage-2 QRF contracts.",
+                    "Add explicit ACS/SIPP/SCF source providers for the donor-survey path.",
+                    "Isolate PE-data stage-1 and stage-2 QRF splice contracts.",
                     "Implement them behind Microplex method specs rather than inline scripts.",
                 ),
             ),

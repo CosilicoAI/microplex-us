@@ -246,6 +246,51 @@ class ColumnwiseQRFDonorImputer:
 AGE_LABELS = ["0-17", "18-34", "35-54", "55-64", "65+"]
 INCOME_BINS = [-np.inf, 25_000, 50_000, 100_000, np.inf]
 INCOME_LABELS = ["<25k", "25-50k", "50-100k", "100k+"]
+PE_SOURCE_IMPUTE_ACS_VARIABLES = frozenset({"rent", "real_estate_taxes"})
+PE_SOURCE_IMPUTE_SIPP_TIPS_VARIABLES = frozenset({"tip_income"})
+PE_SOURCE_IMPUTE_SIPP_ASSET_VARIABLES = frozenset(
+    {"bank_account_assets", "stock_assets", "bond_assets"}
+)
+PE_SOURCE_IMPUTE_SCF_VARIABLES = frozenset(
+    {"net_worth", "auto_loan_balance", "auto_loan_interest"}
+)
+PE_SOURCE_IMPUTE_PREDICTORS = {
+    "acs": (
+        "is_household_head",
+        "age",
+        "is_male",
+        "tenure_type",
+        "employment_income",
+        "self_employment_income",
+        "social_security",
+        "pension_income",
+        "household_size",
+        "state_fips",
+    ),
+    "sipp_tips": (
+        "employment_income",
+        "age",
+        "count_under_18",
+        "count_under_6",
+    ),
+    "sipp_assets": (
+        "employment_income",
+        "age",
+        "is_female",
+        "is_married",
+        "count_under_18",
+    ),
+    "scf": (
+        "age",
+        "is_female",
+        "cps_race",
+        "is_married",
+        "own_children_in_household",
+        "employment_income",
+        "interest_dividend_income",
+        "social_security_pension_income",
+    ),
+}
 ENTITY_ID_COLUMNS = {
     EntityType.PERSON: "person_id",
     EntityType.HOUSEHOLD: "household_id",
@@ -549,9 +594,9 @@ class USMicroplexBuildConfig:
     donor_imputer_backend: Literal["maf", "qrf", "zi_qrf"] = "maf"
     donor_imputer_qrf_n_estimators: int = 100
     donor_imputer_qrf_zero_threshold: float = 0.05
-    donor_imputer_condition_selection: Literal["all_shared", "top_correlated"] = (
-        "top_correlated"
-    )
+    donor_imputer_condition_selection: Literal[
+        "all_shared", "top_correlated", "pe_prespecified"
+    ] = "top_correlated"
     donor_imputer_max_condition_vars: int | None = 8
     donor_imputer_excluded_variables: tuple[str, ...] = ("filing_status_code",)
     donor_imputer_authoritative_override_variables: tuple[str, ...] = ()
@@ -2518,15 +2563,30 @@ class USMicroplexPipeline:
                         entity=donor_block_spec.native_entity,
                         variables=set(shared_vars_for_block),
                     )
+                donor_condition_source = donor_fit_source
+                current_condition_source = current_generation_source
+                if (
+                    self.config.donor_imputer_condition_selection == "pe_prespecified"
+                ):
+                    donor_condition_source = (
+                        self._prepare_pe_source_impute_condition_frame(donor_fit_source)
+                    )
+                    current_condition_source = (
+                        self._prepare_pe_source_impute_condition_frame(
+                            current_generation_source
+                        )
+                    )
                 donor_condition_vars = self._select_donor_condition_vars(
-                    donor_fit_source,
+                    donor_condition_source,
                     shared_vars_for_block,
                     donor_block_spec.model_variables,
+                    current_frame=current_condition_source,
+                    donor_source_name=donor_input.frame.source.name,
                 )
                 if not donor_condition_vars:
                     continue
 
-                fit_frame = donor_fit_source[
+                fit_frame = donor_condition_source[
                     donor_condition_vars + list(donor_block_spec.model_variables) + ["hh_weight"]
                 ].copy()
                 fit_frame = fit_frame.rename(columns={"hh_weight": "weight"})
@@ -2543,7 +2603,7 @@ class USMicroplexPipeline:
                     verbose=False,
                 )
                 generated = imputer.generate(
-                    current_generation_source[donor_condition_vars].copy(),
+                    current_condition_source[donor_condition_vars].copy(),
                     seed=self.config.random_seed,
                 )
                 for variable in donor_block_spec.model_variables:
@@ -2600,7 +2660,23 @@ class USMicroplexPipeline:
         donor_frame: pd.DataFrame,
         shared_vars: list[str],
         donor_block: tuple[str, ...],
+        *,
+        current_frame: pd.DataFrame | None = None,
+        donor_source_name: str | None = None,
     ) -> list[str]:
+        if (
+            self.config.donor_imputer_condition_selection == "pe_prespecified"
+            and current_frame is not None
+        ):
+            prespecified = self._resolve_pe_source_impute_condition_vars(
+                donor_frame=donor_frame,
+                current_frame=current_frame,
+                donor_source_name=donor_source_name,
+                donor_block=donor_block,
+            )
+            if prespecified:
+                return prespecified
+
         condition_vars = [
             variable for variable in shared_vars if variable in donor_frame.columns
         ]
@@ -2642,6 +2718,168 @@ class USMicroplexPipeline:
             variable
             for _, variable in scored_conditions[:max_condition_vars]
         ]
+
+    def _resolve_pe_source_impute_condition_vars(
+        self,
+        *,
+        donor_frame: pd.DataFrame,
+        current_frame: pd.DataFrame,
+        donor_source_name: str | None,
+        donor_block: tuple[str, ...],
+    ) -> list[str]:
+        source_key = self._pe_source_impute_source_key(
+            donor_source_name=donor_source_name,
+            donor_block=donor_block,
+        )
+        if source_key is None:
+            return []
+        donor_prepared = self._prepare_pe_source_impute_condition_frame(donor_frame)
+        current_prepared = self._prepare_pe_source_impute_condition_frame(current_frame)
+        return [
+            variable
+            for variable in PE_SOURCE_IMPUTE_PREDICTORS[source_key]
+            if variable in donor_prepared.columns
+            and variable in current_prepared.columns
+            and self._is_compatible_donor_condition(
+                donor_prepared[variable],
+                current_prepared[variable],
+            )
+        ]
+
+    def _pe_source_impute_source_key(
+        self,
+        *,
+        donor_source_name: str | None,
+        donor_block: tuple[str, ...],
+    ) -> str | None:
+        block_set = set(donor_block)
+        normalized_name = (donor_source_name or "").strip().lower()
+        if "acs" in normalized_name and block_set <= PE_SOURCE_IMPUTE_ACS_VARIABLES:
+            return "acs"
+        if "sipp" in normalized_name:
+            if block_set <= PE_SOURCE_IMPUTE_SIPP_TIPS_VARIABLES:
+                return "sipp_tips"
+            if block_set <= PE_SOURCE_IMPUTE_SIPP_ASSET_VARIABLES:
+                return "sipp_assets"
+        if "scf" in normalized_name and block_set <= PE_SOURCE_IMPUTE_SCF_VARIABLES:
+            return "scf"
+        return None
+
+    def _prepare_pe_source_impute_condition_frame(
+        self,
+        frame: pd.DataFrame,
+    ) -> pd.DataFrame:
+        prepared = frame.copy()
+        zero = pd.Series(0.0, index=prepared.index, dtype=float)
+
+        def first_present(*columns: str) -> pd.Series:
+            for column in columns:
+                if column in prepared.columns:
+                    return (
+                        pd.to_numeric(prepared[column], errors="coerce")
+                        .fillna(0.0)
+                        .astype(float)
+                    )
+            return zero.copy()
+
+        if "is_male" not in prepared.columns:
+            if "sex" in prepared.columns:
+                sex = pd.to_numeric(prepared["sex"], errors="coerce").fillna(0)
+                prepared["is_male"] = sex.eq(1).astype(float)
+        else:
+            prepared["is_male"] = (
+                pd.to_numeric(prepared["is_male"], errors="coerce").fillna(0.0).astype(float)
+            )
+
+        if "is_female" not in prepared.columns:
+            if "sex" in prepared.columns:
+                sex = pd.to_numeric(prepared["sex"], errors="coerce").fillna(0)
+                prepared["is_female"] = sex.eq(2).astype(float)
+        else:
+            prepared["is_female"] = (
+                pd.to_numeric(prepared["is_female"], errors="coerce").fillna(0.0).astype(float)
+            )
+
+        if "is_household_head" not in prepared.columns:
+            if "is_head" in prepared.columns:
+                prepared["is_household_head"] = (
+                    pd.to_numeric(prepared["is_head"], errors="coerce")
+                    .fillna(0.0)
+                    .astype(float)
+                )
+
+        if "tenure_type" not in prepared.columns and "tenure" in prepared.columns:
+            prepared["tenure_type"] = (
+                pd.to_numeric(prepared["tenure"], errors="coerce").fillna(0.0).astype(float)
+            )
+
+        if "social_security" not in prepared.columns:
+            prepared["social_security"] = first_present(
+                "gross_social_security",
+                "social_security",
+            )
+
+        if "pension_income" not in prepared.columns:
+            prepared["pension_income"] = first_present(
+                "taxable_pension_income",
+                "pension_income",
+            )
+
+        if "interest_dividend_income" not in prepared.columns:
+            prepared["interest_dividend_income"] = (
+                first_present("taxable_interest_income", "interest_income")
+                + first_present("ordinary_dividend_income", "dividend_income")
+            )
+
+        if "social_security_pension_income" not in prepared.columns:
+            prepared["social_security_pension_income"] = (
+                first_present("social_security", "gross_social_security")
+                + first_present("pension_income", "taxable_pension_income")
+            )
+
+        if "is_married" not in prepared.columns:
+            if "filing_status" in prepared.columns:
+                filing_status = prepared["filing_status"].astype(str)
+                prepared["is_married"] = filing_status.eq("JOINT").astype(float)
+            elif "marital_status" in prepared.columns:
+                marital_status = (
+                    pd.to_numeric(prepared["marital_status"], errors="coerce")
+                    .fillna(0)
+                    .astype(int)
+                )
+                prepared["is_married"] = marital_status.isin({1, 2}).astype(float)
+
+        household_key = None
+        for candidate in ("household_id", "spm_unit_id", "family_id"):
+            if candidate in prepared.columns:
+                household_key = candidate
+                break
+        if household_key is not None:
+            household_groups = prepared.groupby(household_key, dropna=False)
+            if "household_size" not in prepared.columns:
+                prepared["household_size"] = (
+                    household_groups[household_key].transform("size").astype(float)
+                )
+            if "age" in prepared.columns:
+                ages = pd.to_numeric(prepared["age"], errors="coerce").fillna(0.0)
+                if "count_under_18" not in prepared.columns:
+                    prepared["count_under_18"] = (
+                        ages.lt(18).groupby(prepared[household_key], dropna=False).transform("sum")
+                    ).astype(float)
+                if "count_under_6" not in prepared.columns:
+                    prepared["count_under_6"] = (
+                        ages.lt(6).groupby(prepared[household_key], dropna=False).transform("sum")
+                    ).astype(float)
+
+        if "own_children_in_household" not in prepared.columns and "count_under_18" in prepared.columns:
+            prepared["own_children_in_household"] = (
+                pd.to_numeric(prepared["count_under_18"], errors="coerce")
+                .fillna(0.0)
+                .gt(0.0)
+                .astype(float)
+            )
+
+        return prepared
 
     def _entity_key_column(self, entity: EntityType) -> str | None:
         return ENTITY_ID_COLUMNS.get(entity)

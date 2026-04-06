@@ -68,7 +68,7 @@ def test_default_policyengine_us_data_rebuild_config_uses_incumbent_defaults() -
     assert config.synthesis_backend == "seed"
     assert config.calibration_backend == "entropy"
     assert config.donor_imputer_backend == "qrf"
-    assert config.donor_imputer_condition_selection == "all_shared"
+    assert config.donor_imputer_condition_selection == "pe_prespecified"
     assert config.random_seed == 123
     assert config.cps_asec_source_year == 2022
 

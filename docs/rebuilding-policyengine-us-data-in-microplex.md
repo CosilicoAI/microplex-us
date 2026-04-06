@@ -21,6 +21,11 @@ The rebuild track now has explicit code-owned runtime entry points in
 These are meant to make the incumbent-parity path callable as a first-class
 Microplex profile rather than a loose collection of remembered settings.
 
+That profile now also includes:
+
+- the PE-style PUF Social Security QRF split mode
+- the PE-style prespecified donor-predictor mode for source imputations
+
 ## Why this rule exists
 
 If we mix:
