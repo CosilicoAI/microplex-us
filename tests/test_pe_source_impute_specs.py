@@ -35,6 +35,10 @@ def test_load_pe_source_impute_block_specs_reads_manifest() -> None:
         "employment_income",
     )
     assert specs["sipp_assets"].required_monthcode == 12
+    assert specs["acs"].dataset_loader is not None
+    assert specs["acs"].dataset_loader.module == "policyengine_us_data.datasets.acs.acs"
+    assert specs["scf"].dataset_loader is not None
+    assert specs["scf"].dataset_loader.builder_kind == "single_person_households"
 
 
 def test_resolve_pe_source_impute_block_key_uses_source_name_and_targets() -> None:

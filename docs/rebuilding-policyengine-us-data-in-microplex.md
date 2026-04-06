@@ -38,6 +38,8 @@ That profile now also includes:
     household child-count features
   - SIPP raw-file extraction details such as file names, delimiters, ID parts,
     raw column mappings, and simple indicator derivations
+  - ACS/SCF subprocess dataset-loader details such as dataset module/class,
+    table-builder mode, and canonical variable mappings
 
 ## Why this rule exists
 
@@ -131,6 +133,9 @@ When we face a design choice during the rebuild:
 - Keep raw donor-file mappings close to the block spec, so file names, raw
   columns, and identifier assembly stop being copied across multiple SIPP
   loaders.
+- Keep subprocess dataset-loader mappings close to the block spec too, so ACS
+  and SCF import/class/table-shaping contracts stop living as large inline
+  script blobs.
 - Keep the PE weighting backend, but call it through a Microplex-owned adapter.
 - Keep the same CPS reason-code logic, but express it in a source adapter with
   explicit parity tests.

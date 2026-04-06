@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+import json
 import pickle
 import subprocess
 import tempfile
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from textwrap import dedent
 
@@ -27,6 +28,7 @@ from microplex.core import (
 )
 
 from microplex_us.pe_source_impute_specs import (
+    PEPolicyengineDatasetLoaderSpec,
     PESourceImputeBlockSpec,
     apply_pe_source_impute_loader_postprocess,
     get_pe_source_impute_block_spec,
@@ -56,160 +58,6 @@ HOUSEHOLD_OBSERVATION_EXCLUDED_COLUMNS = (
     "household_id",
     "household_weight",
     "year",
-)
-
-PE_ACS_LOADER_SCRIPT = dedent(
-    """
-import pickle
-import sys
-import numpy as np
-import pandas as pd
-
-from policyengine_us_data.datasets.acs.acs import ACS_2022
-
-out_path = sys.argv[1]
-sample_n = None if sys.argv[2] == "None" else int(sys.argv[2])
-random_seed = int(sys.argv[3])
-
-data = ACS_2022().load_dataset()
-household_index = pd.Index(data["household_id"])
-person_households = pd.Index(data["person_household_id"])
-household_to_row = pd.Series(
-    np.arange(len(household_index), dtype=np.int64),
-    index=household_index,
-)
-household_rows = household_to_row.loc[person_households].to_numpy()
-persons = pd.DataFrame(
-    {
-        "person_id": data["person_id"],
-        "household_id": person_households.to_numpy(),
-        "age": data["age"],
-        "sex": np.where(np.asarray(data["is_male"]).astype(bool), 1, 2),
-        "is_male": np.asarray(data["is_male"]).astype(float),
-        "is_household_head": np.asarray(data["is_household_head"]).astype(float),
-        "employment_income": data["employment_income"],
-        "self_employment_income": data["self_employment_income"],
-        "social_security": data["social_security"],
-        "taxable_pension_income": data["taxable_private_pension_income"],
-        "rent": data["rent"],
-        "real_estate_taxes": data["real_estate_taxes"],
-        "state_fips": np.asarray(data["state_fips"])[household_rows],
-        "weight": np.asarray(data["household_weight"])[household_rows],
-        "year": np.full(len(data["person_id"]), 2022, dtype=np.int32),
-    }
-)
-tenure_raw = pd.Series(np.asarray(data["tenure_type"])[household_rows]).map(
-    lambda value: value.decode() if isinstance(value, (bytes, bytearray)) else str(value)
-)
-persons["tenure_type"] = tenure_raw.map(
-    {
-        "OWNED_WITH_MORTGAGE": 1,
-        "OWNED_OUTRIGHT": 1,
-        "RENTED": 2,
-        "NONE": 0,
-    }
-).fillna(0).astype(int)
-persons["tenure"] = persons["tenure_type"]
-persons["income"] = (
-    pd.to_numeric(persons["employment_income"], errors="coerce").fillna(0.0)
-    + pd.to_numeric(persons["self_employment_income"], errors="coerce").fillna(0.0)
-    + pd.to_numeric(persons["social_security"], errors="coerce").fillna(0.0)
-    + pd.to_numeric(persons["taxable_pension_income"], errors="coerce").fillna(0.0)
-)
-
-households = (
-    persons[["household_id", "state_fips", "tenure", "weight", "year"]]
-    .rename(columns={"weight": "household_weight"})
-    .drop_duplicates(subset=["household_id"])
-    .reset_index(drop=True)
-)
-
-if sample_n is not None and sample_n < len(households):
-    sampled = households.sample(
-        n=sample_n,
-        random_state=random_seed,
-        replace=False,
-        weights=households["household_weight"],
-    ).copy()
-    keep = set(sampled["household_id"])
-    households = sampled.sort_values(["household_id"]).reset_index(drop=True)
-    persons = (
-        persons[persons["household_id"].isin(keep)]
-        .sort_values(["household_id", "person_id"])
-        .reset_index(drop=True)
-    )
-else:
-    households = households.sort_values(["household_id"]).reset_index(drop=True)
-    persons = persons.sort_values(["household_id", "person_id"]).reset_index(drop=True)
-
-with open(out_path, "wb") as handle:
-    pickle.dump({"households": households, "persons": persons}, handle)
-"""
-)
-
-PE_SCF_LOADER_SCRIPT = dedent(
-    """
-import pickle
-import sys
-import numpy as np
-import pandas as pd
-
-from policyengine_us_data.datasets.scf.scf import SCF_2022
-
-out_path = sys.argv[1]
-sample_n = None if sys.argv[2] == "None" else int(sys.argv[2])
-random_seed = int(sys.argv[3])
-
-data = SCF_2022().load_dataset()
-persons = pd.DataFrame(
-    {
-        "household_id": np.arange(len(data["age"]), dtype=np.int64) + 1,
-        "age": data["age"],
-        "is_female": np.asarray(data["is_female"]).astype(float),
-        "sex": np.where(np.asarray(data["is_female"]).astype(bool), 2, 1),
-        "cps_race": data["cps_race"],
-        "is_married": np.asarray(data["is_married"]).astype(float),
-        "own_children_in_household": data["own_children_in_household"],
-        "employment_income": data["employment_income"],
-        "interest_dividend_income": data["interest_dividend_income"],
-        "social_security_pension_income": data["social_security_pension_income"],
-        "auto_loan_balance": data["auto_loan_balance"],
-        "auto_loan_interest": data["auto_loan_interest"],
-        "weight": data["wgt"],
-        "year": np.full(len(data["age"]), 2022, dtype=np.int32),
-    }
-)
-persons["net_worth"] = data["net_worth"] if "net_worth" in data else data["networth"]
-persons["person_id"] = persons["household_id"]
-persons["state_fips"] = 0
-persons["tenure"] = 0
-persons["income"] = pd.to_numeric(persons["employment_income"], errors="coerce").fillna(0.0)
-
-households = persons[
-    ["household_id", "state_fips", "tenure", "weight", "year"]
-].rename(columns={"weight": "household_weight"})
-
-if sample_n is not None and sample_n < len(households):
-    sampled = households.sample(
-        n=sample_n,
-        random_state=random_seed,
-        replace=False,
-        weights=households["household_weight"],
-    ).copy()
-    keep = set(sampled["household_id"])
-    households = sampled.sort_values(["household_id"]).reset_index(drop=True)
-    persons = (
-        persons[persons["household_id"].isin(keep)]
-        .sort_values(["household_id", "person_id"])
-        .reset_index(drop=True)
-    )
-else:
-    households = households.sort_values(["household_id"]).reset_index(drop=True)
-    persons = persons.sort_values(["household_id", "person_id"]).reset_index(drop=True)
-
-with open(out_path, "wb") as handle:
-    pickle.dump({"households": households, "persons": persons}, handle)
-"""
 )
 
 
@@ -385,6 +233,154 @@ def _build_observation_frame(
     return frame
 
 
+def _build_policyengine_dataset_loader_script(
+    spec: PEPolicyengineDatasetLoaderSpec,
+    *,
+    year: int,
+) -> str:
+    payload = json.dumps(
+        {
+            "year": int(year),
+            "dataset_loader": asdict(spec),
+        }
+    )
+    return dedent(
+        f"""
+import importlib
+import json
+import pickle
+import sys
+import numpy as np
+import pandas as pd
+
+payload = json.loads({payload!r})
+spec = payload["dataset_loader"]
+out_path = sys.argv[1]
+sample_n = None if sys.argv[2] == "None" else int(sys.argv[2])
+random_seed = int(sys.argv[3])
+
+module = importlib.import_module(spec["module"])
+dataset_cls = getattr(module, spec["class_name"])
+data = dataset_cls().load_dataset()
+
+def _numeric(values):
+    return pd.to_numeric(pd.Series(np.asarray(values)), errors="coerce").fillna(0.0)
+
+def _boolean_float(values):
+    return pd.Series(np.asarray(values)).astype(bool).astype(float)
+
+def _text(values):
+    return pd.Series(np.asarray(values)).map(
+        lambda value: value.decode() if isinstance(value, (bytes, bytearray)) else str(value)
+    )
+
+def _mapped_text(values, mapping):
+    return _text(values).map(mapping).fillna(0).astype(int)
+
+def _load_fallback(keys):
+    for key in keys:
+        if key in data:
+            return pd.Series(np.asarray(data[key]))
+    raise KeyError(f"Missing fallback keys {{keys}} in dataset payload")
+
+def _build_persons():
+    if spec["builder_kind"] == "household_rows":
+        household_index = pd.Index(data[spec["household_index_key"]])
+        person_households = pd.Index(data[spec["person_household_key"]])
+        household_to_row = pd.Series(
+            np.arange(len(household_index), dtype=np.int64),
+            index=household_index,
+        )
+        household_rows = household_to_row.loc[person_households].to_numpy()
+        persons = pd.DataFrame({{"household_id": person_households.to_numpy()}})
+        if spec["person_id_key"] is not None:
+            persons["person_id"] = np.asarray(data[spec["person_id_key"]])
+        for target, source in spec["direct_person_columns"].items():
+            persons[target] = _numeric(data[source])
+        for target, source in spec["boolean_person_columns"].items():
+            persons[target] = _boolean_float(data[source])
+        for target, source in spec["row_indexed_person_columns"].items():
+            persons[target] = _numeric(np.asarray(data[source])[household_rows])
+        for target, source in spec["mapped_row_person_columns"].items():
+            persons[target] = _mapped_text(
+                np.asarray(data[source])[household_rows],
+                spec["mapped_value_tables"][target],
+            )
+    elif spec["builder_kind"] == "single_person_households":
+        base_length = len(data[spec["length_source_key"]])
+        if spec["generated_household_ids"]:
+            household_ids = np.arange(base_length, dtype=np.int64) + 1
+        else:
+            household_ids = np.asarray(data[spec["household_index_key"]])
+        persons = pd.DataFrame({{"household_id": household_ids}})
+        if spec["person_id_from_household_id"]:
+            persons["person_id"] = persons["household_id"]
+        elif spec["person_id_key"] is not None:
+            persons["person_id"] = np.asarray(data[spec["person_id_key"]])
+        for target, source in spec["direct_person_columns"].items():
+            persons[target] = _numeric(data[source])
+        for target, source in spec["boolean_person_columns"].items():
+            persons[target] = _boolean_float(data[source])
+    else:
+        raise ValueError(f"Unsupported dataset loader builder kind: {{spec['builder_kind']}}")
+
+    for target, keys in spec["fallback_person_columns"].items():
+        persons[target] = _numeric(_load_fallback(keys))
+    if spec["sex_from_boolean_source"] is not None:
+        source = spec["sex_from_boolean_source"]
+        source_values = pd.Series(persons[source]).astype(bool).to_numpy()
+        persons["sex"] = np.where(
+            source_values,
+            spec["sex_true_value"],
+            spec["sex_false_value"],
+        )
+    for target, source in spec["copy_person_columns"].items():
+        persons[target] = persons[source]
+    for target, value in spec["constant_person_columns"].items():
+        persons[target] = value
+    if spec["income_sum_columns"]:
+        persons["income"] = sum(
+            _numeric(persons[column]) for column in spec["income_sum_columns"]
+        )
+    for column in spec["int_person_columns"]:
+        if column in persons.columns:
+            persons[column] = (
+                pd.to_numeric(persons[column], errors="coerce")
+                .fillna(0)
+                .astype(int)
+            )
+    persons["year"] = int(payload["year"])
+    return persons
+
+persons = _build_persons()
+households = persons[
+    ["household_id", "state_fips", "tenure", "weight", "year"]
+].rename(columns={{"weight": "household_weight"}})
+
+if sample_n is not None and sample_n < len(households):
+    sampled = households.sample(
+        n=sample_n,
+        random_state=random_seed,
+        replace=False,
+        weights=households["household_weight"],
+    ).copy()
+    keep = set(sampled["household_id"])
+    households = sampled.sort_values(["household_id"]).reset_index(drop=True)
+    persons = (
+        persons[persons["household_id"].isin(keep)]
+        .sort_values(["household_id", "person_id"])
+        .reset_index(drop=True)
+    )
+else:
+    households = households.sort_values(["household_id"]).reset_index(drop=True)
+    persons = persons.sort_values(["household_id", "person_id"]).reset_index(drop=True)
+
+with open(out_path, "wb") as handle:
+    pickle.dump({{"households": households, "persons": persons}}, handle)
+"""
+    )
+
+
 def _run_policyengine_dataset_loader(
     *,
     script: str,
@@ -422,6 +418,27 @@ def _run_policyengine_dataset_loader(
     )
 
 
+def _run_policyengine_dataset_loader_from_spec(
+    *,
+    spec: PESourceImputeBlockSpec,
+    year: int,
+    sample_n: int | None,
+    random_seed: int,
+    policyengine_us_data_repo: str | Path | None = None,
+    policyengine_us_data_python: str | Path | None = None,
+) -> DonorSurveyTables:
+    dataset_loader = spec.dataset_loader
+    if dataset_loader is None:
+        raise ValueError(f"PE source-impute block '{spec.key}' is missing a dataset loader spec")
+    return _run_policyengine_dataset_loader(
+        script=_build_policyengine_dataset_loader_script(dataset_loader, year=year),
+        sample_n=sample_n,
+        random_seed=random_seed,
+        policyengine_us_data_repo=policyengine_us_data_repo,
+        policyengine_us_data_python=policyengine_us_data_python,
+    )
+
+
 def _default_acs_tables_loader(
     *,
     year: int,
@@ -432,10 +449,14 @@ def _default_acs_tables_loader(
     policyengine_us_data_python: str | Path | None = None,
 ) -> DonorSurveyTables:
     _ = cache_dir
-    if int(year) != 2022:
-        raise ValueError("ACS donor source provider currently supports year=2022 only")
-    return _run_policyengine_dataset_loader(
-        script=PE_ACS_LOADER_SCRIPT,
+    spec = get_pe_source_impute_block_spec("acs")
+    if int(year) != spec.default_year:
+        raise ValueError(
+            f"{spec.descriptor_name} provider currently supports year={spec.default_year} only"
+        )
+    return _run_policyengine_dataset_loader_from_spec(
+        spec=spec,
+        year=year,
         sample_n=sample_n,
         random_seed=random_seed,
         policyengine_us_data_repo=policyengine_us_data_repo,
@@ -453,10 +474,14 @@ def _default_scf_tables_loader(
     policyengine_us_data_python: str | Path | None = None,
 ) -> DonorSurveyTables:
     _ = cache_dir
-    if int(year) != 2022:
-        raise ValueError("SCF donor source provider currently supports year=2022 only")
-    return _run_policyengine_dataset_loader(
-        script=PE_SCF_LOADER_SCRIPT,
+    spec = get_pe_source_impute_block_spec("scf")
+    if int(year) != spec.default_year:
+        raise ValueError(
+            f"{spec.descriptor_name} provider currently supports year={spec.default_year} only"
+        )
+    return _run_policyengine_dataset_loader_from_spec(
+        spec=spec,
+        year=year,
         sample_n=sample_n,
         random_seed=random_seed,
         policyengine_us_data_repo=policyengine_us_data_repo,

@@ -151,6 +151,34 @@ def test_acs_source_provider_builds_observation_frame_from_injected_loader() -> 
     assert list(frame.tables[EntityType.HOUSEHOLD]["household_id"]) == [1, 2]
 
 
+def test_acs_source_provider_uses_manifest_backed_dataset_loader(
+    monkeypatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    def _fake_loader(*, spec, year, sample_n, random_seed, **_kwargs) -> DonorSurveyTables:
+        captured["spec"] = spec
+        captured["year"] = year
+        captured["sample_n"] = sample_n
+        captured["random_seed"] = random_seed
+        return _acs_tables()
+
+    monkeypatch.setattr(
+        donor_surveys,
+        "_run_policyengine_dataset_loader_from_spec",
+        _fake_loader,
+    )
+
+    provider = ACSSourceProvider()
+    frame = provider.load_frame()
+
+    assert frame.source.name == "acs_2022"
+    assert captured["spec"].key == "acs"
+    assert captured["year"] == 2022
+    assert captured["sample_n"] is None
+    assert captured["random_seed"] == 0
+
+
 def test_sipp_and_scf_provider_fillers_are_not_usable_as_conditions() -> None:
     tips_provider = SIPPSourceProvider(block="tips", loader=_sipp_tips_tables)
     assets_provider = SIPPSourceProvider(block="assets", loader=_sipp_assets_tables)
@@ -167,6 +195,34 @@ def test_sipp_and_scf_provider_fillers_are_not_usable_as_conditions() -> None:
     assert assets_frame.source.is_authoritative_for("tenure") is False
     assert scf_frame.source.allows_conditioning_on("state_fips") is False
     assert scf_frame.source.observes("net_worth", EntityType.PERSON)
+
+
+def test_scf_source_provider_uses_manifest_backed_dataset_loader(
+    monkeypatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    def _fake_loader(*, spec, year, sample_n, random_seed, **_kwargs) -> DonorSurveyTables:
+        captured["spec"] = spec
+        captured["year"] = year
+        captured["sample_n"] = sample_n
+        captured["random_seed"] = random_seed
+        return _scf_tables()
+
+    monkeypatch.setattr(
+        donor_surveys,
+        "_run_policyengine_dataset_loader_from_spec",
+        _fake_loader,
+    )
+
+    provider = SCFSourceProvider()
+    frame = provider.load_frame()
+
+    assert frame.source.name == "scf_2022"
+    assert captured["spec"].key == "scf"
+    assert captured["year"] == 2022
+    assert captured["sample_n"] is None
+    assert captured["random_seed"] == 0
 
 
 def test_sipp_tips_provider_uses_manifest_backed_raw_loader(

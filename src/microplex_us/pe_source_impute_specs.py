@@ -38,6 +38,34 @@ class PESourceImputeRawLoaderSpec:
 
 
 @dataclass(frozen=True)
+class PEPolicyengineDatasetLoaderSpec:
+    """Declarative subprocess dataset-loader contract for one donor block."""
+
+    module: str
+    class_name: str
+    builder_kind: str
+    household_index_key: str | None
+    person_household_key: str | None
+    person_id_key: str | None
+    length_source_key: str | None
+    direct_person_columns: dict[str, str]
+    boolean_person_columns: dict[str, str]
+    row_indexed_person_columns: dict[str, str]
+    mapped_row_person_columns: dict[str, str]
+    mapped_value_tables: dict[str, dict[str, int]]
+    fallback_person_columns: dict[str, tuple[str, ...]]
+    copy_person_columns: dict[str, str]
+    constant_person_columns: dict[str, str | int | float | bool]
+    income_sum_columns: tuple[str, ...]
+    int_person_columns: tuple[str, ...]
+    sex_from_boolean_source: str | None
+    sex_true_value: int | None
+    sex_false_value: int | None
+    generated_household_ids: bool
+    person_id_from_household_id: bool
+
+
+@dataclass(frozen=True)
 class PESourceImputeBlockSpec:
     """Declarative contract for one PE donor-survey block."""
 
@@ -46,6 +74,7 @@ class PESourceImputeBlockSpec:
     block_name: str | None
     default_year: int
     archetype: SourceArchetype | None
+    dataset_loader: PEPolicyengineDatasetLoaderSpec | None
     raw_loader: PESourceImputeRawLoaderSpec | None
     required_monthcode: int | None
     annualized_variables: tuple[str, ...]
@@ -111,6 +140,68 @@ def _raw_loader_from_payload(
     )
 
 
+def _dataset_loader_from_payload(
+    payload: dict[str, Any] | None,
+) -> PEPolicyengineDatasetLoaderSpec | None:
+    if payload is None:
+        return None
+    return PEPolicyengineDatasetLoaderSpec(
+        module=str(payload["module"]),
+        class_name=str(payload["class_name"]),
+        builder_kind=str(payload["builder_kind"]),
+        household_index_key=payload.get("household_index_key"),
+        person_household_key=payload.get("person_household_key"),
+        person_id_key=payload.get("person_id_key"),
+        length_source_key=payload.get("length_source_key"),
+        direct_person_columns={
+            str(key): str(value)
+            for key, value in payload.get("direct_person_columns", {}).items()
+        },
+        boolean_person_columns={
+            str(key): str(value)
+            for key, value in payload.get("boolean_person_columns", {}).items()
+        },
+        row_indexed_person_columns={
+            str(key): str(value)
+            for key, value in payload.get("row_indexed_person_columns", {}).items()
+        },
+        mapped_row_person_columns={
+            str(key): str(value)
+            for key, value in payload.get("mapped_row_person_columns", {}).items()
+        },
+        mapped_value_tables={
+            str(key): {
+                str(mapped_key): int(mapped_value)
+                for mapped_key, mapped_value in value.items()
+            }
+            for key, value in payload.get("mapped_value_tables", {}).items()
+        },
+        fallback_person_columns={
+            str(key): tuple(str(item) for item in value)
+            for key, value in payload.get("fallback_person_columns", {}).items()
+        },
+        copy_person_columns={
+            str(key): str(value)
+            for key, value in payload.get("copy_person_columns", {}).items()
+        },
+        constant_person_columns={
+            str(key): value
+            for key, value in payload.get("constant_person_columns", {}).items()
+        },
+        income_sum_columns=tuple(payload.get("income_sum_columns", ())),
+        int_person_columns=tuple(payload.get("int_person_columns", ())),
+        sex_from_boolean_source=payload.get("sex_from_boolean_source"),
+        sex_true_value=(
+            None if payload.get("sex_true_value") is None else int(payload["sex_true_value"])
+        ),
+        sex_false_value=(
+            None if payload.get("sex_false_value") is None else int(payload["sex_false_value"])
+        ),
+        generated_household_ids=bool(payload.get("generated_household_ids", False)),
+        person_id_from_household_id=bool(payload.get("person_id_from_household_id", False)),
+    )
+
+
 def _spec_from_payload(key: str, payload: dict[str, Any]) -> PESourceImputeBlockSpec:
     return PESourceImputeBlockSpec(
         key=key,
@@ -118,6 +209,7 @@ def _spec_from_payload(key: str, payload: dict[str, Any]) -> PESourceImputeBlock
         block_name=payload.get("block_name"),
         default_year=int(payload["default_year"]),
         archetype=_archetype_from_name(payload.get("archetype")),
+        dataset_loader=_dataset_loader_from_payload(payload.get("dataset_loader")),
         raw_loader=_raw_loader_from_payload(payload.get("raw_loader")),
         required_monthcode=(
             None
