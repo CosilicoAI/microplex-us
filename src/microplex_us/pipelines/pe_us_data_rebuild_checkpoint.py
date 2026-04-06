@@ -167,7 +167,13 @@ def _resolve_saved_artifact_path(
         return None
     candidate = Path(relative_or_absolute)
     if not candidate.is_absolute():
-        candidate = artifact_root / candidate
+        artifact_relative = artifact_root / candidate
+        if artifact_relative.exists():
+            return artifact_relative
+        cwd_relative = candidate.resolve()
+        if cwd_relative.exists():
+            return cwd_relative
+        candidate = artifact_relative
     return candidate
 
 

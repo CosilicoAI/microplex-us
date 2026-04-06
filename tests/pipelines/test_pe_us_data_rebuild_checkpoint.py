@@ -88,6 +88,7 @@ def test_run_policyengine_us_data_rebuild_checkpoint_builds_bundle_and_parity(
     monkeypatch,
     tmp_path,
 ) -> None:
+    monkeypatch.chdir(tmp_path)
     artifact_dir = tmp_path / "artifacts" / "run-1"
     artifact_dir.mkdir(parents=True)
     provider = _FakeProvider(descriptor=SimpleNamespace(name="fake_source"))
@@ -225,6 +226,8 @@ def test_run_policyengine_us_data_rebuild_checkpoint_builds_bundle_and_parity(
         **kwargs,
     ):
         artifact_root = Path(artifact_dir_arg)
+        registry_path = tmp_path / "artifacts" / "run_registry.jsonl"
+        run_index_path = tmp_path / "artifacts" / "run_index.duckdb"
         manifest_path = artifact_root / "manifest.json"
         manifest = json.loads(manifest_path.read_text())
         manifest["artifacts"]["policyengine_harness"] = "policyengine_harness.json"
@@ -243,6 +246,30 @@ def test_run_policyengine_us_data_rebuild_checkpoint_builds_bundle_and_parity(
             "candidate_mean_abs_relative_error": 0.08,
             "baseline_mean_abs_relative_error": 0.10,
             "mean_abs_relative_error_delta": -0.02,
+        }
+        registry_path.write_text(
+            json.dumps(
+                {
+                    "created_at": "2026-04-06T00:00:00+00:00",
+                    "artifact_id": "run-1",
+                    "artifact_dir": str(artifact_root.resolve()),
+                    "manifest_path": str(manifest_path.resolve()),
+                    "policyengine_harness_path": str(
+                        (artifact_root / "policyengine_harness.json").resolve()
+                    ),
+                    "enhanced_cps_native_loss_delta": 0.5,
+                }
+            )
+            + "\n"
+        )
+        run_index_path.write_text("")
+        manifest["run_registry"] = {
+            "path": "artifacts/run_registry.jsonl",
+            "artifact_id": "run-1",
+        }
+        manifest["run_index"] = {
+            "path": "artifacts/run_index.duckdb",
+            "artifact_id": "run-1",
         }
         manifest_path.write_text(json.dumps(manifest))
         return SimpleNamespace(
@@ -300,6 +327,13 @@ def test_run_policyengine_us_data_rebuild_checkpoint_builds_bundle_and_parity(
         result.artifacts.artifact_paths.policyengine_harness
         == artifact_dir / "policyengine_harness.json"
     )
+    assert result.artifacts.artifact_paths.run_registry == tmp_path / "artifacts" / "run_registry.jsonl"
+    assert result.artifacts.artifact_paths.run_index_db == tmp_path / "artifacts" / "run_index.duckdb"
+    assert result.artifacts.current_entry is not None
+    assert result.artifacts.current_entry.artifact_id == "run-1"
+    assert result.artifacts.frontier_entry is not None
+    assert result.artifacts.frontier_entry.artifact_id == "run-1"
+    assert result.artifacts.frontier_delta == 0.0
 
 
 def test_run_policyengine_us_data_rebuild_checkpoint_rejects_empty_provider_sequence(
