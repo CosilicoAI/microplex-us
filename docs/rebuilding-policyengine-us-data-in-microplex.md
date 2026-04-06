@@ -43,8 +43,8 @@ That profile now also includes:
   - one explicit PE source-impute execution boundary in
     [`pe_source_impute_engine.py`](/Users/maxghenis/CosilicoAI/microplex-us/src/microplex_us/pe_source_impute_engine.py)
     so `us.py` no longer owns PE block resolution, PE block-frame preparation /
-    entity projection, condition-surface prep, or the prespecified block
-    fit/generate/match loop
+    entity projection, condition-surface prep, the prespecified block
+    fit/generate/match loop, or a second duplicated generic donor execution loop
 
 ## Why this rule exists
 

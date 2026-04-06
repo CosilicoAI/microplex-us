@@ -41,6 +41,7 @@ from sklearn.ensemble import RandomForestClassifier
 from microplex_us.pe_source_impute_engine import (
     PE_SOURCE_IMPUTE_BLOCK_ENGINE,
     PESourceImputeBlockRunRequest,
+    PESourceImputeConditionedBlockRunRequest,
 )
 from microplex_us.pipelines.pe_l0 import PolicyEngineL0Calibrator
 from microplex_us.pipelines.pe_native_optimization import (
@@ -69,7 +70,6 @@ from microplex_us.policyengine.us import (
 from microplex_us.variables import (
     DonorMatchStrategy,
     VariableSupportFamily,
-    apply_donor_variable_semantics,
     donor_imputation_block_specs,
     normalize_dividend_columns,
     normalize_social_security_columns,
@@ -2533,69 +2533,33 @@ class USMicroplexPipeline:
                 if not donor_condition_vars:
                     continue
 
-                fit_frame = donor_condition_source[
-                    donor_condition_vars + list(donor_block_spec.model_variables) + ["hh_weight"]
-                ].copy()
-                fit_frame = fit_frame.rename(columns={"hh_weight": "weight"})
-                imputer = self._build_donor_imputer(
-                    condition_vars=donor_condition_vars,
-                    target_vars=donor_block_spec.model_variables,
-                )
-                imputer.fit(
-                    fit_frame,
-                    weight_col="weight",
-                    epochs=self.config.donor_imputer_epochs,
-                    batch_size=self.config.donor_imputer_batch_size,
-                    learning_rate=self.config.donor_imputer_learning_rate,
-                    verbose=False,
-                )
-                generated = imputer.generate(
-                    current_condition_source[donor_condition_vars].copy(),
+                result = PE_SOURCE_IMPUTE_BLOCK_ENGINE.run_conditioned_block(
+                    request=PESourceImputeConditionedBlockRunRequest(
+                        block_request=PESourceImputeBlockRunRequest(
+                            donor_block_spec=donor_block_spec,
+                            donor_fit_source=donor_fit_source,
+                            current_generation_source=current_generation_source,
+                            current_frame=current,
+                            entity_key=entity_key,
+                        ),
+                        donor_condition_source=donor_condition_source,
+                        current_condition_source=current_condition_source,
+                        condition_vars=tuple(donor_condition_vars),
+                    ),
+                    build_imputer=self._build_donor_imputer,
+                    rank_match=self._rank_match_donor_values,
+                    fit_kwargs={
+                        "epochs": self.config.donor_imputer_epochs,
+                        "batch_size": self.config.donor_imputer_batch_size,
+                        "learning_rate": self.config.donor_imputer_learning_rate,
+                        "verbose": False,
+                    },
                     seed=self.config.random_seed,
+                    rng=rng,
                 )
-                for variable in donor_block_spec.model_variables:
-                    donor_support = (
-                        pd.to_numeric(donor_fit_source[variable], errors="coerce")
-                        .replace([np.inf, -np.inf], np.nan)
-                        .dropna()
-                    )
-                    generated_scores = pd.to_numeric(
-                        generated[variable],
-                        errors="coerce",
-                    ).replace([np.inf, -np.inf], np.nan)
-                    if donor_support.empty:
-                        current[variable] = generated_scores.fillna(0.0).astype(float)
-                        continue
-                    donor_weights = pd.to_numeric(
-                        donor_fit_source.loc[donor_support.index, "hh_weight"],
-                        errors="coerce",
-                    ).fillna(0.0)
-                    matched_values = self._rank_match_donor_values(
-                        generated_scores.fillna(float(donor_support.median())).astype(float),
-                        donor_values=donor_support.astype(float),
-                        donor_weights=donor_weights.astype(float),
-                        rng=rng,
-                        strategy=donor_block_spec.strategy_for(variable),
-                    )
-                    if entity_key is not None and entity_key in current_generation_source.columns:
-                        entity_values = pd.Series(
-                            matched_values.to_numpy(dtype=float),
-                            index=current_generation_source[entity_key].to_numpy(),
-                            dtype=float,
-                        )
-                        current[variable] = pd.to_numeric(
-                            current[entity_key].map(entity_values),
-                            errors="coerce",
-                        ).fillna(0.0)
-                    else:
-                        current[variable] = matched_values
-                if donor_block_spec.restore_frame is not None:
-                    current = donor_block_spec.restore_frame(current)
-                current = apply_donor_variable_semantics(
-                    current,
-                    donor_block_spec.restored_variables,
-                )
-                integrated_variables.extend(donor_block_spec.restored_variables)
+                if result is not None:
+                    current = result.updated_frame
+                    integrated_variables.extend(result.integrated_variables)
 
         return {
             "seed_data": current,

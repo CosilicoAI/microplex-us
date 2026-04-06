@@ -84,6 +84,16 @@ class PESourceImputePreparedBlockInputs:
 
 
 @dataclass(frozen=True)
+class PESourceImputeConditionedBlockRunRequest:
+    """Inputs needed to execute one donor block after conditions are selected."""
+
+    block_request: PESourceImputeBlockRunRequest
+    donor_condition_source: pd.DataFrame
+    current_condition_source: pd.DataFrame
+    condition_vars: tuple[str, ...]
+
+
+@dataclass(frozen=True)
 class PESourceImputeBlockEngine:
     """Centralized resolver for PE donor-block specs and condition surfaces."""
 
@@ -220,16 +230,43 @@ class PESourceImputeBlockEngine:
         condition_vars = surface.compatible_predictors(
             compatibility_fn=compatibility_fn,
         )
+        return self.run_conditioned_block(
+            request=PESourceImputeConditionedBlockRunRequest(
+                block_request=request,
+                donor_condition_source=surface.donor_frame,
+                current_condition_source=surface.current_frame,
+                condition_vars=tuple(condition_vars),
+            ),
+            build_imputer=build_imputer,
+            rank_match=rank_match,
+            fit_kwargs=fit_kwargs,
+            seed=seed,
+            rng=rng,
+        )
+
+    def run_conditioned_block(
+        self,
+        *,
+        request: PESourceImputeConditionedBlockRunRequest,
+        build_imputer: DonorImputerBuilderFn,
+        rank_match: DonorRankMatcherFn,
+        fit_kwargs: dict[str, int | float | bool],
+        seed: int,
+        rng: np.random.Generator,
+    ) -> PESourceImputeBlockRunResult | None:
+        """Run one donor block after the conditioning surface is already selected."""
+        condition_vars = list(request.condition_vars)
         if not condition_vars:
             return None
 
-        fit_frame = surface.donor_frame[
-            condition_vars + list(request.donor_block_spec.model_variables) + ["hh_weight"]
+        block_request = request.block_request
+        fit_frame = request.donor_condition_source[
+            condition_vars + list(block_request.donor_block_spec.model_variables) + ["hh_weight"]
         ].copy()
         fit_frame = fit_frame.rename(columns={"hh_weight": "weight"})
         imputer = build_imputer(
             condition_vars=condition_vars,
-            target_vars=request.donor_block_spec.model_variables,
+            target_vars=block_request.donor_block_spec.model_variables,
         )
         imputer.fit(
             fit_frame,
@@ -237,13 +274,13 @@ class PESourceImputeBlockEngine:
             **fit_kwargs,
         )
         generated = imputer.generate(
-            surface.current_frame[condition_vars].copy(),
+            request.current_condition_source[condition_vars].copy(),
             seed=seed,
         )
-        updated = request.current_frame.copy()
-        for variable in request.donor_block_spec.model_variables:
+        updated = block_request.current_frame.copy()
+        for variable in block_request.donor_block_spec.model_variables:
             donor_support = (
-                pd.to_numeric(request.donor_fit_source[variable], errors="coerce")
+                pd.to_numeric(block_request.donor_fit_source[variable], errors="coerce")
                 .replace([np.inf, -np.inf], np.nan)
                 .dropna()
             )
@@ -255,7 +292,7 @@ class PESourceImputeBlockEngine:
                 updated[variable] = generated_scores.fillna(0.0).astype(float)
                 continue
             donor_weights = pd.to_numeric(
-                request.donor_fit_source.loc[donor_support.index, "hh_weight"],
+                block_request.donor_fit_source.loc[donor_support.index, "hh_weight"],
                 errors="coerce",
             ).fillna(0.0)
             matched_values = rank_match(
@@ -263,32 +300,34 @@ class PESourceImputeBlockEngine:
                 donor_values=donor_support.astype(float),
                 donor_weights=donor_weights.astype(float),
                 rng=rng,
-                strategy=request.donor_block_spec.strategy_for(variable),
+                strategy=block_request.donor_block_spec.strategy_for(variable),
             )
             if (
-                request.entity_key is not None
-                and request.entity_key in request.current_generation_source.columns
+                block_request.entity_key is not None
+                and block_request.entity_key in block_request.current_generation_source.columns
             ):
                 entity_values = pd.Series(
                     matched_values.to_numpy(dtype=float),
-                    index=request.current_generation_source[request.entity_key].to_numpy(),
+                    index=block_request.current_generation_source[
+                        block_request.entity_key
+                    ].to_numpy(),
                     dtype=float,
                 )
                 updated[variable] = pd.to_numeric(
-                    updated[request.entity_key].map(entity_values),
+                    updated[block_request.entity_key].map(entity_values),
                     errors="coerce",
                 ).fillna(0.0)
             else:
                 updated[variable] = matched_values
-        if request.donor_block_spec.restore_frame is not None:
-            updated = request.donor_block_spec.restore_frame(updated)
+        if block_request.donor_block_spec.restore_frame is not None:
+            updated = block_request.donor_block_spec.restore_frame(updated)
         updated = apply_donor_variable_semantics(
             updated,
-            request.donor_block_spec.restored_variables,
+            block_request.donor_block_spec.restored_variables,
         )
         return PESourceImputeBlockRunResult(
             updated_frame=updated,
-            integrated_variables=request.donor_block_spec.restored_variables,
+            integrated_variables=block_request.donor_block_spec.restored_variables,
             condition_vars=tuple(condition_vars),
         )
 

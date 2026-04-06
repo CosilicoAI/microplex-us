@@ -9,6 +9,7 @@ from microplex.core import EntityType
 from microplex_us.pe_source_impute_engine import (
     PE_SOURCE_IMPUTE_BLOCK_ENGINE,
     PESourceImputeBlockRunRequest,
+    PESourceImputeConditionedBlockRunRequest,
     PESourceImputePreparedBlockInputs,
 )
 from microplex_us.variables import DonorImputationBlockSpec
@@ -138,6 +139,74 @@ def test_run_prepared_block_executes_fit_generate_and_assignment() -> None:
     assert fake_imputer.weight_col == "weight"
     assert fake_imputer.seed == 17
     assert result.updated_frame["rent"].tolist() == [400.0, 100.0, 300.0]
+    assert result.integrated_variables == ("rent",)
+
+
+def test_run_conditioned_block_executes_generic_donor_path() -> None:
+    donor_frame = pd.DataFrame(
+        {
+            "age": [45, 12, 70],
+            "state_fips": [6, 6, 36],
+            "rent": [1_200.0, 0.0, 950.0],
+            "hh_weight": [100.0, 100.0, 120.0],
+        }
+    )
+    current_frame = donor_frame.drop(columns=["rent"]).copy()
+
+    class _FakeImputer:
+        def fit(self, frame, *, weight_col, **kwargs):
+            self.fit_frame = frame
+            self.weight_col = weight_col
+            self.fit_kwargs = kwargs
+
+        def generate(self, frame, *, seed):
+            self.generate_frame = frame
+            self.seed = seed
+            return pd.DataFrame({"rent": [500.0, 200.0, 350.0]}, index=frame.index)
+
+    fake_imputer = _FakeImputer()
+    built: dict[str, object] = {}
+
+    def _build_imputer(condition_vars, target_vars):
+        built["condition_vars"] = tuple(condition_vars)
+        built["target_vars"] = tuple(target_vars)
+        return fake_imputer
+
+    def _rank_match(scores, *, donor_values, donor_weights, rng, strategy):
+        built["rank_scores"] = scores.tolist()
+        built["rank_donor_values"] = donor_values.tolist()
+        built["rank_strategy"] = strategy
+        return scores.astype(float)
+
+    result = PE_SOURCE_IMPUTE_BLOCK_ENGINE.run_conditioned_block(
+        request=PESourceImputeConditionedBlockRunRequest(
+            block_request=PESourceImputeBlockRunRequest(
+                donor_block_spec=DonorImputationBlockSpec(
+                    model_variables=("rent",),
+                    restored_variables=("rent",),
+                ),
+                donor_fit_source=donor_frame,
+                current_generation_source=current_frame,
+                current_frame=current_frame,
+                entity_key=None,
+            ),
+            donor_condition_source=donor_frame,
+            current_condition_source=current_frame,
+            condition_vars=("age", "state_fips"),
+        ),
+        build_imputer=_build_imputer,
+        rank_match=_rank_match,
+        fit_kwargs={"epochs": 5, "batch_size": 32, "learning_rate": 0.01, "verbose": False},
+        seed=23,
+        rng=np.random.default_rng(0),
+    )
+
+    assert result is not None
+    assert built["target_vars"] == ("rent",)
+    assert built["condition_vars"] == ("age", "state_fips")
+    assert fake_imputer.weight_col == "weight"
+    assert fake_imputer.seed == 23
+    assert result.updated_frame["rent"].tolist() == [500.0, 200.0, 350.0]
     assert result.integrated_variables == ("rent",)
 
 
