@@ -486,42 +486,70 @@ def _download_policyengine_us_data_file(
     return Path(downloaded)
 
 
-def _default_sipp_tips_tables_loader(
+def _build_joined_raw_identifier(
+    frame: pd.DataFrame,
     *,
+    parts: tuple[str, ...],
+) -> pd.Series:
+    if not parts:
+        raise ValueError("Raw identifier spec must include at least one part")
+    values = frame.loc[:, list(parts)].astype(str)
+    return values.iloc[:, 0] if len(parts) == 1 else values.agg(":".join, axis=1)
+
+
+def _load_sipp_tables_from_spec(
+    *,
+    spec: PESourceImputeBlockSpec,
     year: int,
     sample_n: int | None,
     random_seed: int,
-    cache_dir: Path | None = None,
-    policyengine_us_data_repo: str | Path | None = None,
-    policyengine_us_data_python: str | Path | None = None,
+    cache_dir: Path | None,
 ) -> DonorSurveyTables:
-    _ = policyengine_us_data_repo, policyengine_us_data_python
-    spec = get_pe_source_impute_block_spec("sipp_tips")
-    if int(year) != 2023:
-        raise ValueError("SIPP tips provider currently supports year=2023 only")
+    raw_loader = spec.raw_loader
+    if raw_loader is None:
+        raise ValueError(f"PE source-impute block '{spec.key}' is missing a raw loader spec")
+    if int(year) != spec.default_year:
+        raise ValueError(
+            f"{spec.descriptor_name} provider currently supports year={spec.default_year} only"
+        )
     sipp_path = _download_policyengine_us_data_file(
-        filename="pu2023_slim.csv",
+        filename=raw_loader.filename,
         cache_dir=cache_dir,
     )
-    df = pd.read_csv(sipp_path)
-    txamt_columns = [column for column in df.columns if "TXAMT" in column]
-    df["tip_income"] = df[txamt_columns].fillna(0).sum(axis=1)
-    df["employment_income"] = pd.to_numeric(df["TPTOTINC"], errors="coerce").fillna(0.0)
-    df["age"] = pd.to_numeric(df["TAGE"], errors="coerce").fillna(0).astype(int)
-    df["sex"] = pd.to_numeric(df["ESEX"], errors="coerce").fillna(0).astype(int)
-    df["income"] = df["employment_income"]
+    read_csv_kwargs: dict[str, object] = {}
+    if raw_loader.delimiter is not None:
+        read_csv_kwargs["delimiter"] = raw_loader.delimiter
+    if raw_loader.usecols:
+        read_csv_kwargs["usecols"] = raw_loader.usecols
+    df = pd.read_csv(sipp_path, **read_csv_kwargs)
+
+    for variable, source_column in raw_loader.direct_columns.items():
+        values = pd.to_numeric(df[source_column], errors="coerce").fillna(0.0)
+        if variable in set(raw_loader.int_columns):
+            df[variable] = values.astype(int)
+        else:
+            df[variable] = values.astype(float)
+    for variable, contains in raw_loader.sum_columns_contains.items():
+        matched_columns = [column for column in df.columns if contains in column]
+        df[variable] = df[matched_columns].fillna(0).sum(axis=1) if matched_columns else 0.0
+    for variable, indicator in raw_loader.indicator_columns.items():
+        raw_values = pd.to_numeric(df[indicator.column], errors="coerce").fillna(0.0)
+        df[variable] = raw_values.eq(indicator.equals).astype(float)
+    for variable, value in raw_loader.constant_columns.items():
+        df[variable] = value
+
     df["year"] = int(year)
-    df["household_id"] = df["SSUID"].astype(str) + ":" + df["MONTHCODE"].astype(str)
-    df["person_id"] = (
-        df["SSUID"].astype(str)
-        + ":"
-        + df["MONTHCODE"].astype(str)
-        + ":"
-        + df["PNUM"].astype(str)
+    df["household_id"] = _build_joined_raw_identifier(
+        df,
+        parts=raw_loader.household_id_parts,
     )
-    df["weight"] = pd.to_numeric(df["WPFINWGT"], errors="coerce").fillna(0.0)
-    df["state_fips"] = 0
-    df["tenure"] = 0
+    df["person_id"] = _build_joined_raw_identifier(
+        df,
+        parts=raw_loader.person_id_parts,
+    )
+    for variable, source_variable in raw_loader.copy_columns.items():
+        df[variable] = df[source_variable]
+
     df = apply_pe_source_impute_loader_postprocess(df, spec)
     households = (
         df[["household_id", "weight", "state_fips", "tenure", "year"]]
@@ -533,13 +561,7 @@ def _default_sipp_tips_tables_loader(
         [
             "person_id",
             "household_id",
-            "age",
-            "sex",
-            "employment_income",
-            "income",
-            "tip_income",
-            "count_under_18",
-            "count_under_6",
+            *spec.person_variables,
             "weight",
             "year",
         ]
@@ -551,6 +573,25 @@ def _default_sipp_tips_tables_loader(
         random_seed=random_seed,
     )
     return DonorSurveyTables(households=households, persons=persons)
+
+
+def _default_sipp_tips_tables_loader(
+    *,
+    year: int,
+    sample_n: int | None,
+    random_seed: int,
+    cache_dir: Path | None = None,
+    policyengine_us_data_repo: str | Path | None = None,
+    policyengine_us_data_python: str | Path | None = None,
+) -> DonorSurveyTables:
+    _ = policyengine_us_data_repo, policyengine_us_data_python
+    return _load_sipp_tables_from_spec(
+        spec=get_pe_source_impute_block_spec("sipp_tips"),
+        year=year,
+        sample_n=sample_n,
+        random_seed=random_seed,
+        cache_dir=cache_dir,
+    )
 
 
 def _default_sipp_assets_tables_loader(
@@ -563,77 +604,13 @@ def _default_sipp_assets_tables_loader(
     policyengine_us_data_python: str | Path | None = None,
 ) -> DonorSurveyTables:
     _ = policyengine_us_data_repo, policyengine_us_data_python
-    spec = get_pe_source_impute_block_spec("sipp_assets")
-    if int(year) != 2023:
-        raise ValueError("SIPP assets provider currently supports year=2023 only")
-    sipp_path = _download_policyengine_us_data_file(
-        filename="pu2023.csv",
-        cache_dir=cache_dir,
-    )
-    df = pd.read_csv(
-        sipp_path,
-        delimiter="|",
-        usecols=(
-            "SSUID",
-            "PNUM",
-            "MONTHCODE",
-            "WPFINWGT",
-            "TAGE",
-            "ESEX",
-            "EMS",
-            "TPTOTINC",
-            "TVAL_BANK",
-            "TVAL_STMF",
-            "TVAL_BOND",
-        ),
-    )
-    df["bank_account_assets"] = pd.to_numeric(df["TVAL_BANK"], errors="coerce").fillna(0.0)
-    df["stock_assets"] = pd.to_numeric(df["TVAL_STMF"], errors="coerce").fillna(0.0)
-    df["bond_assets"] = pd.to_numeric(df["TVAL_BOND"], errors="coerce").fillna(0.0)
-    df["age"] = pd.to_numeric(df["TAGE"], errors="coerce").fillna(0).astype(int)
-    df["sex"] = pd.to_numeric(df["ESEX"], errors="coerce").fillna(0).astype(int)
-    df["is_female"] = df["sex"].eq(2).astype(float)
-    df["is_married"] = pd.to_numeric(df["EMS"], errors="coerce").fillna(0).eq(1).astype(float)
-    df["employment_income"] = pd.to_numeric(df["TPTOTINC"], errors="coerce").fillna(0.0)
-    df["income"] = df["employment_income"]
-    df["year"] = int(year)
-    df["household_id"] = df["SSUID"].astype(str)
-    df["person_id"] = df["SSUID"].astype(str) + ":" + df["PNUM"].astype(str)
-    df["weight"] = pd.to_numeric(df["WPFINWGT"], errors="coerce").fillna(0.0)
-    df["state_fips"] = 0
-    df["tenure"] = 0
-    df = apply_pe_source_impute_loader_postprocess(df, spec)
-    households = (
-        df[["household_id", "weight", "state_fips", "tenure", "year"]]
-        .rename(columns={"weight": "household_weight"})
-        .drop_duplicates(subset=["household_id"])
-        .reset_index(drop=True)
-    )
-    persons = df[
-        [
-            "person_id",
-            "household_id",
-            "age",
-            "sex",
-            "is_female",
-            "is_married",
-            "employment_income",
-            "income",
-            "count_under_18",
-            "bank_account_assets",
-            "stock_assets",
-            "bond_assets",
-            "weight",
-            "year",
-        ]
-    ].copy()
-    households, persons = _sample_households_and_persons(
-        households=households,
-        persons=persons,
+    return _load_sipp_tables_from_spec(
+        spec=get_pe_source_impute_block_spec("sipp_assets"),
+        year=year,
         sample_n=sample_n,
         random_seed=random_seed,
+        cache_dir=cache_dir,
     )
-    return DonorSurveyTables(households=households, persons=persons)
 
 
 BLOCK_LOADERS: dict[str, DonorSurveyTablesLoader] = {

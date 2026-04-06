@@ -36,6 +36,8 @@ That profile now also includes:
     [`us.py`](/Users/maxghenis/CosilicoAI/microplex-us/src/microplex_us/pipelines/us.py)
   - SIPP donor-block postprocessing such as month filtering, annualization, and
     household child-count features
+  - SIPP raw-file extraction details such as file names, delimiters, ID parts,
+    raw column mappings, and simple indicator derivations
 
 ## Why this rule exists
 
@@ -126,6 +128,9 @@ When we face a design choice during the rebuild:
 - Keep PE's donor-block postprocessing rules, but attach them to the same block
   specs instead of baking month filters and annualization logic into ad hoc
   loader branches.
+- Keep raw donor-file mappings close to the block spec, so file names, raw
+  columns, and identifier assembly stop being copied across multiple SIPP
+  loaders.
 - Keep the PE weighting backend, but call it through a Microplex-owned adapter.
 - Keep the same CPS reason-code logic, but express it in a source adapter with
   explicit parity tests.

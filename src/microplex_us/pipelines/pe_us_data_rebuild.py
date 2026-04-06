@@ -303,9 +303,10 @@ def default_policyengine_us_data_rebuild_program() -> PEUSDataRebuildProgram:
                     "The donor-survey side now has an explicit PE-style "
                     "prespecified predictor mode, real ACS/SIPP/SCF donor "
                     "providers, and one shared donor-block manifest for "
-                    "provider specs, predictor surfaces, condition prep, and "
-                    "SIPP postprocessing rules. The remaining gap is the full "
-                    "extended CPS splice and line-by-line stage parity."
+                    "provider specs, predictor surfaces, condition prep, SIPP "
+                    "postprocessing rules, and raw SIPP extraction details. "
+                    "The remaining gap is the full extended CPS splice and "
+                    "line-by-line stage parity."
                 ),
                 next_steps=(
                     "Isolate PE-data stage-1 and stage-2 QRF splice contracts.",

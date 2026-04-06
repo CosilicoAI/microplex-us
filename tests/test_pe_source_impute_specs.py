@@ -26,6 +26,10 @@ def test_load_pe_source_impute_block_specs_reads_manifest() -> None:
         "stock_assets",
         "bond_assets",
     )
+    assert specs["sipp_tips"].raw_loader is not None
+    assert specs["sipp_tips"].raw_loader.filename == "pu2023_slim.csv"
+    assert specs["sipp_assets"].raw_loader is not None
+    assert specs["sipp_assets"].raw_loader.usecols[0] == "SSUID"
     assert specs["sipp_tips"].annualized_variables == (
         "tip_income",
         "employment_income",

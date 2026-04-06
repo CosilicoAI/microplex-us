@@ -42,6 +42,31 @@
       "block_name": "tips",
       "default_year": 2023,
       "archetype": "household_income",
+      "raw_loader": {
+        "filename": "pu2023_slim.csv",
+        "delimiter": null,
+        "usecols": [],
+        "direct_columns": {
+          "age": "TAGE",
+          "sex": "ESEX",
+          "employment_income": "TPTOTINC",
+          "weight": "WPFINWGT"
+        },
+        "sum_columns_contains": {
+          "tip_income": "TXAMT"
+        },
+        "indicator_columns": {},
+        "int_columns": ["age", "sex"],
+        "household_id_parts": ["SSUID", "MONTHCODE"],
+        "person_id_parts": ["SSUID", "MONTHCODE", "PNUM"],
+        "constant_columns": {
+          "state_fips": 0,
+          "tenure": 0
+        },
+        "copy_columns": {
+          "income": "employment_income"
+        }
+      },
       "required_monthcode": null,
       "annualized_variables": ["tip_income", "employment_income"],
       "household_count_variables": ["count_under_18", "count_under_6"],
@@ -68,6 +93,53 @@
       "block_name": "assets",
       "default_year": 2023,
       "archetype": "household_income",
+      "raw_loader": {
+        "filename": "pu2023.csv",
+        "delimiter": "|",
+        "usecols": [
+          "SSUID",
+          "PNUM",
+          "MONTHCODE",
+          "WPFINWGT",
+          "TAGE",
+          "ESEX",
+          "EMS",
+          "TPTOTINC",
+          "TVAL_BANK",
+          "TVAL_STMF",
+          "TVAL_BOND"
+        ],
+        "direct_columns": {
+          "age": "TAGE",
+          "sex": "ESEX",
+          "employment_income": "TPTOTINC",
+          "weight": "WPFINWGT",
+          "bank_account_assets": "TVAL_BANK",
+          "stock_assets": "TVAL_STMF",
+          "bond_assets": "TVAL_BOND"
+        },
+        "sum_columns_contains": {},
+        "indicator_columns": {
+          "is_female": {
+            "column": "ESEX",
+            "equals": 2
+          },
+          "is_married": {
+            "column": "EMS",
+            "equals": 1
+          }
+        },
+        "int_columns": ["age", "sex"],
+        "household_id_parts": ["SSUID"],
+        "person_id_parts": ["SSUID", "PNUM"],
+        "constant_columns": {
+          "state_fips": 0,
+          "tenure": 0
+        },
+        "copy_columns": {
+          "income": "employment_income"
+        }
+      },
       "required_monthcode": 12,
       "annualized_variables": ["employment_income"],
       "household_count_variables": ["count_under_18"],

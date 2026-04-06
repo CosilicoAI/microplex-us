@@ -5,6 +5,7 @@ from __future__ import annotations
 import pandas as pd
 from microplex.core import EntityType
 
+import microplex_us.data_sources.donor_surveys as donor_surveys
 from microplex_us.data_sources.donor_surveys import (
     ACSSourceProvider,
     DonorSurveyTables,
@@ -166,3 +167,76 @@ def test_sipp_and_scf_provider_fillers_are_not_usable_as_conditions() -> None:
     assert assets_frame.source.is_authoritative_for("tenure") is False
     assert scf_frame.source.allows_conditioning_on("state_fips") is False
     assert scf_frame.source.observes("net_worth", EntityType.PERSON)
+
+
+def test_sipp_tips_provider_uses_manifest_backed_raw_loader(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    path = tmp_path / "pu2023_slim.csv"
+    pd.DataFrame(
+        {
+            "SSUID": ["100", "100", "101"],
+            "MONTHCODE": [1, 1, 2],
+            "PNUM": [1, 2, 1],
+            "WPFINWGT": [80.0, 80.0, 90.0],
+            "TAGE": [35, 8, 50],
+            "ESEX": [1, 2, 2],
+            "TPTOTINC": [1000.0, 0.0, 500.0],
+            "TXAMT1": [10.0, 0.0, 5.0],
+            "TXAMT2": [2.0, 0.0, 0.0],
+        }
+    ).to_csv(path, index=False)
+
+    monkeypatch.setattr(
+        donor_surveys,
+        "_download_policyengine_us_data_file",
+        lambda **_kwargs: path,
+    )
+
+    frame = SIPPSourceProvider(block="tips").load_frame()
+    persons = frame.tables[EntityType.PERSON]
+
+    assert frame.source.name == "sipp_tips_2023"
+    assert persons["tip_income"].tolist() == [144.0, 0.0, 60.0]
+    assert persons["employment_income"].tolist() == [12000.0, 0.0, 6000.0]
+    assert persons["count_under_18"].tolist() == [1.0, 1.0, 0.0]
+    assert persons["count_under_6"].tolist() == [0.0, 0.0, 0.0]
+
+
+def test_sipp_assets_provider_uses_manifest_backed_raw_loader(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    path = tmp_path / "pu2023.csv"
+    pd.DataFrame(
+        {
+            "SSUID": ["100", "100", "101"],
+            "PNUM": [1, 2, 1],
+            "MONTHCODE": [11, 12, 12],
+            "WPFINWGT": [80.0, 80.0, 90.0],
+            "TAGE": [10, 35, 50],
+            "ESEX": [1, 2, 2],
+            "EMS": [2, 1, 0],
+            "TPTOTINC": [100.0, 200.0, 300.0],
+            "TVAL_BANK": [1.0, 2.0, 3.0],
+            "TVAL_STMF": [4.0, 5.0, 6.0],
+            "TVAL_BOND": [7.0, 8.0, 9.0],
+        }
+    ).to_csv(path, index=False, sep="|")
+
+    monkeypatch.setattr(
+        donor_surveys,
+        "_download_policyengine_us_data_file",
+        lambda **_kwargs: path,
+    )
+
+    frame = SIPPSourceProvider(block="assets").load_frame()
+    persons = frame.tables[EntityType.PERSON]
+
+    assert frame.source.name == "sipp_assets_2023"
+    assert persons["person_id"].tolist() == ["100:2", "101:1"]
+    assert persons["employment_income"].tolist() == [2400.0, 3600.0]
+    assert persons["is_female"].tolist() == [1.0, 1.0]
+    assert persons["is_married"].tolist() == [1.0, 0.0]
+    assert persons["count_under_18"].tolist() == [0.0, 0.0]

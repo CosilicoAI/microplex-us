@@ -13,6 +13,31 @@ from microplex.core import SourceArchetype
 
 
 @dataclass(frozen=True)
+class PERawIndicatorSpec:
+    """One manifest-backed raw indicator rule."""
+
+    column: str
+    equals: str | int | float | bool
+
+
+@dataclass(frozen=True)
+class PESourceImputeRawLoaderSpec:
+    """Declarative raw-file extraction contract for one donor block."""
+
+    filename: str
+    delimiter: str | None
+    usecols: tuple[str, ...]
+    direct_columns: dict[str, str]
+    sum_columns_contains: dict[str, str]
+    indicator_columns: dict[str, PERawIndicatorSpec]
+    int_columns: tuple[str, ...]
+    household_id_parts: tuple[str, ...]
+    person_id_parts: tuple[str, ...]
+    constant_columns: dict[str, str | int | float | bool]
+    copy_columns: dict[str, str]
+
+
+@dataclass(frozen=True)
 class PESourceImputeBlockSpec:
     """Declarative contract for one PE donor-survey block."""
 
@@ -21,6 +46,7 @@ class PESourceImputeBlockSpec:
     block_name: str | None
     default_year: int
     archetype: SourceArchetype | None
+    raw_loader: PESourceImputeRawLoaderSpec | None
     required_monthcode: int | None
     annualized_variables: tuple[str, ...]
     household_count_variables: tuple[str, ...]
@@ -49,6 +75,42 @@ def _archetype_from_name(value: str | None) -> SourceArchetype | None:
     return SourceArchetype(value)
 
 
+def _raw_indicator_from_payload(payload: dict[str, Any]) -> PERawIndicatorSpec:
+    return PERawIndicatorSpec(
+        column=str(payload["column"]),
+        equals=payload["equals"],
+    )
+
+
+def _raw_loader_from_payload(
+    payload: dict[str, Any] | None,
+) -> PESourceImputeRawLoaderSpec | None:
+    if payload is None:
+        return None
+    return PESourceImputeRawLoaderSpec(
+        filename=str(payload["filename"]),
+        delimiter=payload.get("delimiter"),
+        usecols=tuple(payload.get("usecols", ())),
+        direct_columns={str(key): str(value) for key, value in payload.get("direct_columns", {}).items()},
+        sum_columns_contains={
+            str(key): str(value)
+            for key, value in payload.get("sum_columns_contains", {}).items()
+        },
+        indicator_columns={
+            str(key): _raw_indicator_from_payload(value)
+            for key, value in payload.get("indicator_columns", {}).items()
+        },
+        int_columns=tuple(payload.get("int_columns", ())),
+        household_id_parts=tuple(payload.get("household_id_parts", ())),
+        person_id_parts=tuple(payload.get("person_id_parts", ())),
+        constant_columns={
+            str(key): value
+            for key, value in payload.get("constant_columns", {}).items()
+        },
+        copy_columns={str(key): str(value) for key, value in payload.get("copy_columns", {}).items()},
+    )
+
+
 def _spec_from_payload(key: str, payload: dict[str, Any]) -> PESourceImputeBlockSpec:
     return PESourceImputeBlockSpec(
         key=key,
@@ -56,6 +118,7 @@ def _spec_from_payload(key: str, payload: dict[str, Any]) -> PESourceImputeBlock
         block_name=payload.get("block_name"),
         default_year=int(payload["default_year"]),
         archetype=_archetype_from_name(payload.get("archetype")),
+        raw_loader=_raw_loader_from_payload(payload.get("raw_loader")),
         required_monthcode=(
             None
             if payload.get("required_monthcode") is None
