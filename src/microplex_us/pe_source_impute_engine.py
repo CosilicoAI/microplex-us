@@ -7,6 +7,7 @@ from dataclasses import dataclass
 
 import numpy as np
 import pandas as pd
+from microplex.core import EntityType
 
 from microplex_us.pe_source_impute_specs import (
     PESourceImputeBlockSpec,
@@ -17,11 +18,15 @@ from microplex_us.pe_source_impute_specs import (
 from microplex_us.variables import (
     DonorImputationBlockSpec,
     apply_donor_variable_semantics,
+    is_projected_condition_var_compatible,
 )
 
 DonorConditionCompatibilityFn = Callable[[pd.Series, pd.Series], bool]
 DonorImputerBuilderFn = Callable[[list[str], tuple[str, ...]], object]
 DonorRankMatcherFn = Callable[..., pd.Series]
+CanProjectToEntityFn = Callable[[pd.DataFrame, pd.DataFrame, EntityType], bool]
+ProjectFrameToEntityFn = Callable[..., pd.DataFrame]
+EntityKeyFn = Callable[[EntityType], str | None]
 
 
 @dataclass(frozen=True)
@@ -68,6 +73,17 @@ class PESourceImputeBlockRunResult:
 
 
 @dataclass(frozen=True)
+class PESourceImputePreparedBlockInputs:
+    """Prepared PE donor-block inputs before imputation execution."""
+
+    donor_fit_source: pd.DataFrame
+    current_generation_source: pd.DataFrame
+    shared_vars_for_block: tuple[str, ...]
+    entity_key: str | None
+    condition_surface: PESourceImputeConditionSurface | None
+
+
+@dataclass(frozen=True)
 class PESourceImputeBlockEngine:
     """Centralized resolver for PE donor-block specs and condition surfaces."""
 
@@ -111,6 +127,81 @@ class PESourceImputeBlockEngine:
             spec=spec,
             donor_frame=prepare_pe_source_impute_condition_frame(donor_frame, spec),
             current_frame=prepare_pe_source_impute_condition_frame(current_frame, spec),
+        )
+
+    def prepare_block_inputs(
+        self,
+        *,
+        donor_seed: pd.DataFrame,
+        current_frame: pd.DataFrame,
+        shared_vars: list[str],
+        donor_block_spec: DonorImputationBlockSpec,
+        donor_source_name: str | None,
+        prepare_pe_surface: bool,
+        can_project_to_entity: CanProjectToEntityFn,
+        project_frame_to_entity: ProjectFrameToEntityFn,
+        entity_key_fn: EntityKeyFn,
+    ) -> PESourceImputePreparedBlockInputs:
+        """Prepare one PE donor block's working frames and optional PE surface."""
+        donor_working = donor_seed.copy()
+        if donor_block_spec.prepare_frame is not None:
+            donor_working = donor_block_spec.prepare_frame(donor_working)
+
+        shared_vars_for_block = [
+            variable
+            for variable in shared_vars
+            if variable not in donor_block_spec.model_variables
+        ]
+        donor_fit_source = donor_working
+        current_generation_source = current_frame
+        entity_key = entity_key_fn(donor_block_spec.native_entity)
+
+        if can_project_to_entity(
+            current_frame,
+            donor_working,
+            donor_block_spec.native_entity,
+        ):
+            entity_compatible_shared_vars = [
+                variable
+                for variable in shared_vars
+                if is_projected_condition_var_compatible(
+                    variable,
+                    projected_entity=donor_block_spec.native_entity,
+                    allowed_condition_entities=donor_block_spec.condition_entities,
+                )
+            ]
+            if entity_compatible_shared_vars:
+                shared_vars_for_block = entity_compatible_shared_vars
+            donor_fit_source = project_frame_to_entity(
+                donor_working,
+                entity=donor_block_spec.native_entity,
+                variables=(
+                    set(shared_vars_for_block)
+                    | set(donor_block_spec.model_variables)
+                    | {"hh_weight"}
+                ),
+            )
+            current_generation_source = project_frame_to_entity(
+                current_frame,
+                entity=donor_block_spec.native_entity,
+                variables=set(shared_vars_for_block),
+            )
+
+        condition_surface = None
+        if prepare_pe_surface:
+            condition_surface = self.prepare_condition_surface(
+                donor_frame=donor_fit_source,
+                current_frame=current_generation_source,
+                donor_source_name=donor_source_name,
+                donor_block=donor_block_spec.model_variables,
+            )
+
+        return PESourceImputePreparedBlockInputs(
+            donor_fit_source=donor_fit_source,
+            current_generation_source=current_generation_source,
+            shared_vars_for_block=tuple(shared_vars_for_block),
+            entity_key=entity_key,
+            condition_surface=condition_surface,
         )
 
     def run_prepared_block(

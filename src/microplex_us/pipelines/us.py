@@ -71,7 +71,6 @@ from microplex_us.variables import (
     VariableSupportFamily,
     apply_donor_variable_semantics,
     donor_imputation_block_specs,
-    is_projected_condition_var_compatible,
     normalize_dividend_columns,
     normalize_social_security_columns,
     prune_redundant_variables,
@@ -2481,84 +2480,51 @@ class USMicroplexPipeline:
                 )
 
             for donor_block_spec in donor_block_specs:
-                donor_working = donor_seed.copy()
-                if donor_block_spec.prepare_frame is not None:
-                    donor_working = donor_block_spec.prepare_frame(donor_working)
-                shared_vars_for_block = [
-                    variable
-                    for variable in shared_vars
-                    if variable not in donor_block_spec.model_variables
-                ]
-                donor_fit_source = donor_working
-                current_generation_source = current
-                entity_key = self._entity_key_column(donor_block_spec.native_entity)
-                if self._can_project_donor_block_to_entity(
-                    current,
-                    donor_working,
-                    donor_block_spec.native_entity,
-                ):
-                    entity_compatible_shared_vars = [
-                        variable
-                        for variable in shared_vars
-                        if is_projected_condition_var_compatible(
-                            variable,
-                            projected_entity=donor_block_spec.native_entity,
-                            allowed_condition_entities=donor_block_spec.condition_entities,
-                        )
-                    ]
-                    if entity_compatible_shared_vars:
-                        shared_vars_for_block = entity_compatible_shared_vars
-                    donor_fit_source = self._project_frame_to_entity(
-                        donor_working,
-                        entity=donor_block_spec.native_entity,
-                        variables=(
-                            set(shared_vars_for_block)
-                            | set(donor_block_spec.model_variables)
-                            | {"hh_weight"}
-                        ),
-                    )
-                    current_generation_source = self._project_frame_to_entity(
-                        current,
-                        entity=donor_block_spec.native_entity,
-                        variables=set(shared_vars_for_block),
-                    )
+                prepared_inputs = PE_SOURCE_IMPUTE_BLOCK_ENGINE.prepare_block_inputs(
+                    donor_seed=donor_seed,
+                    current_frame=current,
+                    shared_vars=shared_vars,
+                    donor_block_spec=donor_block_spec,
+                    donor_source_name=donor_input.frame.source.name,
+                    prepare_pe_surface=(
+                        self.config.donor_imputer_condition_selection == "pe_prespecified"
+                    ),
+                    can_project_to_entity=self._can_project_donor_block_to_entity,
+                    project_frame_to_entity=self._project_frame_to_entity,
+                    entity_key_fn=self._entity_key_column,
+                )
+                shared_vars_for_block = list(prepared_inputs.shared_vars_for_block)
+                donor_fit_source = prepared_inputs.donor_fit_source
+                current_generation_source = prepared_inputs.current_generation_source
+                entity_key = prepared_inputs.entity_key
                 donor_condition_source = donor_fit_source
                 current_condition_source = current_generation_source
-                if (
-                    self.config.donor_imputer_condition_selection == "pe_prespecified"
-                ):
-                    condition_surface = PE_SOURCE_IMPUTE_BLOCK_ENGINE.prepare_condition_surface(
-                        donor_frame=donor_fit_source,
-                        current_frame=current_generation_source,
-                        donor_source_name=donor_input.frame.source.name,
-                        donor_block=donor_block_spec.model_variables,
+                if prepared_inputs.condition_surface is not None:
+                    result = PE_SOURCE_IMPUTE_BLOCK_ENGINE.run_prepared_block(
+                        surface=prepared_inputs.condition_surface,
+                        request=PESourceImputeBlockRunRequest(
+                            donor_block_spec=donor_block_spec,
+                            donor_fit_source=donor_fit_source,
+                            current_generation_source=current_generation_source,
+                            current_frame=current,
+                            entity_key=entity_key,
+                        ),
+                        build_imputer=self._build_donor_imputer,
+                        rank_match=self._rank_match_donor_values,
+                        compatibility_fn=self._is_compatible_donor_condition,
+                        fit_kwargs={
+                            "epochs": self.config.donor_imputer_epochs,
+                            "batch_size": self.config.donor_imputer_batch_size,
+                            "learning_rate": self.config.donor_imputer_learning_rate,
+                            "verbose": False,
+                        },
+                        seed=self.config.random_seed,
+                        rng=rng,
                     )
-                    if condition_surface is not None:
-                        result = PE_SOURCE_IMPUTE_BLOCK_ENGINE.run_prepared_block(
-                            surface=condition_surface,
-                            request=PESourceImputeBlockRunRequest(
-                                donor_block_spec=donor_block_spec,
-                                donor_fit_source=donor_fit_source,
-                                current_generation_source=current_generation_source,
-                                current_frame=current,
-                                entity_key=entity_key,
-                            ),
-                            build_imputer=self._build_donor_imputer,
-                            rank_match=self._rank_match_donor_values,
-                            compatibility_fn=self._is_compatible_donor_condition,
-                            fit_kwargs={
-                                "epochs": self.config.donor_imputer_epochs,
-                                "batch_size": self.config.donor_imputer_batch_size,
-                                "learning_rate": self.config.donor_imputer_learning_rate,
-                                "verbose": False,
-                            },
-                            seed=self.config.random_seed,
-                            rng=rng,
-                        )
-                        if result is not None:
-                            current = result.updated_frame
-                            integrated_variables.extend(result.integrated_variables)
-                        continue
+                    if result is not None:
+                        current = result.updated_frame
+                        integrated_variables.extend(result.integrated_variables)
+                    continue
                 donor_condition_vars = self._select_donor_condition_vars(
                     donor_condition_source,
                     shared_vars_for_block,

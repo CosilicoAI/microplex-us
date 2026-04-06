@@ -42,8 +42,9 @@ That profile now also includes:
     table-builder mode, and canonical variable mappings
   - one explicit PE source-impute execution boundary in
     [`pe_source_impute_engine.py`](/Users/maxghenis/CosilicoAI/microplex-us/src/microplex_us/pe_source_impute_engine.py)
-    so `us.py` no longer owns PE block resolution, condition-surface prep, or
-    the prespecified block fit/generate/match loop
+    so `us.py` no longer owns PE block resolution, PE block-frame preparation /
+    entity projection, condition-surface prep, or the prespecified block
+    fit/generate/match loop
 
 ## Why this rule exists
 
