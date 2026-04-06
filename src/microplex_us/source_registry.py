@@ -81,8 +81,25 @@ PUF_SOURCE_VARIABLE_POLICY = SourceVariablePolicySpec(
     },
 )
 
+SURVEY_DONOR_FILLER_POLICY = SourceVariablePolicySpec(
+    source_prefixes=("sipp", "scf"),
+    variable_policies={
+        "state_fips": SourceVariablePolicy(
+            authoritative=False,
+            usable_as_condition=False,
+            notes="SIPP/SCF donor survey adapters do not carry real state geography in the rebuild path.",
+        ),
+        "tenure": SourceVariablePolicy(
+            authoritative=False,
+            usable_as_condition=False,
+            notes="SIPP/SCF donor survey adapters use filler tenure only to satisfy the household schema.",
+        ),
+    },
+)
+
 DEFAULT_SOURCE_VARIABLE_POLICIES: tuple[SourceVariablePolicySpec, ...] = (
     PUF_SOURCE_VARIABLE_POLICY,
+    SURVEY_DONOR_FILLER_POLICY,
 )
 
 

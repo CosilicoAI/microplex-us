@@ -41,6 +41,12 @@ from microplex_us.data_sources.cps_transform import (
     TransformedDataset,
     transform_cps_to_cosilico,
 )
+from microplex_us.data_sources.donor_surveys import (
+    ACSSourceProvider,
+    SCFSourceProvider,
+    SIPPAssetsSourceProvider,
+    SIPPTipsSourceProvider,
+)
 from microplex_us.data_sources.family_imputation_benchmark import (
     DecomposableFamilyBenchmarkSpec,
     FamilyImputationBenchmarkResult,
@@ -100,6 +106,11 @@ __all__ = [
     # Transform
     "TransformedDataset",
     "transform_cps_to_cosilico",
+    # PE donor surveys
+    "ACSSourceProvider",
+    "SIPPTipsSourceProvider",
+    "SIPPAssetsSourceProvider",
+    "SCFSourceProvider",
     # Family imputation benchmarks
     "DecomposableFamilyBenchmarkSpec",
     "FamilyImputationMethodBenchmark",

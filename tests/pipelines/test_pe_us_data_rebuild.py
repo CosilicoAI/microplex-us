@@ -3,6 +3,12 @@
 from __future__ import annotations
 
 from microplex_us.data_sources.cps import CPSASECSourceProvider
+from microplex_us.data_sources.donor_surveys import (
+    ACSSourceProvider,
+    SCFSourceProvider,
+    SIPPAssetsSourceProvider,
+    SIPPTipsSourceProvider,
+)
 from microplex_us.data_sources.puf import (
     SOCIAL_SECURITY_SPLIT_STRATEGY_PE_QRF,
     PUFSourceProvider,
@@ -93,6 +99,21 @@ def test_default_policyengine_us_data_rebuild_source_providers_use_pe_style_bund
     assert puf_provider.social_security_split_strategy == (
         SOCIAL_SECURITY_SPLIT_STRATEGY_PE_QRF
     )
+
+
+def test_default_policyengine_us_data_rebuild_source_providers_can_include_donor_surveys() -> None:
+    providers = default_policyengine_us_data_rebuild_source_providers(
+        include_donor_surveys=True,
+        cps_download=False,
+    )
+
+    assert len(providers) == 6
+    assert isinstance(providers[0], CPSASECSourceProvider)
+    assert isinstance(providers[1], PUFSourceProvider)
+    assert isinstance(providers[2], ACSSourceProvider)
+    assert isinstance(providers[3], SIPPTipsSourceProvider)
+    assert isinstance(providers[4], SIPPAssetsSourceProvider)
+    assert isinstance(providers[5], SCFSourceProvider)
 
 
 def test_build_policyengine_us_data_rebuild_pipeline_returns_configured_pipeline() -> None:

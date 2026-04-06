@@ -92,10 +92,23 @@ def default_policyengine_us_data_rebuild_source_providers(
     puf_path: str | Path | None = None,
     puf_demographics_path: str | Path | None = None,
     puf_expand_persons: bool = True,
+    include_donor_surveys: bool = False,
+    acs_year: int = 2022,
+    sipp_year: int = 2023,
+    scf_year: int = 2022,
+    donor_cache_dir: str | Path | None = None,
+    policyengine_us_data_repo: str | Path | None = None,
+    policyengine_us_data_python: str | Path | None = None,
 ) -> tuple[SourceProvider, ...]:
     """Return the canonical CPS+PUF provider bundle for the rebuild track."""
 
     from microplex_us.data_sources.cps import CPSASECSourceProvider
+    from microplex_us.data_sources.donor_surveys import (
+        ACSSourceProvider,
+        SCFSourceProvider,
+        SIPPAssetsSourceProvider,
+        SIPPTipsSourceProvider,
+    )
     from microplex_us.data_sources.puf import (
         SOCIAL_SECURITY_SPLIT_STRATEGY_PE_QRF,
         PUFSourceProvider,
@@ -103,7 +116,8 @@ def default_policyengine_us_data_rebuild_source_providers(
 
     cps_cache = None if cps_cache_dir is None else Path(cps_cache_dir)
     puf_cache = None if puf_cache_dir is None else Path(puf_cache_dir)
-    return (
+    donor_cache = None if donor_cache_dir is None else Path(donor_cache_dir)
+    providers: list[SourceProvider] = [
         CPSASECSourceProvider(
             year=int(cps_source_year),
             cache_dir=cps_cache,
@@ -122,7 +136,31 @@ def default_policyengine_us_data_rebuild_source_providers(
             ),
             social_security_split_strategy=SOCIAL_SECURITY_SPLIT_STRATEGY_PE_QRF,
         ),
-    )
+    ]
+    if include_donor_surveys:
+        providers.extend(
+            [
+                ACSSourceProvider(
+                    year=int(acs_year),
+                    policyengine_us_data_repo=policyengine_us_data_repo,
+                    policyengine_us_data_python=policyengine_us_data_python,
+                ),
+                SIPPTipsSourceProvider(
+                    year=int(sipp_year),
+                    cache_dir=donor_cache,
+                ),
+                SIPPAssetsSourceProvider(
+                    year=int(sipp_year),
+                    cache_dir=donor_cache,
+                ),
+                SCFSourceProvider(
+                    year=int(scf_year),
+                    policyengine_us_data_repo=policyengine_us_data_repo,
+                    policyengine_us_data_python=policyengine_us_data_python,
+                ),
+            ]
+        )
+    return tuple(providers)
 
 
 def build_policyengine_us_data_rebuild_pipeline(
