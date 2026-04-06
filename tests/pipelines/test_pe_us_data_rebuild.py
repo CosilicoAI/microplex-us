@@ -1,0 +1,108 @@
+"""Tests for the PE-US-data rebuild program spec."""
+
+from __future__ import annotations
+
+from microplex_us.data_sources.cps import CPSASECSourceProvider
+from microplex_us.data_sources.puf import (
+    SOCIAL_SECURITY_SPLIT_STRATEGY_PE_QRF,
+    PUFSourceProvider,
+)
+from microplex_us.pipelines.pe_us_data_rebuild import (
+    PEUSDataRebuildStatus,
+    build_policyengine_us_data_rebuild_markdown,
+    build_policyengine_us_data_rebuild_pipeline,
+    default_policyengine_us_data_rebuild_config,
+    default_policyengine_us_data_rebuild_program,
+    default_policyengine_us_data_rebuild_source_providers,
+)
+from microplex_us.pipelines.us import (
+    USMicroplexBuildConfig,
+    USMicroplexPipeline,
+)
+
+
+def test_default_policyengine_us_data_rebuild_program_has_expected_core_stages() -> None:
+    program = default_policyengine_us_data_rebuild_program()
+
+    assert program.program_id == "pe-us-data-rebuild-v1"
+    assert "change results only on the margin" in program.principle
+
+    stage_ids = [stage.stage_id for stage in program.stages]
+    assert len(stage_ids) == len(set(stage_ids))
+    assert stage_ids == [
+        "source-contracts",
+        "cps-construction",
+        "puf-ingestion-uprating",
+        "extended-cps-qrf",
+        "family-imputation-parity",
+        "entity-export-parity",
+        "weighting-backend",
+        "targets-and-eval",
+    ]
+
+    weighting_stage = next(
+        stage for stage in program.stages if stage.stage_id == "weighting-backend"
+    )
+    assert weighting_stage.current_status is PEUSDataRebuildStatus.CLOSE
+    assert "policyengine_us_data.calibration.unified_calibration" in (
+        weighting_stage.pe_owner_modules
+    )
+
+
+def test_build_policyengine_us_data_rebuild_markdown_mentions_parity_rule() -> None:
+    markdown = build_policyengine_us_data_rebuild_markdown()
+
+    assert "# Rebuild PE-US-data in Microplex" in markdown
+    assert "Structural improvements are allowed" in markdown
+    assert "### CPS construction parity" in markdown
+    assert "`status`: `partial`" in markdown
+
+
+def test_default_policyengine_us_data_rebuild_config_uses_incumbent_defaults() -> None:
+    config = default_policyengine_us_data_rebuild_config(
+        random_seed=123,
+        cps_asec_source_year=2022,
+    )
+
+    assert isinstance(config, USMicroplexBuildConfig)
+    assert config.synthesis_backend == "seed"
+    assert config.calibration_backend == "entropy"
+    assert config.donor_imputer_backend == "qrf"
+    assert config.donor_imputer_condition_selection == "all_shared"
+    assert config.random_seed == 123
+    assert config.cps_asec_source_year == 2022
+
+
+def test_default_policyengine_us_data_rebuild_source_providers_use_pe_style_bundle() -> None:
+    providers = default_policyengine_us_data_rebuild_source_providers(
+        cps_source_year=2022,
+        puf_target_year=2024,
+        cps_download=False,
+        puf_expand_persons=False,
+    )
+
+    assert len(providers) == 2
+    cps_provider, puf_provider = providers
+    assert isinstance(cps_provider, CPSASECSourceProvider)
+    assert cps_provider.year == 2022
+    assert cps_provider.download is False
+    assert isinstance(puf_provider, PUFSourceProvider)
+    assert puf_provider.target_year == 2024
+    assert puf_provider.cps_reference_year == 2022
+    assert puf_provider.expand_persons is False
+    assert puf_provider.social_security_split_strategy == (
+        SOCIAL_SECURITY_SPLIT_STRATEGY_PE_QRF
+    )
+
+
+def test_build_policyengine_us_data_rebuild_pipeline_returns_configured_pipeline() -> None:
+    pipeline = build_policyengine_us_data_rebuild_pipeline(
+        random_seed=321,
+        calibration_max_iter=77,
+    )
+
+    assert isinstance(pipeline, USMicroplexPipeline)
+    assert pipeline.config.random_seed == 321
+    assert pipeline.config.calibration_max_iter == 77
+    assert pipeline.config.synthesis_backend == "seed"
+    assert pipeline.config.calibration_backend == "entropy"

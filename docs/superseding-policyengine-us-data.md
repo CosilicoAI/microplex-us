@@ -24,6 +24,27 @@ Truth is the active PE-US target database, measured through the shared
 
 That means "supersede" is not one thing. It has layers.
 
+## Three distinct success claims
+
+We should keep three different claims separate:
+
+1. Architectural supersession
+   - `microplex-us` is a cleaner, more modular, more spec-driven US runtime
+     than `policyengine-us-data`, with better provenance, eval discipline, and
+     portability.
+2. PE-construction parity
+   - for the important mapping and rule layers, `microplex-us` either matches
+     PE's construction logic or differs intentionally with the difference
+     documented.
+3. PE-benchmark superiority
+   - the resulting Microplex build beats matched-size PE baselines on the
+     canonical PE-native benchmark frontier.
+
+These are ordered. (1) is already valuable on its own. (2) is the main bridge
+between a cleaner architecture and a trustworthy replacement claim. (3) remains
+the ultimate performance goal, but it should not be the only lens used to judge
+progress.
+
 ## What superseded means
 
 There are four increasingly strong meanings of supersession:
@@ -44,6 +65,12 @@ There are four increasingly strong meanings of supersession:
 
 Today we are somewhere between (1) as an active benchmark mission and a partial
 version of (2) for research runs. We are not yet at (3) or (4).
+
+In practice, the current program should read as:
+
+1. architecturally supersede the PE-US-data build path
+2. prove parity or intentional difference at the construction layer
+3. then push for stable benchmark superiority
 
 ## Non-goals
 
@@ -322,25 +349,33 @@ As of April 5, 2026, the highest-leverage blockers are:
 1. Record construction/support is still incomplete.
    - the eval stack still rejects current aggregate challengers because support
      realism is not good enough across families
-2. Full-support candidate selection gains are still being damaged downstream.
+2. Construction parity is still only partially audited.
+   - some high-value families now have explicit parity evidence, but the
+     construction/mapping contract is not yet written down broadly enough to
+     call the system PE-equivalent at the rules layer
+3. Full-support candidate selection gains are still being damaged downstream.
    - current build-log evidence points to post-selection entropy calibration
      undoing the strongest selector path
-3. Broad superiority is not stable yet.
+4. Broad superiority is not stable yet.
    - broad wins exist on some metrics/slices, but they do not yet amount to a
      stable "Microplex broadly beats PE" claim
-4. Held-out and local-area replacement are not yet in the default loop.
+5. Held-out and local-area replacement are not yet in the default loop.
 
 ## Current operating sequence
 
 This is the current working order of operations:
 
-1. Use `microplex-evals` to choose and prune runtime methods.
-2. Use `microplex-us` to improve source semantics, candidate construction, and
-   PE-native selection.
-3. Re-run broad PE-native frontier experiments on matched-size baselines.
-4. Only when broad evidence stabilizes, expand held-out/local-area replacement
+1. Use `microplex-us` to replace PE-US-data construction logic with clearer
+   source specs, variable semantics, and export contracts.
+2. Keep an explicit PE construction parity matrix so "match", "close",
+   and "intentionally different" are written down instead of implied.
+3. Use `microplex-evals` to choose and prune runtime methods where method-level
+   variation matters.
+4. Re-run broad PE-native frontier experiments on matched-size baselines at
+   regular checkpoints rather than after every local change.
+5. Only when broad evidence stabilizes, expand held-out/local-area replacement
    work.
-5. Only when a pattern survives US and appears likely to generalize, lift the
+6. Only when a pattern survives US and appears likely to generalize, lift the
    abstraction into `microplex` and then port the shape to UK.
 
 ## Concrete gates for saying "we superseded it"
@@ -366,6 +401,11 @@ For practical purposes, we should not say "Microplex supersedes
 If only the first three are true, we can say:
 
 - Microplex has a credible broad replacement path
+
+If the runtime gate and construction parity are true, but the broad benchmark
+gate is not yet true, we can still say:
+
+- Microplex has architecturally superseded the PE-US-data build path
 
 If all five are true, we can say:
 

@@ -2,12 +2,17 @@
 
 from __future__ import annotations
 
+import sys
+import types
+
 import pandas as pd
 from microplex.core import EntityType, SourceArchetype, SourceProvider, SourceQuery
 
 import microplex_us.data_sources.puf as puf_module
 from microplex_us.data_sources import PUFSourceProvider, expand_to_persons
 from microplex_us.data_sources.puf import (
+    PEStyleQRFShareModel,
+    _fit_pe_style_puf_social_security_qrf_model_from_reference,
     _impute_puf_social_security_components,
     _sample_tax_units,
     map_puf_variables,
@@ -44,6 +49,37 @@ def _mock_social_security_share_model_loader(*_args):
         feature_sets=(("age_bucket",),),
         weight_column="weight",
     )
+
+
+def _install_fake_qrf(monkeypatch, prediction_frame: pd.DataFrame):
+    calls: dict[str, object] = {}
+
+    class FakeFittedModel:
+        def predict(self, X_test):
+            calls["X_test"] = X_test.copy()
+            return prediction_frame.copy()
+
+    class FakeQRF:
+        def __init__(self, **kwargs):
+            calls["init_kwargs"] = dict(kwargs)
+
+        def fit(self, *, X_train, predictors, imputed_variables, n_jobs):
+            calls["X_train"] = X_train.copy()
+            calls["predictors"] = tuple(predictors)
+            calls["imputed_variables"] = tuple(imputed_variables)
+            calls["n_jobs"] = n_jobs
+            return FakeFittedModel()
+
+    microimpute_module = types.ModuleType("microimpute")
+    models_module = types.ModuleType("microimpute.models")
+    qrf_module = types.ModuleType("microimpute.models.qrf")
+    qrf_module.QRF = FakeQRF
+    microimpute_module.models = models_module
+    models_module.qrf = qrf_module
+    monkeypatch.setitem(sys.modules, "microimpute", microimpute_module)
+    monkeypatch.setitem(sys.modules, "microimpute.models", models_module)
+    monkeypatch.setitem(sys.modules, "microimpute.models.qrf", qrf_module)
+    return calls
 
 
 def test_expand_to_persons_preserves_joint_tax_unit_monetary_totals():
@@ -125,6 +161,118 @@ def test_impute_puf_social_security_components_uses_grouped_cps_shares():
     assert result["social_security_disability"].tolist() == [0.0, 200.0, 0.0]
     assert result["social_security_retirement"].tolist() == [0.0, 0.0, 300.0]
     assert result["social_security_survivors"].tolist() == [0.0, 0.0, 0.0]
+
+
+def test_fit_pe_style_puf_social_security_qrf_model_uses_pe_predictors(monkeypatch):
+    predictions = pd.DataFrame(
+        {
+            "social_security_retirement_share": [0.6, 0.1],
+            "social_security_disability_share": [0.3, 0.2],
+            "social_security_survivors_share": [0.05, 0.4],
+            "social_security_dependents_share": [0.05, 0.3],
+        }
+    )
+    calls = _install_fake_qrf(monkeypatch, predictions)
+    reference = pd.DataFrame(
+        {
+            "age": [70, 45, 12, 67] * 30,
+            "sex": [1, 2, 2, 1] * 30,
+            "filing_status": ["JOINT", "SINGLE", "SINGLE", "JOINT"] * 30,
+            "is_head": [1, 1, 0, 1] * 30,
+            "is_dependent": [0, 0, 1, 0] * 30,
+            "social_security": [100.0, 100.0, 100.0, 100.0] * 30,
+            "social_security_retirement": [100.0, 0.0, 0.0, 100.0] * 30,
+            "social_security_disability": [0.0, 100.0, 0.0, 0.0] * 30,
+            "social_security_survivors": [0.0, 0.0, 0.0, 0.0] * 30,
+            "social_security_dependents": [0.0, 0.0, 100.0, 0.0] * 30,
+        }
+    )
+
+    model = _fit_pe_style_puf_social_security_qrf_model_from_reference(
+        reference,
+        min_training_records=1,
+    )
+
+    assert isinstance(model, PEStyleQRFShareModel)
+    assert model.predictors == (
+        "age",
+        "is_male",
+        "tax_unit_is_joint",
+        "is_tax_unit_head",
+        "is_tax_unit_dependent",
+    )
+    assert calls["predictors"] == model.predictors
+    assert calls["n_jobs"] == 1
+
+    persons = pd.DataFrame(
+        {
+            "age": [70, 45],
+            "sex": [1, 2],
+            "filing_status": ["JOINT", "SINGLE"],
+            "is_head": [1, 1],
+            "is_dependent": [0, 0],
+            "social_security": [300.0, 200.0],
+        }
+    )
+    result = _impute_puf_social_security_components(persons, share_model=model)
+
+    assert result["social_security_retirement"].tolist() == [180.0, 20.0]
+    assert result["social_security_disability"].tolist() == [90.0, 40.0]
+    assert result["social_security_survivors"].tolist() == [15.0, 80.0]
+    assert result["social_security_dependents"].tolist() == [15.0, 60.0]
+    assert list(calls["X_test"].columns) == list(model.predictors)
+
+
+def test_puf_source_provider_selects_pe_qrf_social_security_strategy(
+    tmp_path,
+    monkeypatch,
+):
+    puf = pd.DataFrame(
+        {
+            "RECID": [101],
+            "MARS": [1],
+            "XTOT": [1],
+            "S006": [100.0],
+            "E00200": [50_000.0],
+            "AGE_HEAD": [45],
+            "GENDER": [1],
+        }
+    )
+    puf_path = tmp_path / "puf.csv"
+    demographics_path = tmp_path / "demographics.csv"
+    puf.to_csv(puf_path, index=False)
+    pd.DataFrame({"RECID": [101]}).to_csv(demographics_path, index=False)
+
+    pe_qrf_called: list[tuple[int, object]] = []
+
+    def fake_pe_qrf_loader(*, cps_reference_year, cache_dir):
+        pe_qrf_called.append((cps_reference_year, cache_dir))
+        return _mock_social_security_share_model_loader()
+
+    def fail_grouped_loader(**_kwargs):
+        raise AssertionError("grouped-share loader should not be used in pe_qrf mode")
+
+    monkeypatch.setattr(
+        puf_module,
+        "_default_pe_style_puf_social_security_share_model",
+        fake_pe_qrf_loader,
+    )
+    monkeypatch.setattr(
+        puf_module,
+        "_default_puf_social_security_share_model",
+        fail_grouped_loader,
+    )
+
+    provider = PUFSourceProvider(
+        puf_path=puf_path,
+        demographics_path=demographics_path,
+        target_year=2024,
+        social_security_split_strategy="pe_qrf",
+    )
+    frame = provider.load_frame(SourceQuery(period=2024))
+
+    assert pe_qrf_called
+    assert "social_security_retirement" in frame.tables[EntityType.PERSON].columns
 
 
 def test_expand_to_persons_splits_negative_joint_self_employment_losses():

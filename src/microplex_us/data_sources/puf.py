@@ -9,6 +9,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import pandas as pd
@@ -101,6 +102,17 @@ SOCIAL_SECURITY_SHARE_COMPONENTS = (
     *SOCIAL_SECURITY_SHARE_EXPLICIT_COMPONENTS,
     SOCIAL_SECURITY_SHARE_IMPLICIT_COMPONENT,
 )
+SOCIAL_SECURITY_SPLIT_STRATEGY_GROUPED_SHARE = "grouped_share"
+SOCIAL_SECURITY_SPLIT_STRATEGY_PE_QRF = "pe_qrf"
+SOCIAL_SECURITY_SPLIT_STRATEGY_AGE_HEURISTIC = "age_heuristic"
+PE_STYLE_SOCIAL_SECURITY_QRF_PREDICTORS = (
+    "age",
+    "is_male",
+    "tax_unit_is_joint",
+    "is_tax_unit_head",
+    "is_tax_unit_dependent",
+)
+MIN_PE_STYLE_SOCIAL_SECURITY_QRF_TRAINING_RECORDS = 100
 
 JOINT_HEAD_SHARE_ALLOCATION = {
     "employment_income": 0.6,
@@ -142,6 +154,19 @@ MEDICAL_EXPENSE_CATEGORY_BREAKDOWNS = {
     "medicare_part_b_premiums": 0.137,
     "over_the_counter_health_expenses": 0.085,
 }
+
+
+@dataclass(frozen=True)
+class PEStyleQRFShareModel:
+    """PE-style QRF share model for PUF Social Security components."""
+
+    predictors: tuple[str, ...]
+    component_columns: tuple[str, ...]
+    share_prediction_columns: tuple[str, ...]
+    fitted_model: Any
+
+
+SocialSecurityShareModel = GroupedShareModel | PEStyleQRFShareModel
 
 def download_puf(cache_dir: Path | None = None) -> Path:
     """Download PUF from HuggingFace.
@@ -351,6 +376,62 @@ def _social_security_age_bucket(ages: pd.Series) -> pd.Series:
     )
 
 
+def _normalize_social_security_split_strategy(strategy: str | None) -> str:
+    resolved = (strategy or SOCIAL_SECURITY_SPLIT_STRATEGY_GROUPED_SHARE).strip().lower()
+    allowed = {
+        SOCIAL_SECURITY_SPLIT_STRATEGY_GROUPED_SHARE,
+        SOCIAL_SECURITY_SPLIT_STRATEGY_PE_QRF,
+        SOCIAL_SECURITY_SPLIT_STRATEGY_AGE_HEURISTIC,
+    }
+    if resolved not in allowed:
+        raise ValueError(
+            "social_security_split_strategy must be one of "
+            f"{sorted(allowed)}; got {strategy!r}"
+        )
+    return resolved
+
+
+def _build_pe_style_social_security_predictor_frame(
+    frame: pd.DataFrame,
+) -> pd.DataFrame:
+    result = pd.DataFrame(index=frame.index)
+    if "age" in frame.columns:
+        result["age"] = pd.to_numeric(frame["age"], errors="coerce").astype(float)
+    if "is_male" in frame.columns:
+        result["is_male"] = pd.to_numeric(frame["is_male"], errors="coerce").astype(float)
+    elif "sex" in frame.columns:
+        sex = pd.to_numeric(frame["sex"], errors="coerce")
+        result["is_male"] = pd.Series(
+            np.where(sex == 1, 1.0, np.where(sex == 2, 0.0, np.nan)),
+            index=frame.index,
+            dtype=float,
+        )
+    if "tax_unit_is_joint" in frame.columns:
+        result["tax_unit_is_joint"] = pd.to_numeric(
+            frame["tax_unit_is_joint"], errors="coerce"
+        ).astype(float)
+    elif "filing_status" in frame.columns:
+        filing_status = frame["filing_status"].astype(str)
+        result["tax_unit_is_joint"] = (filing_status == "JOINT").astype(float)
+    if "is_tax_unit_head" in frame.columns:
+        result["is_tax_unit_head"] = pd.to_numeric(
+            frame["is_tax_unit_head"], errors="coerce"
+        ).astype(float)
+    elif "is_head" in frame.columns:
+        result["is_tax_unit_head"] = pd.to_numeric(
+            frame["is_head"], errors="coerce"
+        ).astype(float)
+    if "is_tax_unit_dependent" in frame.columns:
+        result["is_tax_unit_dependent"] = pd.to_numeric(
+            frame["is_tax_unit_dependent"], errors="coerce"
+        ).astype(float)
+    elif "is_dependent" in frame.columns:
+        result["is_tax_unit_dependent"] = pd.to_numeric(
+            frame["is_dependent"], errors="coerce"
+        ).astype(float)
+    return result
+
+
 def _fit_puf_social_security_share_model_from_reference(
     reference_persons: pd.DataFrame,
 ) -> GroupedShareModel:
@@ -384,6 +465,93 @@ def _default_puf_social_security_share_model(
     )
 
 
+def _fit_pe_style_puf_social_security_qrf_model_from_reference(
+    reference_persons: pd.DataFrame,
+    *,
+    min_training_records: int = MIN_PE_STYLE_SOCIAL_SECURITY_QRF_TRAINING_RECORDS,
+) -> PEStyleQRFShareModel:
+    from microimpute.models.qrf import QRF
+
+    total_social_security = _numeric_series(reference_persons, "social_security")
+    has_social_security = total_social_security > 0.0
+    if int(has_social_security.sum()) < min_training_records:
+        raise ValueError(
+            "PE-style QRF Social Security split requires at least "
+            f"{min_training_records} positive training rows"
+        )
+
+    predictor_frame = _build_pe_style_social_security_predictor_frame(
+        reference_persons.loc[has_social_security]
+    )
+    available_predictors = tuple(
+        predictor
+        for predictor in PE_STYLE_SOCIAL_SECURITY_QRF_PREDICTORS
+        if predictor in predictor_frame.columns
+        and predictor_frame[predictor].notna().any()
+    )
+    if not available_predictors:
+        raise ValueError(
+            "PE-style QRF Social Security split requires at least one predictor"
+        )
+
+    train = predictor_frame.loc[:, available_predictors].copy()
+    total = total_social_security.loc[has_social_security].to_numpy(dtype=float)
+    share_prediction_columns: list[str] = []
+    for component in SOCIAL_SECURITY_SHARE_COMPONENTS:
+        share_column = f"{component}_share"
+        share_prediction_columns.append(share_column)
+        component_values = _numeric_series(
+            reference_persons.loc[has_social_security],
+            component,
+        ).to_numpy(dtype=float)
+        train[share_column] = np.where(total > 0.0, component_values / total, 0.0)
+
+    qrf = QRF(log_level="WARNING", memory_efficient=True)
+    fitted_model = qrf.fit(
+        X_train=train.loc[:, [*available_predictors, *share_prediction_columns]],
+        predictors=list(available_predictors),
+        imputed_variables=share_prediction_columns,
+        n_jobs=1,
+    )
+    return PEStyleQRFShareModel(
+        predictors=available_predictors,
+        component_columns=SOCIAL_SECURITY_SHARE_COMPONENTS,
+        share_prediction_columns=tuple(share_prediction_columns),
+        fitted_model=fitted_model,
+    )
+
+
+def _default_pe_style_puf_social_security_share_model(
+    *,
+    cps_reference_year: int,
+    cache_dir: Path | None,
+) -> PEStyleQRFShareModel:
+    cps_dataset = load_cps_asec(
+        year=cps_reference_year,
+        cache_dir=cache_dir,
+        download=True,
+    )
+    return _fit_pe_style_puf_social_security_qrf_model_from_reference(
+        cps_dataset.persons.to_pandas()
+    )
+
+
+def _strategy_social_security_share_model_loader(
+    strategy: str,
+) -> Callable[[int, Path | None], SocialSecurityShareModel]:
+    if strategy == SOCIAL_SECURITY_SPLIT_STRATEGY_PE_QRF:
+        return lambda year, cache_dir: _default_pe_style_puf_social_security_share_model(
+            cps_reference_year=year,
+            cache_dir=cache_dir,
+        )
+    if strategy == SOCIAL_SECURITY_SPLIT_STRATEGY_AGE_HEURISTIC:
+        return lambda year, cache_dir: _age_heuristic_puf_social_security_share_model()
+    return lambda year, cache_dir: _default_puf_social_security_share_model(
+        cps_reference_year=year,
+        cache_dir=cache_dir,
+    )
+
+
 def _age_heuristic_puf_social_security_share_model() -> GroupedShareModel:
     reference = pd.DataFrame(
         {
@@ -404,10 +572,68 @@ def _age_heuristic_puf_social_security_share_model() -> GroupedShareModel:
     )
 
 
+def _predict_puf_social_security_component_shares(
+    persons: pd.DataFrame,
+    *,
+    share_model: SocialSecurityShareModel,
+) -> pd.DataFrame:
+    if isinstance(share_model, GroupedShareModel):
+        features = persons.loc[:, []].copy()
+        features["age_bucket"] = _social_security_age_bucket(
+            persons.get("age", pd.Series(np.nan, index=persons.index))
+        )
+        return predict_grouped_component_shares(features, share_model)
+
+    predictors = _build_pe_style_social_security_predictor_frame(persons)
+    X_test = pd.DataFrame(index=persons.index)
+    for predictor in share_model.predictors:
+        if predictor in predictors.columns:
+            X_test[predictor] = (
+                pd.to_numeric(predictors[predictor], errors="coerce")
+                .fillna(0.0)
+                .astype(float)
+            )
+        else:
+            X_test[predictor] = 0.0
+    predictions = share_model.fitted_model.predict(X_test=X_test)
+
+    shares = pd.DataFrame(index=persons.index)
+    total = np.zeros(len(persons), dtype=float)
+    for component, share_column in zip(
+        share_model.component_columns,
+        share_model.share_prediction_columns,
+        strict=True,
+    ):
+        source_column = (
+            share_column if share_column in predictions.columns else component
+        )
+        if source_column in predictions.columns:
+            values = np.clip(
+                pd.to_numeric(predictions[source_column], errors="coerce")
+                .fillna(0.0)
+                .to_numpy(dtype=float),
+                0.0,
+                1.0,
+            )
+        else:
+            values = np.zeros(len(persons), dtype=float)
+        shares[component] = values
+        total += values
+
+    positive_total = total > 0.0
+    for component in share_model.component_columns:
+        shares[component] = np.where(
+            positive_total,
+            shares[component].to_numpy(dtype=float) / total,
+            0.0,
+        )
+    return shares
+
+
 def _impute_puf_social_security_components(
     persons: pd.DataFrame,
     *,
-    share_model: GroupedShareModel,
+    share_model: SocialSecurityShareModel,
 ) -> pd.DataFrame:
     result = persons.copy()
     total_social_security = _numeric_series(result, "social_security")
@@ -416,11 +642,10 @@ def _impute_puf_social_security_components(
             result[component] = 0.0
         return result
 
-    features = result.loc[:, []].copy()
-    features["age_bucket"] = _social_security_age_bucket(
-        result.get("age", pd.Series(np.nan, index=result.index))
+    shares = _predict_puf_social_security_component_shares(
+        result,
+        share_model=share_model,
     )
-    shares = predict_grouped_component_shares(features, share_model)
     for component in SOCIAL_SECURITY_SHARE_COMPONENTS:
         result[component] = total_social_security * shares[component]
     return result
@@ -549,6 +774,7 @@ def load_puf(
     target_year: int = 2024,
     expand_persons: bool = True,
     cache_dir: Path | None = None,
+    social_security_split_strategy: str = SOCIAL_SECURITY_SPLIT_STRATEGY_GROUPED_SHARE,
 ) -> pd.DataFrame:
     """Load and process PUF for multi-survey fusion.
 
@@ -575,12 +801,23 @@ def load_puf(
     # Expand to persons if requested
     if expand_persons:
         df = expand_to_persons(df)
+        strategy = _normalize_social_security_split_strategy(
+            social_security_split_strategy
+        )
         try:
-            share_model = _default_puf_social_security_share_model(
-                cps_reference_year=_default_cps_reference_year(target_year),
-                cache_dir=cache_dir,
-            )
-        except (FileNotFoundError, ValueError):
+            if strategy == SOCIAL_SECURITY_SPLIT_STRATEGY_PE_QRF:
+                share_model = _default_pe_style_puf_social_security_share_model(
+                    cps_reference_year=_default_cps_reference_year(target_year),
+                    cache_dir=cache_dir,
+                )
+            elif strategy == SOCIAL_SECURITY_SPLIT_STRATEGY_AGE_HEURISTIC:
+                share_model = _age_heuristic_puf_social_security_share_model()
+            else:
+                share_model = _default_puf_social_security_share_model(
+                    cps_reference_year=_default_cps_reference_year(target_year),
+                    cache_dir=cache_dir,
+                )
+        except (FileNotFoundError, ImportError, ValueError):
             share_model = _age_heuristic_puf_social_security_share_model()
         df = _impute_puf_social_security_components(df, share_model=share_model)
 
@@ -793,13 +1030,14 @@ class PUFSourceProvider:
     demographics_path: str | Path | None = None
     expand_persons: bool = True
     cps_reference_year: int | None = None
+    social_security_split_strategy: str = SOCIAL_SECURITY_SPLIT_STRATEGY_GROUPED_SHARE
     shareability: Shareability = Shareability.PUBLIC
     loader: Callable[[Path | None], tuple[Path, Path | None]] | None = None
     social_security_share_model_loader: (
-        Callable[[int, Path | None], GroupedShareModel] | None
+        Callable[[int, Path | None], SocialSecurityShareModel] | None
     ) = None
     _descriptor_cache: SourceDescriptor | None = None
-    _social_security_share_model_cache: dict[int, GroupedShareModel] = field(
+    _social_security_share_model_cache: dict[tuple[int, str], SocialSecurityShareModel] = field(
         default_factory=dict,
         init=False,
         repr=False,
@@ -853,6 +1091,12 @@ class PUFSourceProvider:
                 self.cps_reference_year or _default_cps_reference_year(target_year),
             )
         )
+        social_security_split_strategy = _normalize_social_security_split_strategy(
+            provider_filters.get(
+                "social_security_split_strategy",
+                self.social_security_split_strategy,
+            )
+        )
         puf_path = provider_filters.get("puf_path", self.puf_path)
         demographics_path = provider_filters.get(
             "demographics_path",
@@ -885,7 +1129,10 @@ class PUFSourceProvider:
         )
         persons = _impute_puf_social_security_components(
             persons,
-            share_model=self._load_social_security_share_model(cps_reference_year),
+            share_model=self._load_social_security_share_model(
+                cps_reference_year,
+                social_security_split_strategy,
+            ),
         )
         frame = _build_puf_observation_frame(
             tax_units=tax_units,
@@ -899,24 +1146,21 @@ class PUFSourceProvider:
     def _load_social_security_share_model(
         self,
         cps_reference_year: int,
-    ) -> GroupedShareModel:
-        cached = self._social_security_share_model_cache.get(cps_reference_year)
+        strategy: str,
+    ) -> SocialSecurityShareModel:
+        cache_key = (cps_reference_year, strategy)
+        cached = self._social_security_share_model_cache.get(cache_key)
         if cached is not None:
             return cached
         loader = (
             self.social_security_share_model_loader
-            or (
-                lambda year, cache_dir: _default_puf_social_security_share_model(
-                    cps_reference_year=year,
-                    cache_dir=cache_dir,
-                )
-            )
+            or _strategy_social_security_share_model_loader(strategy)
         )
         try:
             model = loader(cps_reference_year, self.cache_dir)
-        except (FileNotFoundError, ValueError):
+        except (FileNotFoundError, ImportError, ValueError):
             model = _age_heuristic_puf_social_security_share_model()
-        self._social_security_share_model_cache[cps_reference_year] = model
+        self._social_security_share_model_cache[cache_key] = model
         return model
 
 

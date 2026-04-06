@@ -49,6 +49,16 @@ from microplex_us.pipelines.pe_native_scores import (
     score_policyengine_us_native_broad_loss,
     write_us_pe_native_scores,
 )
+from microplex_us.pipelines.pe_us_data_rebuild import (
+    PEUSDataRebuildProgram,
+    PEUSDataRebuildStage,
+    PEUSDataRebuildStatus,
+    build_policyengine_us_data_rebuild_markdown,
+    build_policyengine_us_data_rebuild_pipeline,
+    default_policyengine_us_data_rebuild_config,
+    default_policyengine_us_data_rebuild_program,
+    default_policyengine_us_data_rebuild_source_providers,
+)
 from microplex_us.pipelines.performance import (
     USMicroplexPerformanceHarnessConfig,
     USMicroplexPerformanceHarnessRequest,
@@ -162,6 +172,14 @@ __all__ = [
     "compute_batch_us_pe_native_scores",
     "compute_policyengine_us_enhanced_cps_native_scores",
     "compute_us_pe_native_scores",
+    "PEUSDataRebuildProgram",
+    "PEUSDataRebuildStage",
+    "PEUSDataRebuildStatus",
+    "build_policyengine_us_data_rebuild_pipeline",
+    "build_policyengine_us_data_rebuild_markdown",
+    "default_policyengine_us_data_rebuild_config",
+    "default_policyengine_us_data_rebuild_program",
+    "default_policyengine_us_data_rebuild_source_providers",
     "build_us_pre_sim_parity_audit",
     "DEFAULT_ATOMIC_AGE_BINS",
     "DEFAULT_ATOMIC_AGE_LABELS",
