@@ -301,14 +301,15 @@ def default_policyengine_us_data_rebuild_program() -> PEUSDataRebuildProgram:
                 current_status=PEUSDataRebuildStatus.PARTIAL,
                 notes=(
                     "The donor-survey side now has an explicit PE-style "
-                    "prespecified predictor mode in the main pipeline, but the "
-                    "full extended CPS splice and donor-source adapter set are "
-                    "still missing."
+                    "prespecified predictor mode, real ACS/SIPP/SCF donor "
+                    "providers, and one shared donor-block manifest for both "
+                    "provider specs and predictor surfaces. The remaining gap is "
+                    "the full extended CPS splice and line-by-line stage parity."
                 ),
                 next_steps=(
-                    "Add explicit ACS/SIPP/SCF source providers for the donor-survey path.",
                     "Isolate PE-data stage-1 and stage-2 QRF splice contracts.",
                     "Implement them behind Microplex method specs rather than inline scripts.",
+                    "Audit annualization, sampling, and donor-row preparation details against PE-data.",
                 ),
             ),
             PEUSDataRebuildStage(

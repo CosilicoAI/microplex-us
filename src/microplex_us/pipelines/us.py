@@ -38,6 +38,10 @@ from microplex.synthesizer import Synthesizer
 from microplex.targets import TargetQuery, TargetSpec
 from sklearn.ensemble import RandomForestClassifier
 
+from microplex_us.pe_source_impute_specs import (
+    load_pe_source_impute_block_specs,
+    resolve_pe_source_impute_block_key,
+)
 from microplex_us.pipelines.pe_l0 import PolicyEngineL0Calibrator
 from microplex_us.pipelines.pe_native_optimization import (
     optimize_policyengine_us_native_loss_dataset,
@@ -246,51 +250,7 @@ class ColumnwiseQRFDonorImputer:
 AGE_LABELS = ["0-17", "18-34", "35-54", "55-64", "65+"]
 INCOME_BINS = [-np.inf, 25_000, 50_000, 100_000, np.inf]
 INCOME_LABELS = ["<25k", "25-50k", "50-100k", "100k+"]
-PE_SOURCE_IMPUTE_ACS_VARIABLES = frozenset({"rent", "real_estate_taxes"})
-PE_SOURCE_IMPUTE_SIPP_TIPS_VARIABLES = frozenset({"tip_income"})
-PE_SOURCE_IMPUTE_SIPP_ASSET_VARIABLES = frozenset(
-    {"bank_account_assets", "stock_assets", "bond_assets"}
-)
-PE_SOURCE_IMPUTE_SCF_VARIABLES = frozenset(
-    {"net_worth", "auto_loan_balance", "auto_loan_interest"}
-)
-PE_SOURCE_IMPUTE_PREDICTORS = {
-    "acs": (
-        "is_household_head",
-        "age",
-        "is_male",
-        "tenure_type",
-        "employment_income",
-        "self_employment_income",
-        "social_security",
-        "pension_income",
-        "household_size",
-        "state_fips",
-    ),
-    "sipp_tips": (
-        "employment_income",
-        "age",
-        "count_under_18",
-        "count_under_6",
-    ),
-    "sipp_assets": (
-        "employment_income",
-        "age",
-        "is_female",
-        "is_married",
-        "count_under_18",
-    ),
-    "scf": (
-        "age",
-        "is_female",
-        "cps_race",
-        "is_married",
-        "own_children_in_household",
-        "employment_income",
-        "interest_dividend_income",
-        "social_security_pension_income",
-    ),
-}
+PE_SOURCE_IMPUTE_BLOCK_SPECS = load_pe_source_impute_block_specs()
 ENTITY_ID_COLUMNS = {
     EntityType.PERSON: "person_id",
     EntityType.HOUSEHOLD: "household_id",
@@ -2737,7 +2697,7 @@ class USMicroplexPipeline:
         current_prepared = self._prepare_pe_source_impute_condition_frame(current_frame)
         return [
             variable
-            for variable in PE_SOURCE_IMPUTE_PREDICTORS[source_key]
+            for variable in PE_SOURCE_IMPUTE_BLOCK_SPECS[source_key].predictors
             if variable in donor_prepared.columns
             and variable in current_prepared.columns
             and self._is_compatible_donor_condition(
@@ -2752,18 +2712,10 @@ class USMicroplexPipeline:
         donor_source_name: str | None,
         donor_block: tuple[str, ...],
     ) -> str | None:
-        block_set = set(donor_block)
-        normalized_name = (donor_source_name or "").strip().lower()
-        if "acs" in normalized_name and block_set <= PE_SOURCE_IMPUTE_ACS_VARIABLES:
-            return "acs"
-        if "sipp" in normalized_name:
-            if block_set <= PE_SOURCE_IMPUTE_SIPP_TIPS_VARIABLES:
-                return "sipp_tips"
-            if block_set <= PE_SOURCE_IMPUTE_SIPP_ASSET_VARIABLES:
-                return "sipp_assets"
-        if "scf" in normalized_name and block_set <= PE_SOURCE_IMPUTE_SCF_VARIABLES:
-            return "scf"
-        return None
+        return resolve_pe_source_impute_block_key(
+            donor_source_name=donor_source_name,
+            donor_block=donor_block,
+        )
 
     def _prepare_pe_source_impute_condition_frame(
         self,

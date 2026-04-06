@@ -1,0 +1,129 @@
+{
+  "blocks": {
+    "acs": {
+      "survey_name": "acs",
+      "block_name": null,
+      "default_year": 2022,
+      "archetype": "household_income",
+      "household_variables": ["state_fips", "tenure"],
+      "person_variables": [
+        "age",
+        "sex",
+        "is_male",
+        "is_household_head",
+        "tenure_type",
+        "employment_income",
+        "self_employment_income",
+        "social_security",
+        "taxable_pension_income",
+        "rent",
+        "real_estate_taxes",
+        "income"
+      ],
+      "target_variables": ["rent", "real_estate_taxes"],
+      "predictors": [
+        "is_household_head",
+        "age",
+        "is_male",
+        "tenure_type",
+        "employment_income",
+        "self_employment_income",
+        "social_security",
+        "pension_income",
+        "household_size",
+        "state_fips"
+      ]
+    },
+    "sipp_tips": {
+      "survey_name": "sipp",
+      "block_name": "tips",
+      "default_year": 2023,
+      "archetype": "household_income",
+      "household_variables": ["state_fips", "tenure"],
+      "person_variables": [
+        "age",
+        "sex",
+        "employment_income",
+        "income",
+        "tip_income",
+        "count_under_18",
+        "count_under_6"
+      ],
+      "target_variables": ["tip_income"],
+      "predictors": [
+        "employment_income",
+        "age",
+        "count_under_18",
+        "count_under_6"
+      ]
+    },
+    "sipp_assets": {
+      "survey_name": "sipp",
+      "block_name": "assets",
+      "default_year": 2023,
+      "archetype": "household_income",
+      "household_variables": ["state_fips", "tenure"],
+      "person_variables": [
+        "age",
+        "sex",
+        "is_female",
+        "is_married",
+        "employment_income",
+        "income",
+        "count_under_18",
+        "bank_account_assets",
+        "stock_assets",
+        "bond_assets"
+      ],
+      "target_variables": [
+        "bank_account_assets",
+        "stock_assets",
+        "bond_assets"
+      ],
+      "predictors": [
+        "employment_income",
+        "age",
+        "is_female",
+        "is_married",
+        "count_under_18"
+      ]
+    },
+    "scf": {
+      "survey_name": "scf",
+      "block_name": null,
+      "default_year": 2022,
+      "archetype": "wealth",
+      "household_variables": ["state_fips", "tenure"],
+      "person_variables": [
+        "age",
+        "sex",
+        "is_female",
+        "cps_race",
+        "is_married",
+        "own_children_in_household",
+        "employment_income",
+        "income",
+        "interest_dividend_income",
+        "social_security_pension_income",
+        "net_worth",
+        "auto_loan_balance",
+        "auto_loan_interest"
+      ],
+      "target_variables": [
+        "net_worth",
+        "auto_loan_balance",
+        "auto_loan_interest"
+      ],
+      "predictors": [
+        "age",
+        "is_female",
+        "cps_race",
+        "is_married",
+        "own_children_in_household",
+        "employment_income",
+        "interest_dividend_income",
+        "social_security_pension_income"
+      ]
+    }
+  }
+}

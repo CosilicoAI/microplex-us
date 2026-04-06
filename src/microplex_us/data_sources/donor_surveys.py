@@ -26,6 +26,11 @@ from microplex.core import (
     apply_source_query,
 )
 
+from microplex_us.pe_source_impute_specs import (
+    PESourceImputeBlockSpec,
+    get_pe_source_impute_block_spec,
+    resolve_sipp_source_impute_block_spec,
+)
 from microplex_us.pipelines.pe_native_scores import (
     build_policyengine_us_data_subprocess_env,
     resolve_policyengine_us_data_python,
@@ -218,28 +223,6 @@ class DonorSurveyTables:
 DonorSurveyTablesLoader = Callable[..., DonorSurveyTables]
 
 
-@dataclass(frozen=True)
-class DonorSurveyProviderSpec:
-    """Declarative contract for one donor survey block."""
-
-    survey_name: str
-    block_name: str | None
-    default_year: int
-    archetype: SourceArchetype | None
-    household_variables: tuple[str, ...]
-    person_variables: tuple[str, ...]
-    default_loader: DonorSurveyTablesLoader
-
-    @property
-    def descriptor_name(self) -> str:
-        if self.block_name is None:
-            return self.survey_name
-        return f"{self.survey_name}_{self.block_name}"
-
-    def source_name(self, year: int) -> str:
-        return f"{self.descriptor_name}_{year}"
-
-
 def _descriptor_from_tables(
     *,
     households: pd.DataFrame,
@@ -288,7 +271,7 @@ def _descriptor_from_tables(
 
 def _build_static_descriptor(
     *,
-    spec: DonorSurveyProviderSpec,
+    spec: PESourceImputeBlockSpec,
     shareability: Shareability,
 ) -> SourceDescriptor:
     return SourceDescriptor(
@@ -661,100 +644,23 @@ def _default_sipp_assets_tables_loader(
     return DonorSurveyTables(households=households, persons=persons)
 
 
-ACS_DONOR_SURVEY_SPEC = DonorSurveyProviderSpec(
-    survey_name="acs",
-    block_name=None,
-    default_year=2022,
-    archetype=SourceArchetype.HOUSEHOLD_INCOME,
-    household_variables=("state_fips", "tenure"),
-    person_variables=(
-        "age",
-        "sex",
-        "is_male",
-        "is_household_head",
-        "tenure_type",
-        "employment_income",
-        "self_employment_income",
-        "social_security",
-        "taxable_pension_income",
-        "rent",
-        "real_estate_taxes",
-        "income",
-    ),
-    default_loader=_default_acs_tables_loader,
-)
-
-SIPP_DONOR_SURVEY_SPECS: dict[str, DonorSurveyProviderSpec] = {
-    "tips": DonorSurveyProviderSpec(
-        survey_name="sipp",
-        block_name="tips",
-        default_year=2023,
-        archetype=SourceArchetype.HOUSEHOLD_INCOME,
-        household_variables=("state_fips", "tenure"),
-        person_variables=(
-            "age",
-            "sex",
-            "employment_income",
-            "income",
-            "tip_income",
-            "count_under_18",
-            "count_under_6",
-        ),
-        default_loader=_default_sipp_tips_tables_loader,
-    ),
-    "assets": DonorSurveyProviderSpec(
-        survey_name="sipp",
-        block_name="assets",
-        default_year=2023,
-        archetype=SourceArchetype.HOUSEHOLD_INCOME,
-        household_variables=("state_fips", "tenure"),
-        person_variables=(
-            "age",
-            "sex",
-            "is_female",
-            "is_married",
-            "employment_income",
-            "income",
-            "count_under_18",
-            "bank_account_assets",
-            "stock_assets",
-            "bond_assets",
-        ),
-        default_loader=_default_sipp_assets_tables_loader,
-    ),
+BLOCK_LOADERS: dict[str, DonorSurveyTablesLoader] = {
+    "acs": _default_acs_tables_loader,
+    "sipp_tips": _default_sipp_tips_tables_loader,
+    "sipp_assets": _default_sipp_assets_tables_loader,
+    "scf": _default_scf_tables_loader,
 }
 
-SCF_DONOR_SURVEY_SPEC = DonorSurveyProviderSpec(
-    survey_name="scf",
-    block_name=None,
-    default_year=2022,
-    archetype=SourceArchetype.WEALTH,
-    household_variables=("state_fips", "tenure"),
-    person_variables=(
-        "age",
-        "sex",
-        "is_female",
-        "cps_race",
-        "is_married",
-        "own_children_in_household",
-        "employment_income",
-        "income",
-        "interest_dividend_income",
-        "social_security_pension_income",
-        "net_worth",
-        "auto_loan_balance",
-        "auto_loan_interest",
-    ),
-    default_loader=_default_scf_tables_loader,
-)
+
+DonorSurveyProviderSpec = PESourceImputeBlockSpec
+
+
+def _default_loader_for_spec(spec: PESourceImputeBlockSpec) -> DonorSurveyTablesLoader:
+    return BLOCK_LOADERS[spec.key]
 
 
 def resolve_sipp_donor_survey_spec(block: str) -> DonorSurveyProviderSpec:
-    try:
-        return SIPP_DONOR_SURVEY_SPECS[block]
-    except KeyError as error:
-        available = ", ".join(sorted(SIPP_DONOR_SURVEY_SPECS))
-        raise ValueError(f"Unknown SIPP donor survey block '{block}'. Expected one of: {available}") from error
+    return resolve_sipp_source_impute_block_spec(block)
 
 
 class DonorSurveySourceProvider:
@@ -792,7 +698,7 @@ class DonorSurveySourceProvider:
     def load_frame(self, query: SourceQuery | None = None) -> ObservationFrame:
         query = query or SourceQuery()
         provider_filters = query.provider_filters
-        loader = self.loader or self.spec.default_loader
+        loader = self.loader or _default_loader_for_spec(self.spec)
         year = int(provider_filters.get("year", self.year))
         tables = loader(
             year=year,
@@ -825,14 +731,14 @@ class ACSSourceProvider(DonorSurveySourceProvider):
     def __init__(
         self,
         *,
-        year: int = ACS_DONOR_SURVEY_SPEC.default_year,
+        year: int = get_pe_source_impute_block_spec("acs").default_year,
         shareability: Shareability = Shareability.PUBLIC,
         loader: DonorSurveyTablesLoader | None = None,
         policyengine_us_data_repo: str | Path | None = None,
         policyengine_us_data_python: str | Path | None = None,
     ) -> None:
         super().__init__(
-            spec=ACS_DONOR_SURVEY_SPEC,
+            spec=get_pe_source_impute_block_spec("acs"),
             year=year,
             shareability=shareability,
             loader=loader,
@@ -909,14 +815,14 @@ class SCFSourceProvider(DonorSurveySourceProvider):
     def __init__(
         self,
         *,
-        year: int = SCF_DONOR_SURVEY_SPEC.default_year,
+        year: int = get_pe_source_impute_block_spec("scf").default_year,
         shareability: Shareability = Shareability.PUBLIC,
         loader: DonorSurveyTablesLoader | None = None,
         policyengine_us_data_repo: str | Path | None = None,
         policyengine_us_data_python: str | Path | None = None,
     ) -> None:
         super().__init__(
-            spec=SCF_DONOR_SURVEY_SPEC,
+            spec=get_pe_source_impute_block_spec("scf"),
             year=year,
             shareability=shareability,
             loader=loader,

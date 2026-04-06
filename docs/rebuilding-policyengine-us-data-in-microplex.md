@@ -27,6 +27,13 @@ That profile now also includes:
 - the PE-style prespecified donor-predictor mode for source imputations
 - opt-in ACS/SCF donor providers plus a block-spec-driven SIPP donor provider
   for the rebuild path
+- one shared donor-block manifest,
+  [`pe_source_impute_blocks.json`](/Users/maxghenis/CosilicoAI/microplex-us/src/microplex_us/manifests/pe_source_impute_blocks.json),
+  that now drives both:
+  - donor-survey adapter specs in
+    [`donor_surveys.py`](/Users/maxghenis/CosilicoAI/microplex-us/src/microplex_us/data_sources/donor_surveys.py)
+  - the PE-style prespecified predictor surface in
+    [`us.py`](/Users/maxghenis/CosilicoAI/microplex-us/src/microplex_us/pipelines/us.py)
 
 ## Why this rule exists
 
@@ -111,6 +118,9 @@ When we face a design choice during the rebuild:
   an inline script.
 - Keep the incumbent predictor set, but declare it in one stage config rather
   than scattering it across files.
+- Keep PE's donor-survey blocks, but declare them once in a shared manifest
+  instead of hardcoding ACS/SIPP/SCF surfaces separately in both provider code
+  and pipeline code.
 - Keep the PE weighting backend, but call it through a Microplex-owned adapter.
 - Keep the same CPS reason-code logic, but express it in a source adapter with
   explicit parity tests.
