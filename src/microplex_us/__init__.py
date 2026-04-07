@@ -76,6 +76,7 @@ from microplex_us.pipelines import (
     build_and_save_versioned_us_microplex_from_source_provider,
     build_and_save_versioned_us_microplex_from_source_providers,
     build_policyengine_us_data_rebuild_markdown,
+    build_policyengine_us_data_rebuild_native_audit,
     build_policyengine_us_data_rebuild_pipeline,
     build_us_microplex,
     build_us_microplex_run_registry_entry,
@@ -114,6 +115,7 @@ from microplex_us.pipelines import (
     select_us_microplex_frontier_entry,
     select_us_microplex_frontier_index_row,
     warm_us_microplex_parity_cache,
+    write_policyengine_us_data_rebuild_native_audit,
     write_us_microplex_site_snapshot,
 )
 from microplex_us.policyengine import (
@@ -221,6 +223,7 @@ __all__ = [
     "USMicroplexPipeline",
     "attach_policyengine_us_data_rebuild_checkpoint_evidence",
     "build_policyengine_us_data_rebuild_pipeline",
+    "build_policyengine_us_data_rebuild_native_audit",
     "default_policyengine_us_data_rebuild_checkpoint_config",
     "default_policyengine_us_data_rebuild_config",
     "default_policyengine_us_data_rebuild_queries",
@@ -277,6 +280,7 @@ __all__ = [
     "reduced_benchmark_to_calibration_targets",
     "reduced_benchmark_specs_to_calibration_targets",
     "run_policyengine_us_data_rebuild_checkpoint",
+    "write_policyengine_us_data_rebuild_native_audit",
     "run_us_microplex_performance_harness",
     "run_us_microplex_reduced_benchmark_harness",
     "run_us_microplex_source_experiments",

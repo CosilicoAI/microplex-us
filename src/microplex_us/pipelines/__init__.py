@@ -59,6 +59,10 @@ from microplex_us.pipelines.pe_us_data_rebuild import (
     default_policyengine_us_data_rebuild_program,
     default_policyengine_us_data_rebuild_source_providers,
 )
+from microplex_us.pipelines.pe_us_data_rebuild_audit import (
+    build_policyengine_us_data_rebuild_native_audit,
+    write_policyengine_us_data_rebuild_native_audit,
+)
 from microplex_us.pipelines.pe_us_data_rebuild_checkpoint import (
     PEUSDataRebuildCheckpointEvidenceResult,
     PEUSDataRebuildCheckpointResult,
@@ -190,6 +194,7 @@ __all__ = [
     "PEUSDataRebuildStage",
     "PEUSDataRebuildStatus",
     "build_policyengine_us_data_rebuild_pipeline",
+    "build_policyengine_us_data_rebuild_native_audit",
     "build_policyengine_us_data_rebuild_parity_artifact",
     "build_policyengine_us_data_rebuild_markdown",
     "attach_policyengine_us_data_rebuild_checkpoint_evidence",
@@ -208,6 +213,7 @@ __all__ = [
     "resolve_policyengine_us_data_repo_root",
     "resolve_us_microplex_frontier_artifact_dir",
     "run_policyengine_us_data_rebuild_checkpoint",
+    "write_policyengine_us_data_rebuild_native_audit",
     "score_policyengine_us_native_broad_loss",
     "select_us_microplex_frontier_index_row",
     "select_us_microplex_frontier_entry",
