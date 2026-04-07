@@ -566,6 +566,7 @@ class USMicroplexBuildConfig:
     policyengine_baseline_dataset: str | None = None
     policyengine_dataset_year: int | None = None
     policyengine_direct_override_variables: tuple[str, ...] = ()
+    policyengine_prefer_existing_tax_unit_ids: bool = False
     policyengine_quantity_targets: tuple[PolicyEngineUSQuantityTarget, ...] = ()
     policyengine_targets_db: str | None = None
     policyengine_target_period: int | None = None
@@ -3181,6 +3182,11 @@ class USMicroplexPipeline:
         self,
         persons: pd.DataFrame,
     ) -> tuple[pd.DataFrame, pd.DataFrame]:
+        if self.config.policyengine_prefer_existing_tax_unit_ids:
+            preserved = self._build_policyengine_tax_units_from_existing_ids(persons)
+            if preserved is not None:
+                return preserved
+
         optimizer = TaxUnitOptimizer()
         person_rows = persons.copy()
         tax_unit_rows: list[dict[str, Any]] = []
@@ -3264,6 +3270,151 @@ class USMicroplexPipeline:
         person_rows["tax_unit_id"] = person_rows["person_id"].map(person_to_tax_unit)
         tax_units = pd.DataFrame(tax_unit_rows)
         return tax_units, person_rows
+
+    def _build_policyengine_tax_units_from_existing_ids(
+        self,
+        persons: pd.DataFrame,
+    ) -> tuple[pd.DataFrame, pd.DataFrame] | None:
+        if "tax_unit_id" not in persons.columns or "person_id" not in persons.columns:
+            return None
+
+        raw_tax_unit_id = pd.to_numeric(persons["tax_unit_id"], errors="coerce")
+        if raw_tax_unit_id.isna().all():
+            return None
+
+        person_rows = persons.copy()
+        tax_unit_key = pd.DataFrame(
+            {
+                "household_id": person_rows["household_id"],
+                "tax_unit_id": raw_tax_unit_id,
+            }
+        )
+        if tax_unit_key["tax_unit_id"].isna().any():
+            return None
+
+        households_per_tax_unit = (
+            tax_unit_key.assign(_household_id=person_rows["household_id"])
+            .groupby("tax_unit_id")["_household_id"]
+            .nunique()
+        )
+        if bool((households_per_tax_unit > 1).any()):
+            normalized_tax_unit_id = (
+                pd.factorize(pd.MultiIndex.from_frame(tax_unit_key), sort=False)[0]
+                .astype(np.int64)
+                + 1
+            )
+            person_rows["tax_unit_id"] = normalized_tax_unit_id
+        else:
+            person_rows["tax_unit_id"] = raw_tax_unit_id.astype(np.int64)
+
+        tax_unit_rows: list[dict[str, Any]] = []
+        for tax_unit_id, unit_persons in person_rows.groupby("tax_unit_id", sort=False):
+            ordered = unit_persons.sort_values(
+                ["relationship_to_head", "age", "person_id"],
+                ascending=[True, False, True],
+            ).reset_index(drop=True)
+            filer_ids, dependent_ids = self._split_preserved_tax_unit_members(ordered)
+            if not filer_ids:
+                filer_ids = [int(ordered.iloc[0]["person_id"])]
+                dependent_ids = [
+                    int(person_id)
+                    for person_id in ordered["person_id"].tolist()
+                    if int(person_id) not in filer_ids
+                ]
+            filing_status = self._infer_preserved_tax_unit_filing_status(
+                ordered,
+                filer_ids=filer_ids,
+                dependent_ids=dependent_ids,
+            )
+            tax_unit_rows.append(
+                {
+                    "tax_unit_id": int(tax_unit_id),
+                    "household_id": int(ordered.iloc[0]["household_id"]),
+                    "filing_status": filing_status,
+                    "member_ids": [int(person_id) for person_id in ordered["person_id"]],
+                    "filer_ids": filer_ids,
+                    "dependent_ids": dependent_ids,
+                    "n_dependents": len(dependent_ids),
+                    "total_income": float(
+                        pd.to_numeric(ordered.get("income", 0.0), errors="coerce")
+                        .fillna(0.0)
+                        .sum()
+                    ),
+                    "tax_liability": 0.0,
+                }
+            )
+
+        return pd.DataFrame(tax_unit_rows), person_rows
+
+    def _split_preserved_tax_unit_members(
+        self,
+        unit_persons: pd.DataFrame,
+    ) -> tuple[list[int], list[int]]:
+        relationship = pd.to_numeric(
+            unit_persons.get("relationship_to_head"),
+            errors="coerce",
+        ).fillna(3)
+        head_mask = relationship.eq(0)
+        spouse_mask = relationship.eq(1)
+        dependent_mask = relationship.eq(2)
+
+        filer_ids: list[int] = []
+        if head_mask.any():
+            filer_ids.append(int(unit_persons.loc[head_mask, "person_id"].iloc[0]))
+        if spouse_mask.any():
+            filer_ids.append(int(unit_persons.loc[spouse_mask, "person_id"].iloc[0]))
+        if not filer_ids:
+            adult_mask = pd.to_numeric(
+                unit_persons.get("age"),
+                errors="coerce",
+            ).fillna(0).ge(18)
+            if adult_mask.any():
+                filer_ids.append(int(unit_persons.loc[adult_mask, "person_id"].iloc[0]))
+            else:
+                filer_ids.append(int(unit_persons.iloc[0]["person_id"]))
+
+        dependent_ids = [
+            int(person_id)
+            for person_id in unit_persons.loc[dependent_mask, "person_id"].tolist()
+            if int(person_id) not in filer_ids
+        ]
+        if not dependent_ids:
+            dependent_ids = [
+                int(person_id)
+                for person_id in unit_persons["person_id"].tolist()
+                if int(person_id) not in filer_ids
+            ]
+        return filer_ids, dependent_ids
+
+    def _infer_preserved_tax_unit_filing_status(
+        self,
+        unit_persons: pd.DataFrame,
+        *,
+        filer_ids: list[int],
+        dependent_ids: list[int],
+    ) -> str:
+        if "filing_status" in unit_persons.columns:
+            filing_status_values = (
+                unit_persons["filing_status"]
+                .dropna()
+                .astype(str)
+                .str.strip()
+            )
+            filing_status_values = filing_status_values[filing_status_values != ""]
+            if not filing_status_values.empty:
+                return self._normalize_policyengine_filing_status(
+                    filing_status_values.iloc[0]
+                )
+
+        if len(filer_ids) >= 2:
+            return "JOINT"
+
+        filer_row = unit_persons.loc[unit_persons["person_id"] == filer_ids[0]].iloc[0]
+        hinted_status = self._infer_single_filer_filing_status(
+            filer_row,
+            has_dependents=bool(dependent_ids),
+        )
+        return hinted_status or "SINGLE"
 
     def _apply_tax_unit_filing_status_hints(
         self,

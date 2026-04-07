@@ -77,7 +77,11 @@ def default_policyengine_us_data_rebuild_config(
         donor_imputer_condition_selection="pe_prespecified",
         donor_imputer_qrf_zero_threshold=0.05,
         prefer_cached_cps_asec_source=False,
-        policyengine_direct_override_variables=("non_sch_d_capital_gains",),
+        policyengine_direct_override_variables=(
+            "filing_status",
+            "non_sch_d_capital_gains",
+        ),
+        policyengine_prefer_existing_tax_unit_ids=True,
     )
     return replace(defaults, **overrides)
 

@@ -832,6 +832,60 @@ class TestUSMicroplexPipeline:
         assert tax_units.iloc[0]["filing_status"] == "SURVIVING_SPOUSE"
         assert tax_units.iloc[0]["n_dependents"] == 1
 
+    def test_build_policyengine_entity_tables_can_preserve_existing_tax_unit_ids(self):
+        pipeline = USMicroplexPipeline(
+            USMicroplexBuildConfig(policyengine_prefer_existing_tax_unit_ids=True)
+        )
+        population = pd.DataFrame(
+            {
+                "person_id": [1, 2, 3],
+                "household_id": [10, 10, 10],
+                "tax_unit_id": [100, 100, 200],
+                "weight": [1.0, 1.0, 1.0],
+                "age": [45, 43, 12],
+                "income": [60_000.0, 15_000.0, 0.0],
+                "relationship_to_head": [0, 1, 2],
+                "marital_status": [1, 1, 7],
+                "state_fips": [6, 6, 6],
+                "tenure": [1, 1, 1],
+            }
+        )
+
+        tables = pipeline.build_policyengine_entity_tables(population)
+        person_rows = tables.persons.sort_values("person_id").reset_index(drop=True)
+        tax_units = tables.tax_units.sort_values("tax_unit_id").reset_index(drop=True)
+
+        assert person_rows["tax_unit_id"].tolist() == [100, 100, 200]
+        assert tax_units["tax_unit_id"].tolist() == [100, 200]
+        assert tax_units["filing_status"].tolist() == ["JOINT", "SINGLE"]
+        assert tax_units["n_dependents"].tolist() == [0, 0]
+
+    def test_build_policyengine_entity_tables_falls_back_when_existing_tax_unit_ids_cross_households(self):
+        pipeline = USMicroplexPipeline(
+            USMicroplexBuildConfig(policyengine_prefer_existing_tax_unit_ids=True)
+        )
+        population = pd.DataFrame(
+            {
+                "person_id": [1, 2],
+                "household_id": [10, 20],
+                "tax_unit_id": [100, 100],
+                "weight": [1.0, 1.0],
+                "age": [45, 39],
+                "income": [60_000.0, 40_000.0],
+                "relationship_to_head": [0, 0],
+                "marital_status": [7, 7],
+                "state_fips": [6, 36],
+                "tenure": [1, 1],
+            }
+        )
+
+        tables = pipeline.build_policyengine_entity_tables(population)
+        person_rows = tables.persons.sort_values("person_id").reset_index(drop=True)
+        tax_units = tables.tax_units.sort_values("tax_unit_id").reset_index(drop=True)
+
+        assert person_rows["tax_unit_id"].nunique() == 2
+        assert tax_units["household_id"].tolist() == [10, 20]
+
     def test_build_from_source_providers_accepts_year_specific_query_keys(self):
         households = pd.DataFrame(
             {
@@ -2446,7 +2500,7 @@ class TestUSMicroplexPipeline:
         pipeline = USMicroplexPipeline(USMicroplexBuildConfig())
         persons = pd.DataFrame(
             {
-                "capital_gains_distributions": [250.0],
+                "non_sch_d_capital_gains": [250.0],
                 "age": [45],
                 "sex": [1],
             }

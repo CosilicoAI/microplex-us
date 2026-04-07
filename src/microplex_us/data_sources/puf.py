@@ -62,7 +62,7 @@ UPRATING_FACTORS = {
     "qualified_dividend_income": 1.60,
     "short_term_capital_gains": 1.80,
     "long_term_capital_gains": 2.20,  # Stock market growth
-    "capital_gains_distributions": 1.80,
+    "non_sch_d_capital_gains": 1.80,
     "partnership_s_corp_income": 1.50,
     "rental_income_positive": 1.40,
     "rental_income_negative": 1.40,
@@ -128,7 +128,7 @@ JOINT_EQUAL_SHARE_ALLOCATION = (
     "non_qualified_dividend_income",
     "short_term_capital_gains",
     "long_term_capital_gains",
-    "capital_gains_distributions",
+    "non_sch_d_capital_gains",
     "partnership_s_corp_income",
     "rental_income",
     "ira_distributions",
@@ -254,8 +254,47 @@ def map_puf_variables(
         result.get("rental_income_positive", 0).fillna(0) +
         -result.get("rental_income_negative", 0).fillna(0)
     )
+    if {"E00600", "E00650"}.issubset(set(puf.columns)):
+        result["non_qualified_dividend_income"] = (
+            puf["E00600"].fillna(0) - puf["E00650"].fillna(0)
+        )
+    if {"E26190", "E26180", "E25980", "E25960"}.issubset(set(puf.columns)):
+        s_corp_income = puf["E26190"].fillna(0) - puf["E26180"].fillna(0)
+        partnership_income = puf["E25980"].fillna(0) - puf["E25960"].fillna(0)
+        result["partnership_s_corp_income"] = s_corp_income + partnership_income
+    if {
+        "E30400",
+        "E30500",
+        "E00900",
+        "E02100",
+        "E25940",
+        "E25980",
+        "E25920",
+        "E25960",
+    }.issubset(set(puf.columns)):
+        se_deduction_factor = 0.9235
+        taxable_se = puf["E30400"].fillna(0) + puf["E30500"].fillna(0)
+        gross_se = taxable_se / se_deduction_factor
+        schedule_c_f_income = puf["E00900"].fillna(0) + puf["E02100"].fillna(0)
+        has_partnership = (
+            puf["E25940"].fillna(0)
+            + puf["E25980"].fillna(0)
+            - puf["E25920"].fillna(0)
+            - puf["E25960"].fillna(0)
+        ) != 0
+        result["partnership_se_income"] = np.where(
+            has_partnership,
+            gross_se - schedule_c_f_income,
+            0.0,
+        )
+    if "T27800" in puf.columns:
+        result["farm_income"] = puf["T27800"].fillna(0)
     if {"E26390", "E26400"}.issubset(set(puf.columns)):
         result["estate_income"] = puf["E26390"].fillna(0) - puf["E26400"].fillna(0)
+    if {"E01500", "E01700"}.issubset(set(puf.columns)):
+        result["tax_exempt_pension_income"] = (
+            puf["E01500"].fillna(0) - puf["E01700"].fillna(0)
+        )
     medical_expense_floor = result.get("medical_expense_agi_floor")
     if medical_expense_floor is not None:
         for variable, fraction in MEDICAL_EXPENSE_CATEGORY_BREAKDOWNS.items():
@@ -660,10 +699,6 @@ def _add_derived_income_columns(df: pd.DataFrame) -> pd.DataFrame:
     ordinary_dividend_income = _numeric_series(result, "ordinary_dividend_income")
     short_term_capital_gains = _numeric_series(result, "short_term_capital_gains")
     long_term_capital_gains = _numeric_series(result, "long_term_capital_gains")
-    capital_gains_distributions = _numeric_series(
-        result,
-        "capital_gains_distributions",
-    )
     taxable_pension_income = _numeric_series(result, "taxable_pension_income")
     gross_social_security = _numeric_series(result, "gross_social_security")
     if "age" in result.columns:
@@ -682,7 +717,6 @@ def _add_derived_income_columns(df: pd.DataFrame) -> pd.DataFrame:
     result["capital_gains"] = (
         short_term_capital_gains
         + long_term_capital_gains
-        + capital_gains_distributions
     )
     result["pension_income"] = taxable_pension_income
     result["social_security"] = gross_social_security
@@ -831,7 +865,7 @@ def load_puf(
 PUF_EXCLUSIVE_VARS = [
     "short_term_capital_gains",
     "long_term_capital_gains",
-    "capital_gains_distributions",
+    "non_sch_d_capital_gains",
     "partnership_s_corp_income",
     "qualified_dividend_income",
     "tax_exempt_interest_income",

@@ -498,6 +498,98 @@ def test_map_puf_variables_preserves_rental_loss_sign():
     assert mapped.loc[0, "rental_income"] == -300.0
 
 
+def test_map_puf_variables_uses_pe_puf_business_and_farm_income_formulas():
+    raw = pd.DataFrame(
+        {
+            "RECID": [101],
+            "MARS": [1],
+            "XTOT": [1],
+            "S006": [100.0],
+            "E26270": [999.0],
+            "E26190": [1_200.0],
+            "E26180": [200.0],
+            "E25940": [25.0],
+            "E25980": [500.0],
+            "E25920": [0.0],
+            "E25960": [50.0],
+            "E30400": [923.5],
+            "E30500": [0.0],
+            "E00900": [0.0],
+            "E02100": [300.0],
+            "T27800": [700.0],
+            "E27200": [125.0],
+        }
+    )
+
+    mapped = map_puf_variables(raw)
+
+    assert mapped.loc[0, "partnership_s_corp_income"] == 1_450.0
+    assert mapped.loc[0, "partnership_se_income"] == 700.0
+    assert mapped.loc[0, "farm_income"] == 700.0
+    assert mapped.loc[0, "farm_operations_income"] == 300.0
+    assert mapped.loc[0, "farm_rent_income"] == 125.0
+
+
+def test_map_puf_variables_adds_pe_exact_irs_inputs():
+    raw = pd.DataFrame(
+        {
+            "RECID": [101],
+            "MARS": [1],
+            "XTOT": [1],
+            "S006": [100.0],
+            "E00600": [500.0],
+            "E00650": [200.0],
+            "E01400": [1_250.0],
+            "E01500": [2_100.0],
+            "E01700": [1_600.0],
+            "E02300": [800.0],
+            "E02400": [1_100.0],
+            "E03290": [300.0],
+            "E07300": [90.0],
+            "E07400": [80.0],
+            "E07600": [70.0],
+            "E09700": [60.0],
+            "E09800": [50.0],
+            "E11200": [40.0],
+            "E24518": [30.0],
+            "E24515": [20.0],
+            "E58990": [10.0],
+            "E62900": [5.0],
+            "E87521": [15.0],
+            "P08000": [25.0],
+            "E07240": [35.0],
+            "E07260": [45.0],
+            "E00700": [55.0],
+            "E01200": [65.0],
+        }
+    )
+
+    mapped = map_puf_variables(raw)
+
+    assert mapped.loc[0, "non_qualified_dividend_income"] == 300.0
+    assert mapped.loc[0, "taxable_ira_distributions"] == 1_250.0
+    assert mapped.loc[0, "taxable_unemployment_compensation"] == 800.0
+    assert mapped.loc[0, "social_security"] == 1_100.0
+    assert mapped.loc[0, "tax_exempt_pension_income"] == 500.0
+    assert mapped.loc[0, "health_savings_account_ald"] == 300.0
+    assert mapped.loc[0, "foreign_tax_credit"] == 90.0
+    assert mapped.loc[0, "general_business_credit"] == 80.0
+    assert mapped.loc[0, "prior_year_minimum_tax_credit"] == 70.0
+    assert mapped.loc[0, "recapture_of_investment_credit"] == 60.0
+    assert mapped.loc[0, "unreported_payroll_tax"] == 50.0
+    assert mapped.loc[0, "excess_withheld_payroll_tax"] == 40.0
+    assert mapped.loc[0, "long_term_capital_gains_on_collectibles"] == 30.0
+    assert mapped.loc[0, "unrecaptured_section_1250_gain"] == 20.0
+    assert mapped.loc[0, "investment_income_elected_form_4952"] == 10.0
+    assert mapped.loc[0, "amt_foreign_tax_credit"] == 5.0
+    assert mapped.loc[0, "american_opportunity_credit"] == 15.0
+    assert mapped.loc[0, "other_credits"] == 25.0
+    assert mapped.loc[0, "savers_credit"] == 35.0
+    assert mapped.loc[0, "energy_efficient_home_improvement_credit"] == 45.0
+    assert mapped.loc[0, "salt_refund_income"] == 55.0
+    assert mapped.loc[0, "miscellaneous_income"] == 65.0
+
+
 def test_download_puf_prefers_existing_local_files_without_hub_lookup(tmp_path, monkeypatch):
     puf_path = tmp_path / "puf_2015.csv"
     demographics_path = tmp_path / "demographics_2015.csv"

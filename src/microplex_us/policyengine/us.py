@@ -220,7 +220,6 @@ SAFE_POLICYENGINE_US_EXPORT_VARIABLES: set[str] = {
 
 POLICYENGINE_US_EXPORT_COLUMN_ALIASES: dict[str, str] = {
     "race": "cps_race",
-    "capital_gains_distributions": "non_sch_d_capital_gains",
 }
 
 

@@ -1792,7 +1792,13 @@ class TestPolicyEngineUSProjection:
         export_maps = build_policyengine_us_export_variable_maps(
             tables,
             tax_benefit_system=FakeSystem(),
-            direct_override_variables=("snap", "ssi", "medicaid", "medicaid_enrolled"),
+            direct_override_variables=(
+                "filing_status",
+                "snap",
+                "ssi",
+                "medicaid",
+                "medicaid_enrolled",
+            ),
         )
 
         assert export_maps["person"] == {
@@ -1802,6 +1808,7 @@ class TestPolicyEngineUSProjection:
             "medicaid_enrolled": "medicaid_enrolled",
             "ssi": "ssi",
         }
+        assert export_maps["tax_unit"] == {"filing_status": "filing_status"}
         assert export_maps["spm_unit"] == {"snap": "snap"}
 
     def test_default_policyengine_us_export_surface_avoids_formula_aggregates(self):
@@ -1830,7 +1837,7 @@ class TestPolicyEngineUSProjection:
         assert "is_separated" not in SAFE_POLICYENGINE_US_EXPORT_VARIABLES
         assert "is_surviving_spouse" not in SAFE_POLICYENGINE_US_EXPORT_VARIABLES
 
-    def test_build_policyengine_us_export_variable_maps_supports_pre_sim_aliases(self):
+    def test_build_policyengine_us_export_variable_maps_supports_exact_pre_sim_names(self):
         class FakeEntity:
             def __init__(self, key):
                 self.key = key
@@ -1857,7 +1864,7 @@ class TestPolicyEngineUSProjection:
                     "person_id": [1],
                     "household_id": [10],
                     "race": [4],
-                    "capital_gains_distributions": [250.0],
+                    "non_sch_d_capital_gains": [250.0],
                 }
             ),
         )
@@ -1870,7 +1877,7 @@ class TestPolicyEngineUSProjection:
 
         assert export_maps["person"] == {
             "race": "cps_race",
-            "capital_gains_distributions": "non_sch_d_capital_gains",
+            "non_sch_d_capital_gains": "non_sch_d_capital_gains",
         }
 
     def test_build_policyengine_us_export_variable_maps_prefers_exact_pre_sim_names(self):

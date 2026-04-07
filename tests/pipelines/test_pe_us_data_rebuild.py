@@ -75,8 +75,10 @@ def test_default_policyengine_us_data_rebuild_config_uses_incumbent_defaults() -
     assert config.donor_imputer_backend == "qrf"
     assert config.donor_imputer_condition_selection == "pe_prespecified"
     assert config.policyengine_direct_override_variables == (
+        "filing_status",
         "non_sch_d_capital_gains",
     )
+    assert config.policyengine_prefer_existing_tax_unit_ids is True
     assert config.random_seed == 123
     assert config.cps_asec_source_year == 2022
 
