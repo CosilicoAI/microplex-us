@@ -149,6 +149,41 @@ JOINT_EQUAL_SHARE_ALLOCATION = (
     "student_loan_interest",
 )
 
+PUF_DEMOGRAPHIC_HELPER_COLUMNS = (
+    "_puf_recid",
+    "_puf_agerange",
+    "_puf_earnsplit",
+    "_puf_gender",
+    "_puf_agedp1",
+    "_puf_agedp2",
+    "_puf_agedp3",
+)
+
+PUF_PERSON_EXPANSION_PRESERVE_COLUMNS = {
+    "weight",
+    "household_weight",
+    "year",
+    "household_id",
+    "state_fips",
+    "tenure",
+    "filing_status",
+    "filing_status_code",
+    "exemptions_count",
+    "eitc_children",
+    "ctc_children",
+    "age",
+    "is_male",
+    "employment_status",
+    "income",
+    "interest_income",
+    "dividend_income",
+    "capital_gains",
+    "pension_income",
+    "social_security",
+    "social_security_retirement",
+    *PUF_DEMOGRAPHIC_HELPER_COLUMNS,
+}
+
 MEDICAL_EXPENSE_CATEGORY_BREAKDOWNS = {
     "health_insurance_premiums_without_medicare_part_b": 0.453,
     "other_medical_expenses": 0.325,
@@ -340,6 +375,22 @@ def map_puf_variables(
         # Unknown - will be learned from CPS
         result["is_male"] = np.nan
 
+    if "RECID" in puf.columns:
+        result["_puf_recid"] = pd.to_numeric(puf["RECID"], errors="coerce")
+    if "AGERANGE" in puf.columns:
+        result["_puf_agerange"] = pd.to_numeric(puf["AGERANGE"], errors="coerce")
+    if "EARNSPLIT" in puf.columns:
+        result["_puf_earnsplit"] = pd.to_numeric(puf["EARNSPLIT"], errors="coerce")
+    if "GENDER" in puf.columns:
+        result["_puf_gender"] = pd.to_numeric(puf["GENDER"], errors="coerce")
+    for dependent_idx in range(1, 4):
+        raw_column = f"AGEDP{dependent_idx}"
+        if raw_column in puf.columns:
+            result[f"_puf_agedp{dependent_idx}"] = pd.to_numeric(
+                puf[raw_column],
+                errors="coerce",
+            )
+
     if impute_pre_tax_contributions:
         model = pre_tax_contribution_model
         if model is None:
@@ -399,6 +450,80 @@ def _impute_age(
     age = (age + noise).clip(18, 95).astype(int)
 
     return age
+
+
+def _decode_puf_filer_age(age_range: int | float | None, *, fallback: float = 40.0) -> int:
+    if age_range is None or pd.isna(age_range):
+        return int(fallback)
+    age_code = int(age_range)
+    if age_code == 0:
+        return int(fallback)
+    age_decode = {
+        1: 18,
+        2: 26,
+        3: 35,
+        4: 45,
+        5: 55,
+        6: 65,
+        7: 80,
+    }
+    lower = age_decode.get(age_code)
+    upper = age_decode.get(age_code + 1)
+    if lower is None or upper is None:
+        return int(fallback)
+    return int(lower + (upper - lower) / 2)
+
+
+def _decode_puf_dependent_age(age_range: int | float | None) -> int:
+    if age_range is None or pd.isna(age_range):
+        return 0
+    age_code = int(age_range)
+    if age_code == 0:
+        return 0
+    age_decode = {
+        0: 0,
+        1: 0,
+        2: 5,
+        3: 13,
+        4: 17,
+        5: 19,
+        6: 25,
+        7: 30,
+    }
+    lower = age_decode.get(age_code, 0)
+    upper = age_decode.get(age_code + 1, lower)
+    if upper <= lower:
+        return int(lower)
+    return int(lower + (upper - lower) / 2)
+
+
+def _puf_joint_head_share(row: pd.Series, *, default: float = 0.6) -> float:
+    earnsplit = row.get("_puf_earnsplit")
+    if earnsplit is None or pd.isna(earnsplit):
+        return default
+    split_code = int(earnsplit)
+    if split_code <= 0:
+        return 1.0
+    split_decodes = {
+        1: 0.0,
+        2: 0.25,
+        3: 0.75,
+        4: 1.0,
+        5: 1.0,
+    }
+    lower = split_decodes.get(split_code)
+    upper = split_decodes.get(split_code + 1)
+    if lower is None or upper is None:
+        return default
+    return float(1.0 - ((lower + upper) / 2.0))
+
+
+def _is_puf_numeric_split_column(df: pd.DataFrame, column: str) -> bool:
+    if column in PUF_PERSON_EXPANSION_PRESERVE_COLUMNS:
+        return False
+    if column.startswith("_"):
+        return False
+    return pd.api.types.is_numeric_dtype(df[column])
 
 
 def uprate_puf(df: pd.DataFrame, from_year: int = 2015, to_year: int = 2024) -> pd.DataFrame:
@@ -829,18 +954,28 @@ def expand_to_persons(df: pd.DataFrame) -> pd.DataFrame:
     This enables stacking with CPS person-level data.
     """
     records = []
+    split_columns = [column for column in df.columns if _is_puf_numeric_split_column(df, column)]
 
     for idx, row in df.iterrows():
         filing_status = row.get("filing_status", "SINGLE")
-        row.get("exemptions_count", 1)
+        exemptions = int(pd.to_numeric(row.get("exemptions_count", 1), errors="coerce") or 1)
+        has_pe_demographics = "_puf_agerange" in row.index and not pd.isna(row.get("_puf_agerange"))
+        tax_unit_id = row.get("_puf_recid")
+        if tax_unit_id is None or pd.isna(tax_unit_id):
+            tax_unit_id = idx
+        pe_tax_unit_id = str(int(tax_unit_id)) if pd.notna(tax_unit_id) else str(idx)
 
         # Create head record
         head = row.copy()
         head["is_head"] = 1
         head["is_spouse"] = 0
         head["is_dependent"] = 0
-        head["person_id"] = f"{idx}_head"
-        head["tax_unit_id"] = idx
+        head["person_id"] = f"{pe_tax_unit_id}:1" if has_pe_demographics else f"{idx}_head"
+        head["tax_unit_id"] = pe_tax_unit_id if has_pe_demographics else idx
+        if has_pe_demographics:
+            head["age"] = _decode_puf_filer_age(row.get("_puf_agerange"), fallback=row.get("age", 40.0))
+            if pd.notna(row.get("_puf_gender")):
+                head["is_male"] = float(int(row.get("_puf_gender")) == 1)
         records.append(head)
 
         # Create spouse record if joint filing
@@ -849,14 +984,45 @@ def expand_to_persons(df: pd.DataFrame) -> pd.DataFrame:
             spouse["is_head"] = 0
             spouse["is_spouse"] = 1
             spouse["is_dependent"] = 0
-            spouse["person_id"] = f"{idx}_spouse"
-            spouse["tax_unit_id"] = idx
+            spouse["person_id"] = f"{pe_tax_unit_id}:2" if has_pe_demographics else f"{idx}_spouse"
+            spouse["tax_unit_id"] = pe_tax_unit_id if has_pe_demographics else idx
 
-            head, spouse = _allocate_joint_tax_unit_amounts(row, head, spouse)
+            if has_pe_demographics:
+                spouse["age"] = _decode_puf_filer_age(row.get("_puf_agerange"), fallback=row.get("age", 40.0))
+                if pd.notna(row.get("_puf_gender")):
+                    spouse["is_male"] = float(int(row.get("_puf_gender")) != 1)
+                head_share = _puf_joint_head_share(row)
+                for column in split_columns:
+                    amount = float(pd.to_numeric(row.get(column), errors="coerce") or 0.0)
+                    head[column] = amount * head_share
+                    spouse[column] = amount * (1.0 - head_share)
+            else:
+                head, spouse = _allocate_joint_tax_unit_amounts(row, head, spouse)
             # Spouse weight is same as head (we'll deduplicate in calibration)
             records.append(spouse)
+            exemptions -= 1
+
+        exemptions -= 1
+        if has_pe_demographics:
+            for dependent_idx in range(min(3, max(exemptions, 0))):
+                dependent = row.copy()
+                dependent["is_head"] = 0
+                dependent["is_spouse"] = 0
+                dependent["is_dependent"] = 1
+                dependent["person_id"] = f"{pe_tax_unit_id}:{dependent_idx + 3}"
+                dependent["tax_unit_id"] = pe_tax_unit_id
+                dependent["age"] = _decode_puf_dependent_age(
+                    row.get(f"_puf_agedp{dependent_idx + 1}")
+                )
+                dependent["is_male"] = 0.0
+                for column in split_columns:
+                    dependent[column] = 0.0
+                records.append(dependent)
 
     result = pd.DataFrame(records).reset_index(drop=True)
+    helper_columns = [column for column in result.columns if column in PUF_DEMOGRAPHIC_HELPER_COLUMNS]
+    if helper_columns:
+        result = result.drop(columns=helper_columns)
     result = _add_derived_income_columns(result)
     print(f"Expanded {len(df):,} tax units to {len(result):,} persons")
 

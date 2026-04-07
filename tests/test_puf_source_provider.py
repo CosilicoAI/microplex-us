@@ -296,6 +296,50 @@ def test_expand_to_persons_splits_negative_joint_self_employment_losses():
     assert persons["income"].sum() == -100.0
 
 
+def test_expand_to_persons_uses_pe_demographic_helpers_when_present():
+    tax_units = pd.DataFrame(
+        {
+            "filing_status": ["JOINT", "SINGLE"],
+            "employment_income": [100.0, 50.0],
+            "pre_tax_contributions": [20.0, 0.0],
+            "gross_social_security": [40.0, 0.0],
+            "weight": [1.0, 1.0],
+            "household_id": ["joint-household", "single-household"],
+            "exemptions_count": [2, 3],
+            "_puf_recid": [101, 202],
+            "_puf_agerange": [4, 5],
+            "_puf_earnsplit": [0, 0],
+            "_puf_gender": [1, 2],
+            "_puf_agedp1": [2, 4],
+            "_puf_agedp2": [3, 6],
+            "year": [2024, 2024],
+        }
+    )
+
+    persons = expand_to_persons(tax_units).sort_values("person_id").reset_index(drop=True)
+
+    assert persons["person_id"].tolist() == ["101:1", "101:2", "202:1", "202:3", "202:4"]
+    assert persons["tax_unit_id"].tolist() == ["101", "101", "202", "202", "202"]
+
+    head = persons.loc[persons["person_id"] == "101:1"].iloc[0]
+    spouse = persons.loc[persons["person_id"] == "101:2"].iloc[0]
+    dependent_1 = persons.loc[persons["person_id"] == "202:3"].iloc[0]
+    dependent_2 = persons.loc[persons["person_id"] == "202:4"].iloc[0]
+
+    assert head["employment_income"] == 100.0
+    assert spouse["employment_income"] == 0.0
+    assert head["pre_tax_contributions"] == 20.0
+    assert spouse["pre_tax_contributions"] == 0.0
+    assert head["age"] == 50
+    assert spouse["age"] == 50
+    assert dependent_1["is_dependent"] == 1
+    assert dependent_2["is_dependent"] == 1
+    assert dependent_1["employment_income"] == 0.0
+    assert dependent_2["employment_income"] == 0.0
+    assert dependent_1["age"] == 18
+    assert dependent_2["age"] == 27
+
+
 def test_puf_source_provider_loads_observation_frame_from_local_files(tmp_path):
     puf = pd.DataFrame(
         {
