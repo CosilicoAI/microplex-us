@@ -15,6 +15,9 @@ from microplex.targets import (
     assert_valid_benchmark_artifact_manifest,
 )
 
+from microplex_us.pipelines.data_flow_snapshot import (
+    write_us_microplex_data_flow_snapshot,
+)
 from microplex_us.pipelines.index_db import (
     append_us_microplex_run_index_entry,
 )
@@ -60,6 +63,7 @@ class USMicroplexArtifactPaths:
     version_id: str | None = None
     synthesizer: Path | None = None
     policyengine_dataset: Path | None = None
+    data_flow_snapshot: Path | None = None
     policyengine_harness: Path | None = None
     policyengine_native_scores: Path | None = None
     run_registry: Path | None = None
@@ -111,6 +115,7 @@ def save_us_microplex_artifacts(
     policyengine_dataset_path = (
         output_dir / "policyengine_us.h5" if result.policyengine_tables is not None else None
     )
+    data_flow_snapshot_path = output_dir / "data_flow_snapshot.json"
     policyengine_harness_path = None
     policyengine_native_scores_path = None
     resolved_run_registry_path = None
@@ -248,6 +253,7 @@ def save_us_microplex_artifacts(
             "policyengine_dataset": (
                 policyengine_dataset_path.name if policyengine_dataset_path else None
             ),
+            "data_flow_snapshot": data_flow_snapshot_path.name,
             "policyengine_harness": (
                 policyengine_harness_path.name if policyengine_harness_path else None
             ),
@@ -264,34 +270,6 @@ def save_us_microplex_artifacts(
         manifest["policyengine_native_scores"] = dict(
             native_scores_payload.get("summary", {})
         )
-    assert_valid_benchmark_artifact_manifest(
-        manifest,
-        artifact_dir=output_dir,
-        manifest_path=manifest_path,
-        summary_section=(
-            "policyengine_harness" if harness_summary is not None else None
-        ),
-        required_artifact_keys=(
-            "seed_data",
-            "synthetic_data",
-            "calibrated_data",
-            "targets",
-            *(
-                ("policyengine_native_scores",)
-                if native_scores_payload is not None
-                else ()
-            ),
-        ),
-        required_summary_keys=(
-            (
-                "candidate_mean_abs_relative_error",
-                "baseline_mean_abs_relative_error",
-                "mean_abs_relative_error_delta",
-            )
-            if harness_summary is not None
-            else ()
-        ),
-    )
     if harness_summary is not None or native_scores_payload is not None:
         resolved_run_registry_path = Path(run_registry_path or output_dir.parent / "run_registry.jsonl")
         run_entry = build_us_microplex_run_registry_entry(
@@ -328,7 +306,40 @@ def save_us_microplex_artifacts(
             "path": str(resolved_run_index_path),
             "artifact_id": recorded_entry.artifact_id,
         }
-    manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True))
+    write_us_microplex_data_flow_snapshot(
+        output_dir,
+        data_flow_snapshot_path,
+        manifest_payload=manifest,
+    )
+    assert_valid_benchmark_artifact_manifest(
+        manifest,
+        artifact_dir=output_dir,
+        manifest_path=manifest_path,
+        summary_section=(
+            "policyengine_harness" if harness_summary is not None else None
+        ),
+        required_artifact_keys=(
+            "seed_data",
+            "synthetic_data",
+            "calibrated_data",
+            "targets",
+            *(
+                ("policyengine_native_scores",)
+                if native_scores_payload is not None
+                else ()
+            ),
+        ),
+        required_summary_keys=(
+            (
+                "candidate_mean_abs_relative_error",
+                "baseline_mean_abs_relative_error",
+                "mean_abs_relative_error_delta",
+            )
+            if harness_summary is not None
+            else ()
+        ),
+    )
+    _write_json_atomically(manifest_path, manifest)
 
     return USMicroplexArtifactPaths(
         output_dir=output_dir,
@@ -340,6 +351,7 @@ def save_us_microplex_artifacts(
         manifest=manifest_path,
         synthesizer=synthesizer_path,
         policyengine_dataset=policyengine_dataset_path,
+        data_flow_snapshot=data_flow_snapshot_path,
         policyengine_harness=policyengine_harness_path,
         policyengine_native_scores=policyengine_native_scores_path,
         run_registry=resolved_run_registry_path,
@@ -405,6 +417,7 @@ def save_versioned_us_microplex_artifacts(
         manifest=paths.manifest,
         synthesizer=paths.synthesizer,
         policyengine_dataset=paths.policyengine_dataset,
+        data_flow_snapshot=paths.data_flow_snapshot,
         policyengine_harness=paths.policyengine_harness,
         policyengine_native_scores=paths.policyengine_native_scores,
         run_registry=paths.run_registry,
@@ -726,6 +739,12 @@ def _finalize_versioned_build_artifacts(
         frontier_entry=frontier_entry,
         frontier_delta=frontier_delta,
     )
+
+
+def _write_json_atomically(path: Path, payload: dict[str, Any]) -> None:
+    temp_path = path.with_name(f".{path.name}.tmp")
+    temp_path.write_text(json.dumps(payload, indent=2, sort_keys=True))
+    temp_path.replace(path)
 
 
 def _resolve_policyengine_harness_context(

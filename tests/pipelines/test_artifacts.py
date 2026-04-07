@@ -237,6 +237,43 @@ class TestSaveUSMicroplexArtifacts:
         assert paths.synthesizer.exists()
         assert fake.saved_path == paths.synthesizer
 
+    def test_writes_data_flow_snapshot_before_manifest_validation(self, tmp_path):
+        result = USMicroplexBuildResult(
+            config=USMicroplexBuildConfig(
+                n_synthetic=1,
+                synthesis_backend="seed",
+                calibration_backend="entropy",
+            ),
+            seed_data=pd.DataFrame({"income": [10.0], "hh_weight": [1.0]}),
+            synthetic_data=pd.DataFrame({"income": [10.0], "weight": [1.0]}),
+            calibrated_data=pd.DataFrame({"income": [10.0], "weight": [1.0]}),
+            targets=USMicroplexTargets(marginal={}, continuous={"income": 10.0}),
+            calibration_summary={"max_error": 0.0, "mean_error": 0.0},
+            synthesis_metadata={
+                "backend": "seed",
+                "source_names": ["cps_asec_parquet"],
+                "scaffold_source": "cps_asec_parquet",
+                "condition_vars": [],
+                "target_vars": [],
+                "donor_integrated_variables": [],
+                "state_program_support_proxies": {
+                    "available": [],
+                    "missing": [],
+                },
+            },
+            synthesizer=None,
+            policyengine_tables=None,
+        )
+
+        paths = save_us_microplex_artifacts(result, tmp_path)
+
+        assert paths.data_flow_snapshot is not None
+        assert paths.data_flow_snapshot.exists()
+        manifest = json.loads(paths.manifest.read_text())
+        assert manifest["artifacts"]["data_flow_snapshot"] == "data_flow_snapshot.json"
+        snapshot = json.loads(paths.data_flow_snapshot.read_text())
+        assert snapshot["runtime"]["scaffoldSource"] == "cps_asec_parquet"
+
     def test_writes_policyengine_harness_when_baseline_and_targets_are_provided(
         self, tmp_path
     ):
