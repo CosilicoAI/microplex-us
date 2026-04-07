@@ -8,6 +8,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
+import h5py
 from microplex.core import SourceQuery
 
 from microplex_us.pipelines.artifacts import (
@@ -50,6 +51,85 @@ def test_default_policyengine_us_data_rebuild_checkpoint_config_sets_pe_context(
     assert config.random_seed == 123
 
 
+def test_default_policyengine_us_data_rebuild_checkpoint_config_infers_total_weight_targets(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        "microplex_us.pipelines.pe_us_data_rebuild_checkpoint._infer_policyengine_baseline_household_weight_sum",
+        lambda dataset, *, target_period: 150_000_000.0,
+    )
+
+    config = default_policyengine_us_data_rebuild_checkpoint_config(
+        policyengine_baseline_dataset="/tmp/enhanced_cps_2024.h5",
+        policyengine_targets_db="/tmp/policy_data.db",
+        target_period=2024,
+    )
+
+    assert config.policyengine_calibration_target_total_weight == 150_000_000.0
+    assert config.policyengine_calibration_rescale_to_target_total_weight is True
+    assert config.policyengine_selection_target_total_weight == 150_000_000.0
+
+
+def test_default_policyengine_us_data_rebuild_checkpoint_config_respects_explicit_total_weight_overrides(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        "microplex_us.pipelines.pe_us_data_rebuild_checkpoint._infer_policyengine_baseline_household_weight_sum",
+        lambda dataset, *, target_period: 150_000_000.0,
+    )
+
+    config = default_policyengine_us_data_rebuild_checkpoint_config(
+        policyengine_baseline_dataset="/tmp/enhanced_cps_2024.h5",
+        policyengine_targets_db="/tmp/policy_data.db",
+        target_period=2024,
+        policyengine_calibration_target_total_weight=123.0,
+        policyengine_selection_target_total_weight=456.0,
+    )
+
+    assert config.policyengine_calibration_target_total_weight == 123.0
+    assert config.policyengine_selection_target_total_weight == 456.0
+
+
+def test_default_policyengine_us_data_rebuild_checkpoint_config_skips_calibration_total_weight_when_rescaling_to_input_sum(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        "microplex_us.pipelines.pe_us_data_rebuild_checkpoint._infer_policyengine_baseline_household_weight_sum",
+        lambda dataset, *, target_period: 150_000_000.0,
+    )
+
+    config = default_policyengine_us_data_rebuild_checkpoint_config(
+        policyengine_baseline_dataset="/tmp/enhanced_cps_2024.h5",
+        policyengine_targets_db="/tmp/policy_data.db",
+        target_period=2024,
+        policyengine_calibration_rescale_to_input_weight_sum=True,
+    )
+
+    assert config.policyengine_calibration_target_total_weight is None
+    assert config.policyengine_calibration_rescale_to_target_total_weight is False
+    assert config.policyengine_selection_target_total_weight == 150_000_000.0
+
+
+def test_infer_policyengine_baseline_household_weight_sum_returns_none_when_weight_array_missing(
+    tmp_path,
+) -> None:
+    from microplex_us.pipelines.pe_us_data_rebuild_checkpoint import (
+        _infer_policyengine_baseline_household_weight_sum,
+    )
+
+    dataset_path = tmp_path / "baseline.h5"
+    with h5py.File(dataset_path, "w") as handle:
+        household_id = handle.create_group("household_id")
+        household_id.create_dataset("2024", data=[1, 2, 3])
+
+    inferred = _infer_policyengine_baseline_household_weight_sum(
+        dataset_path,
+        target_period=2024,
+    )
+
+    assert inferred is None
+
+
 def test_default_policyengine_us_data_rebuild_queries_assign_sample_sizes_by_provider_type() -> None:
     providers = default_policyengine_us_data_rebuild_source_providers(
         include_donor_surveys=True,
@@ -89,6 +169,10 @@ def test_run_policyengine_us_data_rebuild_checkpoint_builds_bundle_and_parity(
     tmp_path,
 ) -> None:
     monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(
+        "microplex_us.pipelines.pe_us_data_rebuild_checkpoint._infer_policyengine_baseline_household_weight_sum",
+        lambda dataset, *, target_period: 150_000_000.0,
+    )
     artifact_dir = tmp_path / "artifacts" / "run-1"
     artifact_dir.mkdir(parents=True)
     provider = _FakeProvider(descriptor=SimpleNamespace(name="fake_source"))
@@ -313,6 +397,9 @@ def test_run_policyengine_us_data_rebuild_checkpoint_builds_bundle_and_parity(
         captured["policyengine_baseline_dataset"] == "/tmp/enhanced_cps_2024.h5"
     )
     assert captured["config"].policyengine_targets_db == "/tmp/policy_data.db"
+    assert captured["config"].policyengine_calibration_target_total_weight == 150_000_000.0
+    assert captured["config"].policyengine_calibration_rescale_to_target_total_weight is True
+    assert captured["config"].policyengine_selection_target_total_weight == 150_000_000.0
     assert captured["defer_policyengine_harness"] is True
     assert captured["defer_policyengine_native_score"] is True
     assert captured["policyengine_harness_metadata"]["rebuild_checkpoint"] is True

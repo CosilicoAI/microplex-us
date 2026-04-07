@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+import h5py
 from microplex.core import SourceQuery
 from microplex.targets import assert_valid_benchmark_artifact_manifest
 
@@ -175,6 +176,30 @@ def _resolve_saved_artifact_path(
             return cwd_relative
         candidate = artifact_relative
     return candidate
+
+
+def _infer_policyengine_baseline_household_weight_sum(
+    baseline_dataset: str | Path,
+    *,
+    target_period: int,
+) -> float | None:
+    """Best-effort household-weight target inferred from the PE baseline dataset."""
+
+    dataset_path = Path(baseline_dataset).expanduser()
+    if not dataset_path.exists():
+        return None
+    try:
+        with h5py.File(dataset_path, "r") as handle:
+            weights = handle.get("household_weight")
+            if weights is None:
+                return None
+            period_key = str(int(target_period))
+            if period_key not in weights:
+                return None
+            weight_sum = float(weights[period_key][...].sum())
+    except (FileNotFoundError, OSError, ValueError):
+        return None
+    return weight_sum if weight_sum > 0.0 else None
 
 
 def _build_checkpoint_benchmark_stage(manifest: dict[str, Any]) -> dict[str, Any]:
@@ -705,6 +730,28 @@ def default_policyengine_us_data_rebuild_checkpoint_config(
     """Return the canonical rebuild config with required PE comparison context."""
 
     resolved_target_period = int(target_period)
+    resolved_baseline_weight_sum = _infer_policyengine_baseline_household_weight_sum(
+        policyengine_baseline_dataset,
+        target_period=resolved_target_period,
+    )
+    resolved_overrides = dict(overrides)
+    if resolved_baseline_weight_sum is not None:
+        resolved_overrides.setdefault(
+            "policyengine_selection_target_total_weight",
+            resolved_baseline_weight_sum,
+        )
+        if not resolved_overrides.get(
+            "policyengine_calibration_rescale_to_input_weight_sum",
+            False,
+        ):
+            resolved_overrides.setdefault(
+                "policyengine_calibration_target_total_weight",
+                resolved_baseline_weight_sum,
+            )
+            resolved_overrides.setdefault(
+                "policyengine_calibration_rescale_to_target_total_weight",
+                True,
+            )
     return default_policyengine_us_data_rebuild_config(
         policyengine_baseline_dataset=str(policyengine_baseline_dataset),
         policyengine_targets_db=str(policyengine_targets_db),
@@ -722,7 +769,7 @@ def default_policyengine_us_data_rebuild_checkpoint_config(
         policyengine_calibration_target_geo_levels=tuple(
             calibration_target_geo_levels
         ),
-        **overrides,
+        **resolved_overrides,
     )
 
 

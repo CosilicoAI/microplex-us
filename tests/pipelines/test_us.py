@@ -273,6 +273,23 @@ class TestUSMicroplexBuildConfig:
             "rental_income",
         )
 
+    def test_rejects_conflicting_policyengine_weight_rescale_modes(self):
+        with pytest.raises(ValueError, match="mutually exclusive"):
+            USMicroplexBuildConfig(
+                policyengine_calibration_rescale_to_input_weight_sum=True,
+                policyengine_calibration_rescale_to_target_total_weight=True,
+                policyengine_calibration_target_total_weight=150_000_000.0,
+            )
+
+    def test_rejects_target_rescale_without_target_total_weight(self):
+        with pytest.raises(
+            ValueError,
+            match="requires policyengine_calibration_target_total_weight",
+        ):
+            USMicroplexBuildConfig(
+                policyengine_calibration_rescale_to_target_total_weight=True
+            )
+
 
 class TestUSMicroplexPipeline:
     """Test orchestration for US microplex builds."""
@@ -3071,11 +3088,82 @@ class TestUSMicroplexPipeline:
         assert summary["pre_rescale_household_weight_sum"] == pytest.approx(112.5, rel=1e-6)
         assert summary["post_rescale_household_weight_sum"] == pytest.approx(450.0, rel=1e-6)
         assert summary["weight_sum_rescaled"] is True
+        assert summary["weight_sum_rescale_mode"] == "input_weight_sum"
         assert calibrated_tables.households["household_weight"].sum() == pytest.approx(
             450.0,
             rel=1e-6,
         )
         assert calibrated_persons["weight"].sum() == pytest.approx(900.0, rel=1e-6)
+
+    def test_calibrate_policyengine_tables_can_rescale_to_target_weight_sum(
+        self,
+        persons,
+        households,
+        tmp_path,
+        monkeypatch,
+    ):
+        db_path = tmp_path / "policyengine_targets.db"
+        _create_policyengine_calibration_db(db_path)
+
+        class ShrinkingCalibrator:
+            def __init__(self, method, **_kwargs):
+                self.method = method
+
+            def fit_transform(
+                self,
+                frame,
+                *_args,
+                weight_col,
+                **_kwargs,
+            ):
+                shrunk = frame.copy()
+                shrunk[weight_col] = shrunk[weight_col].astype(float) * 0.25
+                return shrunk
+
+            def validate(self, frame):
+                values = frame["household_weight"].astype(float).to_numpy()
+                return {
+                    "max_error": 0.0,
+                    "mean_error": 0.0,
+                    "converged": True,
+                    "linear_errors": {},
+                    "sparsity": 0.0,
+                    "validated_weight_sum": float(values.sum()),
+                }
+
+        monkeypatch.setattr(
+            "microplex_us.pipelines.us.Calibrator",
+            ShrinkingCalibrator,
+        )
+        config = USMicroplexBuildConfig(
+            calibration_backend="entropy",
+            policyengine_targets_db=str(db_path),
+            policyengine_target_variables=("household_count",),
+            policyengine_target_period=2024,
+            policyengine_calibration_min_active_households=1,
+            policyengine_calibration_target_total_weight=1_000.0,
+            policyengine_calibration_rescale_to_target_total_weight=True,
+        )
+        pipeline = USMicroplexPipeline(config)
+        seed = pipeline.prepare_seed_data(persons, households).rename(
+            columns={"hh_weight": "weight"}
+        )
+        tables = pipeline.build_policyengine_entity_tables(seed)
+
+        calibrated_tables, calibrated_persons, summary = pipeline.calibrate_policyengine_tables(
+            tables
+        )
+
+        assert summary["input_household_weight_sum"] == pytest.approx(450.0, rel=1e-6)
+        assert summary["pre_rescale_household_weight_sum"] == pytest.approx(112.5, rel=1e-6)
+        assert summary["post_rescale_household_weight_sum"] == pytest.approx(1_000.0, rel=1e-6)
+        assert summary["weight_sum_rescaled"] is True
+        assert summary["weight_sum_rescale_mode"] == "target_total_weight"
+        assert calibrated_tables.households["household_weight"].sum() == pytest.approx(
+            1_000.0,
+            rel=1e-6,
+        )
+        assert calibrated_persons["weight"].sum() == pytest.approx(2_000.0, rel=1e-6)
 
     def test_summarize_weight_diagnostics_flags_low_effective_sample_ratio(self):
         summary = _summarize_weight_diagnostics([100.0, 100.0] + [1e-10] * 10)

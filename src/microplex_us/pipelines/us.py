@@ -578,6 +578,7 @@ class USMicroplexBuildConfig:
     policyengine_calibration_target_geo_levels: tuple[str, ...] = ()
     policyengine_calibration_target_profile: str | None = None
     policyengine_calibration_rescale_to_input_weight_sum: bool = False
+    policyengine_calibration_rescale_to_target_total_weight: bool = False
     policyengine_calibration_target_total_weight: float | None = None
     policyengine_selection_backend: Literal["sparse", "pe_native_loss"] = "sparse"
     policyengine_selection_household_budget: int | None = None
@@ -595,6 +596,24 @@ class USMicroplexBuildConfig:
     )
     policyengine_target_reform_id: int = 0
     policyengine_simulation_cls: Any | None = None
+
+    def __post_init__(self) -> None:
+        if (
+            self.policyengine_calibration_rescale_to_input_weight_sum
+            and self.policyengine_calibration_rescale_to_target_total_weight
+        ):
+            raise ValueError(
+                "policyengine_calibration_rescale_to_input_weight_sum and "
+                "policyengine_calibration_rescale_to_target_total_weight are mutually exclusive"
+            )
+        if (
+            self.policyengine_calibration_rescale_to_target_total_weight
+            and self.policyengine_calibration_target_total_weight is None
+        ):
+            raise ValueError(
+                "policyengine_calibration_rescale_to_target_total_weight requires "
+                "policyengine_calibration_target_total_weight"
+            )
 
     def to_dict(self) -> dict[str, Any]:
         return _normalize_config_value(asdict(self))
@@ -1772,7 +1791,26 @@ class USMicroplexPipeline:
             )
             pre_rescale_household_weight_sum = float(calibrated_households["household_weight"].sum())
         weight_sum_rescaled = False
+        weight_sum_rescale_mode: str | None = None
         if (
+            self.config.policyengine_calibration_rescale_to_target_total_weight
+            and self.config.policyengine_calibration_target_total_weight is not None
+            and pre_rescale_household_weight_sum > 0.0
+            and not np.isclose(
+                pre_rescale_household_weight_sum,
+                float(self.config.policyengine_calibration_target_total_weight),
+            )
+        ):
+            calibrated_households["household_weight"] = (
+                calibrated_households["household_weight"].astype(float)
+                * (
+                    float(self.config.policyengine_calibration_target_total_weight)
+                    / pre_rescale_household_weight_sum
+                )
+            )
+            weight_sum_rescaled = True
+            weight_sum_rescale_mode = "target_total_weight"
+        elif (
             self.config.policyengine_calibration_rescale_to_input_weight_sum
             and pre_rescale_household_weight_sum > 0.0
             and not np.isclose(pre_rescale_household_weight_sum, input_household_weight_sum)
@@ -1782,6 +1820,7 @@ class USMicroplexPipeline:
                 * (input_household_weight_sum / pre_rescale_household_weight_sum)
             )
             weight_sum_rescaled = True
+            weight_sum_rescale_mode = "input_weight_sum"
         if self.config.calibration_backend == "none":
             validation = {
                 "converged": True,
@@ -1853,6 +1892,7 @@ class USMicroplexPipeline:
                 calibrated_households["household_weight"].sum()
             ),
             "weight_sum_rescaled": weight_sum_rescaled,
+            "weight_sum_rescale_mode": weight_sum_rescale_mode,
             "household_weight_diagnostics": household_weight_diagnostics,
             "person_weight_diagnostics": person_weight_diagnostics,
         }
