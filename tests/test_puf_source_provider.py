@@ -6,17 +6,21 @@ import sys
 import types
 
 import pandas as pd
+import pytest
 from microplex.core import EntityType, SourceArchetype, SourceProvider, SourceQuery
 
 import microplex_us.data_sources.puf as puf_module
 from microplex_us.data_sources import PUFSourceProvider, expand_to_persons
 from microplex_us.data_sources.puf import (
+    PUF_UPRATING_MODE_PE_SOI,
     PEStyleQRFShareModel,
     _fit_pe_style_puf_social_security_qrf_model_from_reference,
     _impute_missing_puf_demographics,
     _impute_puf_social_security_components,
     _sample_tax_units,
     map_puf_variables,
+    uprate_mapped_puf_with_pe_factors,
+    uprate_raw_puf_pe_style,
 )
 from microplex_us.data_sources.share_imputation import fit_grouped_share_model
 
@@ -81,6 +85,57 @@ def _install_fake_qrf(monkeypatch, prediction_frame: pd.DataFrame):
     monkeypatch.setitem(sys.modules, "microimpute.models", models_module)
     monkeypatch.setitem(sys.modules, "microimpute.models.qrf", qrf_module)
     return calls
+
+
+def _write_minimal_soi_csv(path):
+    def row(variable, year, is_count, value):
+        return {
+            "Variable": variable,
+            "Year": year,
+            "Filing status": "All",
+            "AGI lower bound": float("-inf"),
+            "AGI upper bound": float("inf"),
+            "Count": bool(is_count),
+            "Taxable only": False,
+            "Value": float(value),
+        }
+
+    rows = [
+        row("count", 2015, True, 100),
+        row("count", 2021, True, 110),
+        row("count", 2024, True, 110),
+        row("employment_income", 2015, False, 200),
+        row("employment_income", 2021, False, 330),
+        row("employment_income", 2024, False, 330),
+        row("capital_gains_distributions", 2015, False, 50),
+        row("capital_gains_distributions", 2021, False, 110),
+        row("capital_gains_distributions", 2024, False, 110),
+        row("business_net_profits", 2015, False, 40),
+        row("business_net_profits", 2021, False, 88),
+        row("business_net_profits", 2024, False, 88),
+        row("business_net_losses", 2015, False, 20),
+        row("business_net_losses", 2021, False, 11),
+        row("business_net_losses", 2024, False, 11),
+        row("adjusted_gross_income", 2015, False, 1000),
+        row("adjusted_gross_income", 2021, False, 1320),
+        row("adjusted_gross_income", 2024, False, 1320),
+    ]
+    pd.DataFrame(rows).to_csv(path, index=False)
+
+
+def _write_minimal_uprating_factors_csv(path):
+    pd.DataFrame(
+        [
+            {"Variable": "household_weight", "2021": 1.0, "2024": 1.1},
+            {"Variable": "employment_income", "2021": 1.0, "2024": 1.2},
+            {"Variable": "non_sch_d_capital_gains", "2021": 1.0, "2024": 1.3},
+            {"Variable": "social_security", "2021": 1.0, "2024": 1.4},
+            {"Variable": "qualified_dividend_income", "2021": 1.0, "2024": 1.5},
+            {"Variable": "non_qualified_dividend_income", "2021": 1.0, "2024": 1.6},
+            {"Variable": "taxable_pension_income", "2021": 1.0, "2024": 1.7},
+            {"Variable": "tax_exempt_pension_income", "2021": 1.0, "2024": 1.8},
+        ]
+    ).to_csv(path, index=False)
 
 
 def test_expand_to_persons_preserves_joint_tax_unit_monetary_totals():
@@ -274,6 +329,115 @@ def test_puf_source_provider_selects_pe_qrf_social_security_strategy(
 
     assert pe_qrf_called
     assert "social_security_retirement" in frame.tables[EntityType.PERSON].columns
+
+
+def test_uprate_raw_puf_pe_style_matches_pe_soi_contract(tmp_path):
+    soi_path = tmp_path / "soi.csv"
+    _write_minimal_soi_csv(soi_path)
+
+    raw = pd.DataFrame(
+        {
+            "E00200": [10.0, 20.0],
+            "E01100": [5.0, 0.0],
+            "E00900": [8.0, -4.0],
+            "E03290": [7.0, 3.0],
+            "S006": [100.0, 200.0],
+        }
+    )
+
+    result = uprate_raw_puf_pe_style(
+        raw,
+        from_year=2015,
+        to_year=2024,
+        soi_path=soi_path,
+    )
+
+    assert result["E00200"].tolist() == pytest.approx([15.0, 30.0])
+    assert result["E01100"].tolist() == pytest.approx([10.0, 0.0])
+    assert result["E00900"].tolist() == pytest.approx([19.2, -2.4])
+    assert result["E03290"].tolist() == pytest.approx([8.4, 3.6])
+    assert result["S006"].tolist() == pytest.approx([110.0, 220.0])
+
+
+def test_uprate_mapped_puf_with_pe_factors_uses_aliases_and_recomputes(tmp_path):
+    repo_root = tmp_path / "pe-us-data"
+    storage = repo_root / "policyengine_us_data" / "storage"
+    storage.mkdir(parents=True)
+    _write_minimal_uprating_factors_csv(storage / "uprating_factors.csv")
+
+    mapped = pd.DataFrame(
+        {
+            "weight": [1.1],
+            "employment_income": [15.0],
+            "non_sch_d_capital_gains": [10.0],
+            "gross_social_security": [20.0],
+            "qualified_dividend_income": [4.0],
+            "non_qualified_dividend_income": [6.0],
+            "taxable_pension_income": [7.0],
+            "tax_exempt_pension_income": [3.0],
+        }
+    )
+
+    result = uprate_mapped_puf_with_pe_factors(
+        mapped,
+        from_year=2021,
+        to_year=2024,
+        policyengine_us_data_repo=repo_root,
+    )
+
+    assert result["weight"].tolist() == pytest.approx([1.21])
+    assert result["employment_income"].tolist() == pytest.approx([18.0])
+    assert result["non_sch_d_capital_gains"].tolist() == pytest.approx([13.0])
+    assert result["gross_social_security"].tolist() == pytest.approx([28.0])
+    assert result["qualified_dividend_income"].tolist() == pytest.approx([6.0])
+    assert result["non_qualified_dividend_income"].tolist() == pytest.approx([9.6])
+    assert result["ordinary_dividend_income"].tolist() == pytest.approx([15.6])
+    assert result["taxable_pension_income"].tolist() == pytest.approx([11.9])
+    assert result["tax_exempt_pension_income"].tolist() == pytest.approx([5.4])
+    assert result["total_pension_income"].tolist() == pytest.approx([17.3])
+
+
+def test_puf_source_provider_pe_soi_mode_uses_raw_uprating(tmp_path):
+    repo_root = tmp_path / "pe-us-data"
+    storage = repo_root / "policyengine_us_data" / "storage"
+    storage.mkdir(parents=True)
+    soi_path = storage / "soi.csv"
+    uprating_factors_path = storage / "uprating_factors.csv"
+    _write_minimal_soi_csv(soi_path)
+    _write_minimal_uprating_factors_csv(uprating_factors_path)
+    puf = pd.DataFrame(
+        {
+            "RECID": [101],
+            "MARS": [1],
+            "XTOT": [1],
+            "S006": [100.0],
+            "E00200": [10.0],
+            "E01100": [5.0],
+            "AGE_HEAD": [45],
+            "GENDER": [1],
+        }
+    )
+    puf_path = tmp_path / "puf.csv"
+    demographics_path = tmp_path / "demographics.csv"
+    puf.to_csv(puf_path, index=False)
+    pd.DataFrame({"RECID": [101]}).to_csv(demographics_path, index=False)
+
+    provider = PUFSourceProvider(
+        puf_path=puf_path,
+        demographics_path=demographics_path,
+        target_year=2024,
+        uprating_mode=PUF_UPRATING_MODE_PE_SOI,
+        policyengine_us_data_repo=repo_root,
+        soi_path=soi_path,
+        social_security_share_model_loader=_mock_social_security_share_model_loader,
+    )
+    frame = provider.load_frame(SourceQuery(period=2024))
+    household = frame.tables[EntityType.HOUSEHOLD].iloc[0]
+    person = frame.tables[EntityType.PERSON].iloc[0]
+
+    assert household["household_weight"] == pytest.approx(1.21)
+    assert person["employment_income"] == pytest.approx(18.0)
+    assert person["non_sch_d_capital_gains"] == pytest.approx(13.0)
 
 
 def test_expand_to_persons_splits_negative_joint_self_employment_losses():

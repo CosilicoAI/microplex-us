@@ -115,6 +115,7 @@ def default_policyengine_us_data_rebuild_source_providers(
         SIPPSourceProvider,
     )
     from microplex_us.data_sources.puf import (
+        PUF_UPRATING_MODE_PE_SOI,
         SOCIAL_SECURITY_SPLIT_STRATEGY_PE_QRF,
         PUFSourceProvider,
     )
@@ -134,11 +135,13 @@ def default_policyengine_us_data_rebuild_source_providers(
             puf_path=puf_path,
             demographics_path=puf_demographics_path,
             expand_persons=bool(puf_expand_persons),
+            uprating_mode=PUF_UPRATING_MODE_PE_SOI,
             cps_reference_year=(
                 int(puf_cps_reference_year)
                 if puf_cps_reference_year is not None
                 else int(cps_source_year)
             ),
+            policyengine_us_data_repo=policyengine_us_data_repo,
             social_security_split_strategy=SOCIAL_SECURITY_SPLIT_STRATEGY_PE_QRF,
         ),
     ]

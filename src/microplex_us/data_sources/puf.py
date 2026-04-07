@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from functools import lru_cache
+from functools import cache, lru_cache
 from pathlib import Path
 from typing import Any
 
@@ -49,6 +49,89 @@ PUF_VARIABLE_MAP = {
     .observation_for(EntityType.TAX_UNIT)
     .columns
 }
+
+PUF_UPRATING_MODE_INTERPOLATED = "interpolated"
+PUF_UPRATING_MODE_PE_SOI = "pe_soi"
+
+PE_ITMDED_GROW_RATE = 0.02
+PE_PUF_SOI_END_YEAR = 2021
+PE_UPRATING_FACTOR_ALIASES = {
+    "weight": "household_weight",
+    "gross_social_security": "social_security",
+}
+PE_SOI_TO_PUF_STRAIGHT_RENAMES = {
+    "employment_income": "E00200",
+    "capital_gains_distributions": "E01100",
+    "taxable_interest_income": "E00300",
+    "exempt_interest": "E00400",
+    "ordinary_dividends": "E00600",
+    "qualified_dividends": "E00650",
+    "ira_distributions": "E01400",
+    "total_pension_income": "E01500",
+    "taxable_pension_income": "E01700",
+    "unemployment_compensation": "E02300",
+    "total_social_security": "E02400",
+    "taxable_social_security": "E02500",
+    "medical_expense_deductions_uncapped": "E17500",
+    "itemized_state_income_tax_deductions": "E18400",
+    "itemized_real_estate_tax_deductions": "E18500",
+    "interest_paid_deductions": "E19200",
+    "charitable_contributions_deductions": "E19800",
+}
+PE_SOI_TO_PUF_POS_ONLY_RENAMES = {
+    "business_net_profits": "E00900",
+    "capital_gains_gross": "E01000",
+    "partnership_and_s_corp_income": "E26270",
+}
+PE_SOI_TO_PUF_NEG_ONLY_RENAMES = {
+    "business_net_losses": "E00900",
+    "capital_gains_losses": "E01000",
+    "partnership_and_s_corp_losses": "E26270",
+}
+PE_PUF_REMAINING_RAW_COLUMNS = (
+    "E03500",
+    "E00800",
+    "E20500",
+    "E32800",
+    "E20100",
+    "E03240",
+    "E03400",
+    "E03220",
+    "E26390",
+    "E26400",
+    "T27800",
+    "E27200",
+    "E03290",
+    "P23250",
+    "E24518",
+    "E20400",
+    "E26270",
+    "E03230",
+    "E25850",
+    "E25860",
+    "E00900",
+    "E03270",
+    "E03300",
+    "P22250",
+    "E03210",
+    "E03150",
+    "E24515",
+    "E07300",
+    "E62900",
+    "E01200",
+    "E00700",
+    "E58990",
+    "E07400",
+    "E07600",
+    "E11200",
+    "E87521",
+    "E07260",
+    "E09900",
+    "P08000",
+    "E07240",
+    "E09700",
+    "E09800",
+)
 
 # SOI growth factors for uprating 2015 → 2024
 # Based on IRS SOI aggregate growth rates
@@ -290,6 +373,257 @@ def load_puf_raw(puf_path: Path, demographics_path: Path | None = None) -> pd.Da
             puf = _impute_missing_puf_demographics(puf)
 
     return puf
+
+
+def _normalize_puf_uprating_mode(mode: str | None) -> str:
+    resolved = (mode or PUF_UPRATING_MODE_INTERPOLATED).strip().lower()
+    allowed = {
+        PUF_UPRATING_MODE_INTERPOLATED,
+        PUF_UPRATING_MODE_PE_SOI,
+    }
+    if resolved not in allowed:
+        raise ValueError(
+            "puf uprating mode must be one of "
+            f"{sorted(allowed)}; got {mode!r}"
+        )
+    return resolved
+
+
+def _resolve_pe_soi_path(
+    *,
+    policyengine_us_data_repo: str | Path | None = None,
+    soi_path: str | Path | None = None,
+) -> Path:
+    if soi_path is not None:
+        resolved = Path(soi_path)
+    elif policyengine_us_data_repo is not None:
+        resolved = (
+            Path(policyengine_us_data_repo)
+            / "policyengine_us_data"
+            / "storage"
+            / "soi.csv"
+        )
+    else:
+        raise ValueError(
+            "PE SOI uprating requires soi_path or policyengine_us_data_repo"
+        )
+    if not resolved.exists():
+        raise FileNotFoundError(f"Could not find PE SOI file at {resolved}")
+    return resolved
+
+
+def _resolve_pe_uprating_factors_path(
+    *,
+    policyengine_us_data_repo: str | Path | None = None,
+) -> Path:
+    if policyengine_us_data_repo is None:
+        raise ValueError(
+            "PE forward uprating requires policyengine_us_data_repo"
+        )
+    resolved = (
+        Path(policyengine_us_data_repo)
+        / "policyengine_us_data"
+        / "storage"
+        / "uprating_factors.csv"
+    )
+    if not resolved.exists():
+        raise FileNotFoundError(f"Could not find PE uprating factors at {resolved}")
+    return resolved
+
+
+@cache
+def _load_pe_soi_table(soi_path: str) -> pd.DataFrame:
+    return pd.read_csv(soi_path)
+
+
+@cache
+def _load_pe_uprating_factors_table(uprating_factors_path: str) -> pd.DataFrame:
+    return pd.read_csv(uprating_factors_path)
+
+
+def _get_pe_soi_aggregate(
+    soi_table: pd.DataFrame,
+    variable: str,
+    year: int,
+    *,
+    is_count: bool,
+) -> float:
+    lookup_variable = "count" if variable == "adjusted_gross_income" and is_count else variable
+    rows = soi_table[
+        (soi_table["Variable"] == lookup_variable)
+        & (soi_table["Year"] == year)
+        & (soi_table["Filing status"] == "All")
+        & (soi_table["AGI lower bound"] == -np.inf)
+        & (soi_table["AGI upper bound"] == np.inf)
+        & (soi_table["Count"] == is_count)
+        & (~soi_table["Taxable only"])
+    ]
+    if rows.empty:
+        raise ValueError(
+            f"Missing SOI aggregate for variable={lookup_variable!r}, year={year}, is_count={is_count}"
+        )
+    return float(rows.iloc[0]["Value"])
+
+
+def _get_pe_soi_growth(
+    soi_table: pd.DataFrame,
+    variable: str,
+    from_year: int,
+    to_year: int,
+) -> float:
+    start_value = _get_pe_soi_aggregate(
+        soi_table,
+        variable,
+        from_year,
+        is_count=False,
+    )
+    end_value = _get_pe_soi_aggregate(
+        soi_table,
+        variable,
+        to_year,
+        is_count=False,
+    )
+    start_population = _get_pe_soi_aggregate(
+        soi_table,
+        "count",
+        from_year,
+        is_count=True,
+    )
+    end_population = _get_pe_soi_aggregate(
+        soi_table,
+        "count",
+        to_year,
+        is_count=True,
+    )
+    return (end_value / start_value) / (end_population / start_population)
+
+
+def uprate_raw_puf_pe_style(
+    puf: pd.DataFrame,
+    *,
+    from_year: int = 2015,
+    to_year: int = 2024,
+    policyengine_us_data_repo: str | Path | None = None,
+    soi_path: str | Path | None = None,
+) -> pd.DataFrame:
+    """Uprate raw PUF columns using the PE SOI growth contract."""
+    if from_year == to_year:
+        return puf.copy()
+    resolved_soi_path = _resolve_pe_soi_path(
+        policyengine_us_data_repo=policyengine_us_data_repo,
+        soi_path=soi_path,
+    )
+    soi_table = _load_pe_soi_table(str(resolved_soi_path.resolve()))
+    result = puf.copy()
+
+    for variable, puf_column in PE_SOI_TO_PUF_STRAIGHT_RENAMES.items():
+        if puf_column not in result.columns:
+            continue
+        growth = _get_pe_soi_growth(soi_table, variable, from_year, to_year)
+        if variable in {
+            "medical_expense_deductions_uncapped",
+            "itemized_state_income_tax_deductions",
+            "itemized_real_estate_tax_deductions",
+            "interest_paid_deductions",
+            "charitable_contributions_deductions",
+        }:
+            growth = (1.0 + PE_ITMDED_GROW_RATE) ** (to_year - from_year)
+        values = pd.to_numeric(result[puf_column], errors="coerce").fillna(0.0)
+        result[puf_column] = values * growth
+
+    for variable, puf_column in PE_SOI_TO_PUF_POS_ONLY_RENAMES.items():
+        if puf_column not in result.columns:
+            continue
+        growth = _get_pe_soi_growth(soi_table, variable, from_year, to_year)
+        values = pd.to_numeric(result[puf_column], errors="coerce").fillna(0.0)
+        result[puf_column] = values.where(values <= 0.0, values * growth)
+
+    for variable, puf_column in PE_SOI_TO_PUF_NEG_ONLY_RENAMES.items():
+        if puf_column not in result.columns:
+            continue
+        growth = _get_pe_soi_growth(soi_table, variable, from_year, to_year)
+        values = pd.to_numeric(result[puf_column], errors="coerce").fillna(0.0)
+        result[puf_column] = values.where(values >= 0.0, values * growth)
+
+    agi_growth = _get_pe_soi_growth(
+        soi_table,
+        "adjusted_gross_income",
+        from_year,
+        to_year,
+    )
+    for puf_column in PE_PUF_REMAINING_RAW_COLUMNS:
+        if puf_column not in result.columns:
+            continue
+        values = pd.to_numeric(result[puf_column], errors="coerce").fillna(0.0)
+        result[puf_column] = values * agi_growth
+
+    if "S006" in result.columns:
+        returns_start = _get_pe_soi_aggregate(
+            soi_table,
+            "count",
+            from_year,
+            is_count=True,
+        )
+        returns_end = _get_pe_soi_aggregate(
+            soi_table,
+            "count",
+            to_year,
+            is_count=True,
+        )
+        weights = pd.to_numeric(result["S006"], errors="coerce").fillna(0.0)
+        result["S006"] = weights * (returns_end / returns_start)
+
+    return result
+
+
+def uprate_mapped_puf_with_pe_factors(
+    puf: pd.DataFrame,
+    *,
+    from_year: int = PE_PUF_SOI_END_YEAR,
+    to_year: int = 2024,
+    policyengine_us_data_repo: str | Path | None = None,
+) -> pd.DataFrame:
+    """Uprate mapped PUF variables using PE's forward factor table."""
+    if to_year <= from_year:
+        return puf.copy()
+    uprating_factors_path = _resolve_pe_uprating_factors_path(
+        policyengine_us_data_repo=policyengine_us_data_repo,
+    )
+    factors = _load_pe_uprating_factors_table(str(uprating_factors_path.resolve()))
+    start_column = str(from_year)
+    end_column = str(to_year)
+    if start_column not in factors.columns or end_column not in factors.columns:
+        raise ValueError(
+            f"PE uprating factors do not cover {from_year} -> {to_year}"
+        )
+    factor_lookup = factors.set_index("Variable")
+    result = puf.copy()
+    for column in result.columns:
+        factor_variable = PE_UPRATING_FACTOR_ALIASES.get(column, column)
+        if factor_variable not in factor_lookup.index:
+            continue
+        start_value = float(factor_lookup.at[factor_variable, start_column])
+        end_value = float(factor_lookup.at[factor_variable, end_column])
+        growth = end_value / start_value
+        values = pd.to_numeric(result[column], errors="coerce").fillna(0.0)
+        result[column] = values * growth
+    if {
+        "qualified_dividend_income",
+        "non_qualified_dividend_income",
+    }.issubset(result.columns):
+        result["ordinary_dividend_income"] = (
+            result["qualified_dividend_income"].fillna(0.0)
+            + result["non_qualified_dividend_income"].fillna(0.0)
+        )
+    if {
+        "taxable_pension_income",
+        "tax_exempt_pension_income",
+    }.issubset(result.columns):
+        result["total_pension_income"] = (
+            result["taxable_pension_income"].fillna(0.0)
+            + result["tax_exempt_pension_income"].fillna(0.0)
+        )
+    return result
 
 
 def _impute_missing_puf_demographics(puf: pd.DataFrame) -> pd.DataFrame:
@@ -1109,6 +1443,9 @@ def load_puf(
     expand_persons: bool = True,
     cache_dir: Path | None = None,
     social_security_split_strategy: str = SOCIAL_SECURITY_SPLIT_STRATEGY_GROUPED_SHARE,
+    uprating_mode: str = PUF_UPRATING_MODE_INTERPOLATED,
+    policyengine_us_data_repo: str | Path | None = None,
+    soi_path: str | Path | None = None,
 ) -> pd.DataFrame:
     """Load and process PUF for multi-survey fusion.
 
@@ -1125,12 +1462,31 @@ def load_puf(
 
     # Load raw data
     raw = load_puf_raw(puf_path, demo_path)
+    resolved_uprating_mode = _normalize_puf_uprating_mode(uprating_mode)
+    if resolved_uprating_mode == PUF_UPRATING_MODE_PE_SOI:
+        raw_uprating_year = min(int(target_year), PE_PUF_SOI_END_YEAR)
+        raw = uprate_raw_puf_pe_style(
+            raw,
+            from_year=2015,
+            to_year=raw_uprating_year,
+            policyengine_us_data_repo=policyengine_us_data_repo,
+            soi_path=soi_path,
+        )
 
     # Map to common variables
     df = map_puf_variables(raw, impute_pre_tax_contributions=True)
 
     # Uprate to target year
-    df = uprate_puf(df, from_year=2015, to_year=target_year)
+    if resolved_uprating_mode == PUF_UPRATING_MODE_PE_SOI:
+        if target_year > PE_PUF_SOI_END_YEAR:
+            df = uprate_mapped_puf_with_pe_factors(
+                df,
+                from_year=PE_PUF_SOI_END_YEAR,
+                to_year=target_year,
+                policyengine_us_data_repo=policyengine_us_data_repo,
+            )
+    else:
+        df = uprate_puf(df, from_year=2015, to_year=target_year)
 
     # Expand to persons if requested
     if expand_persons:
@@ -1236,14 +1592,36 @@ def _build_puf_tax_units(
     raw: pd.DataFrame,
     target_year: int,
     random_seed: int = 42,
+    uprating_mode: str = PUF_UPRATING_MODE_INTERPOLATED,
+    policyengine_us_data_repo: str | Path | None = None,
+    soi_path: str | Path | None = None,
 ) -> pd.DataFrame:
     """Map raw PUF records into a normalized tax-unit table."""
+    resolved_uprating_mode = _normalize_puf_uprating_mode(uprating_mode)
+    if resolved_uprating_mode == PUF_UPRATING_MODE_PE_SOI:
+        raw_uprating_year = min(int(target_year), PE_PUF_SOI_END_YEAR)
+        raw = uprate_raw_puf_pe_style(
+            raw,
+            from_year=2015,
+            to_year=raw_uprating_year,
+            policyengine_us_data_repo=policyengine_us_data_repo,
+            soi_path=soi_path,
+        )
     tax_units = map_puf_variables(
         raw,
         random_seed=random_seed,
         impute_pre_tax_contributions=True,
     )
-    tax_units = uprate_puf(tax_units, from_year=2015, to_year=target_year)
+    if resolved_uprating_mode == PUF_UPRATING_MODE_PE_SOI:
+        if target_year > PE_PUF_SOI_END_YEAR:
+            tax_units = uprate_mapped_puf_with_pe_factors(
+                tax_units,
+                from_year=PE_PUF_SOI_END_YEAR,
+                to_year=target_year,
+                policyengine_us_data_repo=policyengine_us_data_repo,
+            )
+    else:
+        tax_units = uprate_puf(tax_units, from_year=2015, to_year=target_year)
     identifier = (
         raw["RECID"].astype(str).reset_index(drop=True)
         if "RECID" in raw.columns
@@ -1368,7 +1746,10 @@ class PUFSourceProvider:
     puf_path: str | Path | None = None
     demographics_path: str | Path | None = None
     expand_persons: bool = True
+    uprating_mode: str = PUF_UPRATING_MODE_INTERPOLATED
     cps_reference_year: int | None = None
+    policyengine_us_data_repo: str | Path | None = None
+    soi_path: str | Path | None = None
     social_security_split_strategy: str = SOCIAL_SECURITY_SPLIT_STRATEGY_GROUPED_SHARE
     shareability: Shareability = Shareability.PUBLIC
     loader: Callable[[Path | None], tuple[Path, Path | None]] | None = None
@@ -1430,6 +1811,9 @@ class PUFSourceProvider:
                 self.cps_reference_year or _default_cps_reference_year(target_year),
             )
         )
+        uprating_mode = _normalize_puf_uprating_mode(
+            provider_filters.get("uprating_mode", self.uprating_mode)
+        )
         social_security_split_strategy = _normalize_social_security_split_strategy(
             provider_filters.get(
                 "social_security_split_strategy",
@@ -1441,6 +1825,11 @@ class PUFSourceProvider:
             "demographics_path",
             self.demographics_path,
         )
+        policyengine_us_data_repo = provider_filters.get(
+            "policyengine_us_data_repo",
+            self.policyengine_us_data_repo,
+        )
+        soi_path = provider_filters.get("soi_path", self.soi_path)
         if puf_path is None:
             loader = self.loader or download_puf
             loaded_puf_path, loaded_demographics_path = loader(self.cache_dir)
@@ -1461,6 +1850,9 @@ class PUFSourceProvider:
             raw=raw,
             target_year=target_year,
             random_seed=int(provider_filters.get("random_seed", 0)),
+            uprating_mode=uprating_mode,
+            policyengine_us_data_repo=policyengine_us_data_repo,
+            soi_path=soi_path,
         )
         persons = _tax_units_to_persons(
             tax_units,

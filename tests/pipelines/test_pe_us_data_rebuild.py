@@ -9,6 +9,7 @@ from microplex_us.data_sources.donor_surveys import (
     SIPPSourceProvider,
 )
 from microplex_us.data_sources.puf import (
+    PUF_UPRATING_MODE_PE_SOI,
     SOCIAL_SECURITY_SPLIT_STRATEGY_PE_QRF,
     PUFSourceProvider,
 )
@@ -101,6 +102,7 @@ def test_default_policyengine_us_data_rebuild_source_providers_use_pe_style_bund
     assert puf_provider.target_year == 2024
     assert puf_provider.cps_reference_year == 2022
     assert puf_provider.expand_persons is False
+    assert puf_provider.uprating_mode == PUF_UPRATING_MODE_PE_SOI
     assert puf_provider.social_security_split_strategy == (
         SOCIAL_SECURITY_SPLIT_STRATEGY_PE_QRF
     )
