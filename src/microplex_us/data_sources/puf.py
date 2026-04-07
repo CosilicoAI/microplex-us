@@ -213,6 +213,24 @@ class PEStyleQRFImputationModel:
     imputed_variable: str
     fitted_model: Any
 
+
+PUF_DEMOGRAPHIC_VARIABLES = (
+    "AGEDP1",
+    "AGEDP2",
+    "AGEDP3",
+    "AGERANGE",
+    "EARNSPLIT",
+    "GENDER",
+)
+
+PUF_DEMOGRAPHIC_PREDICTORS = (
+    "E00200",
+    "MARS",
+    "DSI",
+    "EIC",
+    "XTOT",
+)
+
 def download_puf(cache_dir: Path | None = None) -> Path:
     """Download PUF from HuggingFace.
 
@@ -269,8 +287,65 @@ def load_puf_raw(puf_path: Path, demographics_path: Path | None = None) -> pd.Da
         if "RECID" in puf.columns and "RECID" in demo.columns:
             puf = puf.merge(demo, on="RECID", how="left", suffixes=("", "_demo"))
             print(f"  After demographics merge: {len(puf):,}")
+            puf = _impute_missing_puf_demographics(puf)
 
     return puf
+
+
+def _impute_missing_puf_demographics(puf: pd.DataFrame) -> pd.DataFrame:
+    if not set(PUF_DEMOGRAPHIC_VARIABLES).issubset(puf.columns):
+        return puf
+
+    missing_mask = puf.loc[:, PUF_DEMOGRAPHIC_VARIABLES].isna().all(axis=1)
+    if not bool(missing_mask.any()):
+        return puf
+
+    observed_mask = ~missing_mask
+    if int(observed_mask.sum()) < 100:
+        return puf
+
+    try:
+        from microimpute.models.qrf import QRF
+    except ImportError:
+        return puf
+
+    train = (
+        puf.loc[observed_mask, [*PUF_DEMOGRAPHIC_PREDICTORS, *PUF_DEMOGRAPHIC_VARIABLES]]
+        .copy()
+        .fillna(0)
+    )
+    if len(train) > 10_000:
+        train = train.sample(n=10_000, random_state=0)
+
+    qrf = QRF(log_level="WARNING", memory_efficient=True)
+    fitted_model = qrf.fit(
+        X_train=train,
+        predictors=list(PUF_DEMOGRAPHIC_PREDICTORS),
+        imputed_variables=list(PUF_DEMOGRAPHIC_VARIABLES),
+        n_jobs=1,
+    )
+
+    predicted = fitted_model.predict(
+        X_test=puf.loc[missing_mask, list(PUF_DEMOGRAPHIC_PREDICTORS)].copy().fillna(0)
+    )
+
+    result = puf.copy()
+    bounds = {
+        "AGEDP1": (0, 7),
+        "AGEDP2": (0, 7),
+        "AGEDP3": (0, 7),
+        "AGERANGE": (0, 7),
+        "EARNSPLIT": (0, 4),
+        "GENDER": (1, 2),
+    }
+    for column in PUF_DEMOGRAPHIC_VARIABLES:
+        if column not in predicted.columns:
+            continue
+        values = pd.to_numeric(predicted[column], errors="coerce").fillna(0.0)
+        lower, upper = bounds[column]
+        values = values.round().clip(lower=lower, upper=upper)
+        result.loc[missing_mask, column] = values.to_numpy()
+    return result
 
 
 def map_puf_variables(

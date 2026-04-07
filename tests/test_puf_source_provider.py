@@ -13,6 +13,7 @@ from microplex_us.data_sources import PUFSourceProvider, expand_to_persons
 from microplex_us.data_sources.puf import (
     PEStyleQRFShareModel,
     _fit_pe_style_puf_social_security_qrf_model_from_reference,
+    _impute_missing_puf_demographics,
     _impute_puf_social_security_components,
     _sample_tax_units,
     map_puf_variables,
@@ -665,6 +666,54 @@ def test_map_puf_variables_can_impute_pre_tax_contributions_with_injected_model(
     )
 
     assert mapped.loc[0, "pre_tax_contributions"] == 5_000.0
+
+
+def test_impute_missing_puf_demographics_uses_qrf_predictions(monkeypatch):
+    prediction_frame = pd.DataFrame(
+        {
+            "AGEDP1": [2.2],
+            "AGEDP2": [3.1],
+            "AGEDP3": [0.0],
+            "AGERANGE": [4.4],
+            "EARNSPLIT": [2.6],
+            "GENDER": [1.8],
+        }
+    )
+    calls = _install_fake_qrf(monkeypatch, prediction_frame)
+
+    raw = pd.DataFrame(
+        {
+            "RECID": list(range(101, 202)) + [999],
+            "E00200": [50_000.0] * 101 + [80_000.0],
+            "MARS": [1] * 101 + [2],
+            "DSI": [0] * 102,
+            "EIC": [0] * 101 + [1],
+            "XTOT": [1] * 101 + [2],
+            "AGEDP1": [1.0] * 101 + [float("nan")],
+            "AGEDP2": [0.0] * 101 + [float("nan")],
+            "AGEDP3": [0.0] * 101 + [float("nan")],
+            "AGERANGE": [3.0] * 101 + [float("nan")],
+            "EARNSPLIT": [0.0] * 101 + [float("nan")],
+            "GENDER": [1.0] * 101 + [float("nan")],
+        }
+    )
+
+    imputed = _impute_missing_puf_demographics(raw)
+
+    assert calls["predictors"] == ("E00200", "MARS", "DSI", "EIC", "XTOT")
+    assert calls["imputed_variables"] == (
+        "AGEDP1",
+        "AGEDP2",
+        "AGEDP3",
+        "AGERANGE",
+        "EARNSPLIT",
+        "GENDER",
+    )
+    assert imputed.loc[101, "AGEDP1"] == 2
+    assert imputed.loc[101, "AGEDP2"] == 3
+    assert imputed.loc[101, "AGERANGE"] == 4
+    assert imputed.loc[101, "EARNSPLIT"] == 3
+    assert imputed.loc[101, "GENDER"] == 2
 
 
 def test_download_puf_prefers_existing_local_files_without_hub_lookup(tmp_path, monkeypatch):
