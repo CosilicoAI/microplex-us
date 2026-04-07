@@ -971,7 +971,7 @@ def expand_to_persons(df: pd.DataFrame) -> pd.DataFrame:
         head["is_spouse"] = 0
         head["is_dependent"] = 0
         head["person_id"] = f"{pe_tax_unit_id}:1" if has_pe_demographics else f"{idx}_head"
-        head["tax_unit_id"] = pe_tax_unit_id if has_pe_demographics else idx
+        head["tax_unit_id"] = pe_tax_unit_id if has_pe_demographics else str(idx)
         if has_pe_demographics:
             head["age"] = _decode_puf_filer_age(row.get("_puf_agerange"), fallback=row.get("age", 40.0))
             if pd.notna(row.get("_puf_gender")):
@@ -985,7 +985,7 @@ def expand_to_persons(df: pd.DataFrame) -> pd.DataFrame:
             spouse["is_spouse"] = 1
             spouse["is_dependent"] = 0
             spouse["person_id"] = f"{pe_tax_unit_id}:2" if has_pe_demographics else f"{idx}_spouse"
-            spouse["tax_unit_id"] = pe_tax_unit_id if has_pe_demographics else idx
+            spouse["tax_unit_id"] = pe_tax_unit_id if has_pe_demographics else str(idx)
 
             if has_pe_demographics:
                 spouse["age"] = _decode_puf_filer_age(row.get("_puf_agerange"), fallback=row.get("age", 40.0))
