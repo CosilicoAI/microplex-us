@@ -50,6 +50,7 @@ def test_default_policyengine_us_data_rebuild_checkpoint_config_sets_pe_context(
     assert config.policyengine_direct_override_variables == (
         "filing_status",
         "non_sch_d_capital_gains",
+        "pre_tax_contributions",
     )
     assert config.policyengine_prefer_existing_tax_unit_ids is True
     assert config.n_synthetic == 500

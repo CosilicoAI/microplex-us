@@ -590,6 +590,39 @@ def test_map_puf_variables_adds_pe_exact_irs_inputs():
     assert mapped.loc[0, "miscellaneous_income"] == 65.0
 
 
+def test_map_puf_variables_can_impute_pre_tax_contributions_with_injected_model():
+    class DummyFittedModel:
+        def predict(self, X_test):
+            return pd.DataFrame(
+                {"pre_tax_contributions": X_test["employment_income"] * 0.1},
+                index=X_test.index,
+            )
+
+    raw = pd.DataFrame(
+        {
+            "RECID": [101],
+            "MARS": [1],
+            "XTOT": [1],
+            "S006": [100.0],
+            "E00200": [50_000.0],
+            "AGE_HEAD": [45],
+            "GENDER": [1],
+        }
+    )
+
+    mapped = map_puf_variables(
+        raw,
+        impute_pre_tax_contributions=True,
+        pre_tax_contribution_model=puf_module.PEStyleQRFImputationModel(
+            predictors=("employment_income", "age", "is_male"),
+            imputed_variable="pre_tax_contributions",
+            fitted_model=DummyFittedModel(),
+        ),
+    )
+
+    assert mapped.loc[0, "pre_tax_contributions"] == 5_000.0
+
+
 def test_download_puf_prefers_existing_local_files_without_hub_lookup(tmp_path, monkeypatch):
     puf_path = tmp_path / "puf_2015.csv"
     demographics_path = tmp_path / "demographics_2015.csv"

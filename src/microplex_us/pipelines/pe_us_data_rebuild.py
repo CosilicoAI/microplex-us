@@ -80,6 +80,7 @@ def default_policyengine_us_data_rebuild_config(
         policyengine_direct_override_variables=(
             "filing_status",
             "non_sch_d_capital_gains",
+            "pre_tax_contributions",
         ),
         policyengine_prefer_existing_tax_unit_ids=True,
     )

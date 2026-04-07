@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
@@ -168,6 +169,15 @@ class PEStyleQRFShareModel:
 
 SocialSecurityShareModel = GroupedShareModel | PEStyleQRFShareModel
 
+
+@dataclass(frozen=True)
+class PEStyleQRFImputationModel:
+    """PE-style QRF imputation model for direct PUF variable imputation."""
+
+    predictors: tuple[str, ...]
+    imputed_variable: str
+    fitted_model: Any
+
 def download_puf(cache_dir: Path | None = None) -> Path:
     """Download PUF from HuggingFace.
 
@@ -232,6 +242,8 @@ def map_puf_variables(
     puf: pd.DataFrame,
     *,
     random_seed: int = 42,
+    impute_pre_tax_contributions: bool = False,
+    pre_tax_contribution_model: PEStyleQRFImputationModel | None = None,
 ) -> pd.DataFrame:
     """Map PUF variable codes to common names."""
     result = pd.DataFrame(index=puf.index)
@@ -327,6 +339,24 @@ def map_puf_variables(
     else:
         # Unknown - will be learned from CPS
         result["is_male"] = np.nan
+
+    if impute_pre_tax_contributions:
+        model = pre_tax_contribution_model
+        if model is None:
+            try:
+                model = _default_pe_style_puf_pre_tax_contribution_model()
+            except (ImportError, ValueError):
+                model = None
+        if model is not None:
+            predictor_frame = result.loc[:, model.predictors].copy()
+            predictor_frame = predictor_frame.apply(
+                lambda column: pd.to_numeric(column, errors="coerce").fillna(0.0)
+            )
+            predictions = model.fitted_model.predict(X_test=predictor_frame)
+            result[model.imputed_variable] = pd.to_numeric(
+                predictions[model.imputed_variable],
+                errors="coerce",
+            ).fillna(0.0)
 
     # Mark survey source
     result["_survey"] = "puf"
@@ -572,6 +602,35 @@ def _default_pe_style_puf_social_security_share_model(
     )
     return _fit_pe_style_puf_social_security_qrf_model_from_reference(
         cps_dataset.persons.to_pandas()
+    )
+
+
+@lru_cache(maxsize=1)
+def _default_pe_style_puf_pre_tax_contribution_model() -> PEStyleQRFImputationModel:
+    from microimpute.models.qrf import QRF
+    from policyengine_us import Microsimulation
+    from policyengine_us_data.datasets.cps import CPS_2021
+
+    predictors = ("employment_income", "age", "is_male")
+    cps = Microsimulation(dataset=CPS_2021)
+    cps.subsample(10_000)
+    cps_df = cps.calculate_dataframe(
+        [*predictors, "household_weight", "pre_tax_contributions"]
+    )
+    train = cps_df.loc[:, [*predictors, "pre_tax_contributions"]].copy()
+    train = train.apply(lambda column: pd.to_numeric(column, errors="coerce").fillna(0.0))
+
+    qrf = QRF(log_level="WARNING", memory_efficient=True)
+    fitted_model = qrf.fit(
+        X_train=train,
+        predictors=list(predictors),
+        imputed_variables=["pre_tax_contributions"],
+        n_jobs=1,
+    )
+    return PEStyleQRFImputationModel(
+        predictors=predictors,
+        imputed_variable="pre_tax_contributions",
+        fitted_model=fitted_model,
     )
 
 
@@ -827,7 +886,7 @@ def load_puf(
     raw = load_puf_raw(puf_path, demo_path)
 
     # Map to common variables
-    df = map_puf_variables(raw)
+    df = map_puf_variables(raw, impute_pre_tax_contributions=True)
 
     # Uprate to target year
     df = uprate_puf(df, from_year=2015, to_year=target_year)
@@ -863,6 +922,7 @@ def load_puf(
 
 # Variables that PUF has but CPS doesn't (will be NaN in CPS)
 PUF_EXCLUSIVE_VARS = [
+    "pre_tax_contributions",
     "short_term_capital_gains",
     "long_term_capital_gains",
     "non_sch_d_capital_gains",
@@ -937,7 +997,11 @@ def _build_puf_tax_units(
     random_seed: int = 42,
 ) -> pd.DataFrame:
     """Map raw PUF records into a normalized tax-unit table."""
-    tax_units = map_puf_variables(raw, random_seed=random_seed)
+    tax_units = map_puf_variables(
+        raw,
+        random_seed=random_seed,
+        impute_pre_tax_contributions=True,
+    )
     tax_units = uprate_puf(tax_units, from_year=2015, to_year=target_year)
     identifier = (
         raw["RECID"].astype(str).reset_index(drop=True)
