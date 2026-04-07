@@ -179,6 +179,53 @@ def test_acs_source_provider_uses_manifest_backed_dataset_loader(
     assert captured["random_seed"] == 0
 
 
+def test_acs_source_provider_deduplicates_households_from_dataset_loader(
+    monkeypatch,
+) -> None:
+    def _fake_loader(*, spec, year, sample_n, random_seed, **_kwargs) -> DonorSurveyTables:
+        households = pd.DataFrame(
+            {
+                "household_id": [1, 1, 2],
+                "household_weight": [100.0, 100.0, 120.0],
+                "state_fips": [6, 6, 36],
+                "tenure": [1, 1, 2],
+                "year": [2022, 2022, 2022],
+            }
+        )
+        persons = pd.DataFrame(
+            {
+                "person_id": [11, 12, 21],
+                "household_id": [1, 1, 2],
+                "age": [45, 12, 68],
+                "sex": [1, 2, 2],
+                "is_male": [1.0, 0.0, 0.0],
+                "is_household_head": [1.0, 0.0, 1.0],
+                "tenure_type": [1, 1, 2],
+                "employment_income": [50_000.0, 0.0, 12_000.0],
+                "self_employment_income": [5_000.0, 0.0, 0.0],
+                "social_security": [0.0, 0.0, 20_000.0],
+                "taxable_pension_income": [0.0, 0.0, 15_000.0],
+                "rent": [1_200.0, 0.0, 950.0],
+                "real_estate_taxes": [3_000.0, 0.0, 0.0],
+                "income": [55_000.0, 0.0, 47_000.0],
+                "weight": [100.0, 100.0, 120.0],
+                "year": [2022, 2022, 2022],
+            }
+        )
+        return DonorSurveyTables(households=households, persons=persons)
+
+    monkeypatch.setattr(
+        donor_surveys,
+        "_run_policyengine_dataset_loader_from_spec",
+        _fake_loader,
+    )
+
+    frame = ACSSourceProvider().load_frame()
+
+    assert frame.tables[EntityType.HOUSEHOLD]["household_id"].tolist() == [1, 2]
+    assert frame.tables[EntityType.PERSON]["household_id"].tolist() == [1, 1, 2]
+
+
 def test_sipp_and_scf_provider_fillers_are_not_usable_as_conditions() -> None:
     tips_provider = SIPPSourceProvider(block="tips", loader=_sipp_tips_tables)
     assets_provider = SIPPSourceProvider(block="assets", loader=_sipp_assets_tables)

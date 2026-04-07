@@ -454,7 +454,7 @@ def _default_acs_tables_loader(
         raise ValueError(
             f"{spec.descriptor_name} provider currently supports year={spec.default_year} only"
         )
-    return _run_policyengine_dataset_loader_from_spec(
+    tables = _run_policyengine_dataset_loader_from_spec(
         spec=spec,
         year=year,
         sample_n=sample_n,
@@ -462,6 +462,17 @@ def _default_acs_tables_loader(
         policyengine_us_data_repo=policyengine_us_data_repo,
         policyengine_us_data_python=policyengine_us_data_python,
     )
+    households = (
+        tables.households.drop_duplicates(subset=["household_id"])
+        .sort_values(["household_id"])
+        .reset_index(drop=True)
+    )
+    persons = (
+        tables.persons[tables.persons["household_id"].isin(set(households["household_id"]))]
+        .sort_values(["household_id", "person_id"])
+        .reset_index(drop=True)
+    )
+    return DonorSurveyTables(households=households, persons=persons)
 
 
 def _default_scf_tables_loader(
