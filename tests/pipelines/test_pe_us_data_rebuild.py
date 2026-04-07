@@ -74,6 +74,9 @@ def test_default_policyengine_us_data_rebuild_config_uses_incumbent_defaults() -
     assert config.calibration_backend == "entropy"
     assert config.donor_imputer_backend == "qrf"
     assert config.donor_imputer_condition_selection == "pe_prespecified"
+    assert config.policyengine_direct_override_variables == (
+        "non_sch_d_capital_gains",
+    )
     assert config.random_seed == 123
     assert config.cps_asec_source_year == 2022
 
@@ -86,8 +89,8 @@ def test_default_policyengine_us_data_rebuild_source_providers_use_pe_style_bund
         puf_expand_persons=False,
     )
 
-    assert len(providers) == 2
-    cps_provider, puf_provider = providers
+    assert len(providers) == 6
+    cps_provider, puf_provider = providers[:2]
     assert isinstance(cps_provider, CPSASECSourceProvider)
     assert cps_provider.year == 2022
     assert cps_provider.download is False
@@ -98,6 +101,23 @@ def test_default_policyengine_us_data_rebuild_source_providers_use_pe_style_bund
     assert puf_provider.social_security_split_strategy == (
         SOCIAL_SECURITY_SPLIT_STRATEGY_PE_QRF
     )
+    assert isinstance(providers[2], ACSSourceProvider)
+    assert isinstance(providers[3], SIPPSourceProvider)
+    assert providers[3].block == "tips"
+    assert isinstance(providers[4], SIPPSourceProvider)
+    assert providers[4].block == "assets"
+    assert isinstance(providers[5], SCFSourceProvider)
+
+
+def test_default_policyengine_us_data_rebuild_source_providers_can_disable_donor_surveys() -> None:
+    providers = default_policyengine_us_data_rebuild_source_providers(
+        include_donor_surveys=False,
+        cps_download=False,
+    )
+
+    assert len(providers) == 2
+    assert isinstance(providers[0], CPSASECSourceProvider)
+    assert isinstance(providers[1], PUFSourceProvider)
 
 
 def test_default_policyengine_us_data_rebuild_source_providers_can_include_donor_surveys() -> None:

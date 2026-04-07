@@ -3709,6 +3709,10 @@ class USMicroplexPipeline:
             result = normalize_dividend_columns(result)
 
         result["short_term_capital_gains"] = first_present("short_term_capital_gains")
+        result["non_sch_d_capital_gains"] = first_present(
+            "non_sch_d_capital_gains",
+            "capital_gains_distributions",
+        )
         result["long_term_capital_gains_before_response"] = (
             first_present(
                 "long_term_capital_gains_before_response",

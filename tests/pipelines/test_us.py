@@ -2442,6 +2442,20 @@ class TestUSMicroplexPipeline:
         assert output_path.exists()
         assert captured == [("filing_status",)]
 
+    def test_augment_policyengine_person_inputs_materializes_non_sch_d_capital_gains(self):
+        pipeline = USMicroplexPipeline(USMicroplexBuildConfig())
+        persons = pd.DataFrame(
+            {
+                "capital_gains_distributions": [250.0],
+                "age": [45],
+                "sex": [1],
+            }
+        )
+
+        augmented = pipeline._augment_policyengine_person_inputs(persons)
+
+        assert augmented["non_sch_d_capital_gains"].tolist() == [250.0]
+
     def test_calibrate_policyengine_tables_from_db(self, persons, households, tmp_path):
         db_path = tmp_path / "policyengine_targets.db"
         _create_policyengine_calibration_db(db_path)

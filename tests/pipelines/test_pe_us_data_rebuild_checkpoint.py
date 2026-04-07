@@ -47,6 +47,9 @@ def test_default_policyengine_us_data_rebuild_checkpoint_config_sets_pe_context(
     assert config.policyengine_target_period == 2024
     assert config.policyengine_target_profile == "pe_native_broad"
     assert config.policyengine_calibration_target_profile == "pe_native_broad"
+    assert config.policyengine_direct_override_variables == (
+        "non_sch_d_capital_gains",
+    )
     assert config.n_synthetic == 500
     assert config.random_seed == 123
 

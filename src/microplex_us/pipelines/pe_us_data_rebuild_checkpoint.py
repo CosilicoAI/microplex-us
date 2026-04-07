@@ -834,7 +834,7 @@ def run_policyengine_us_data_rebuild_checkpoint(
     puf_path: str | Path | None = None,
     puf_demographics_path: str | Path | None = None,
     puf_expand_persons: bool = True,
-    include_donor_surveys: bool = False,
+    include_donor_surveys: bool = True,
     acs_year: int = 2022,
     sipp_year: int = 2023,
     scf_year: int = 2022,
@@ -1062,7 +1062,11 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--calibration-target-variable", action="append", default=[])
     parser.add_argument("--calibration-target-domain", action="append", default=[])
     parser.add_argument("--calibration-target-geo-level", action="append", default=[])
-    parser.add_argument("--include-donor-surveys", action="store_true")
+    parser.add_argument(
+        "--include-donor-surveys",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+    )
     parser.add_argument("--no-cps-download", action="store_true")
     parser.add_argument("--no-puf-expand-persons", action="store_true")
     parser.add_argument("--defer-policyengine-harness", action="store_true")

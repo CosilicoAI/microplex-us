@@ -77,6 +77,7 @@ def default_policyengine_us_data_rebuild_config(
         donor_imputer_condition_selection="pe_prespecified",
         donor_imputer_qrf_zero_threshold=0.05,
         prefer_cached_cps_asec_source=False,
+        policyengine_direct_override_variables=("non_sch_d_capital_gains",),
     )
     return replace(defaults, **overrides)
 
@@ -92,7 +93,7 @@ def default_policyengine_us_data_rebuild_source_providers(
     puf_path: str | Path | None = None,
     puf_demographics_path: str | Path | None = None,
     puf_expand_persons: bool = True,
-    include_donor_surveys: bool = False,
+    include_donor_surveys: bool = True,
     acs_year: int = 2022,
     sipp_year: int = 2023,
     scf_year: int = 2022,
