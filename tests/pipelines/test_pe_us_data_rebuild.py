@@ -75,12 +75,12 @@ def test_default_policyengine_us_data_rebuild_config_uses_incumbent_defaults() -
     assert config.calibration_backend == "entropy"
     assert config.donor_imputer_backend == "qrf"
     assert config.donor_imputer_condition_selection == "pe_prespecified"
+    assert config.donor_imputer_excluded_variables == ("filing_status_code",)
     assert config.policyengine_direct_override_variables == (
-        "filing_status",
         "non_sch_d_capital_gains",
         "pre_tax_contributions",
     )
-    assert config.policyengine_prefer_existing_tax_unit_ids is True
+    assert config.policyengine_prefer_existing_tax_unit_ids is False
     assert config.random_seed == 123
     assert config.cps_asec_source_year == 2022
 
@@ -91,6 +91,7 @@ def test_default_policyengine_us_data_rebuild_source_providers_use_pe_style_bund
         puf_target_year=2024,
         cps_download=False,
         puf_expand_persons=False,
+        policyengine_us_data_python="/tmp/pe-python",
     )
 
     assert len(providers) == 6
@@ -103,6 +104,9 @@ def test_default_policyengine_us_data_rebuild_source_providers_use_pe_style_bund
     assert puf_provider.cps_reference_year == 2022
     assert puf_provider.expand_persons is False
     assert puf_provider.uprating_mode == PUF_UPRATING_MODE_PE_SOI
+    assert puf_provider.policyengine_us_data_python == "/tmp/pe-python"
+    assert puf_provider.impute_pre_tax_contributions is False
+    assert puf_provider.require_pre_tax_contribution_model is False
     assert puf_provider.social_security_split_strategy == (
         SOCIAL_SECURITY_SPLIT_STRATEGY_PE_QRF
     )

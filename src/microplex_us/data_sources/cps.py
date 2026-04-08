@@ -33,7 +33,7 @@ from microplex_us.source_registry import resolve_source_variable_capabilities
 
 # Default cache directory
 DEFAULT_CACHE_DIR = Path.home() / ".cache" / "microplex"
-CPS_ASEC_PROCESSED_CACHE_VERSION = "20260403"
+CPS_ASEC_PROCESSED_CACHE_VERSION = "20260408"
 
 # CPS ASEC data URLs by year
 CPS_URLS = {
@@ -96,7 +96,10 @@ PERSON_VARIABLES = {
     "PH_SEQ": "household_id",
     "GESTFIPS": "state_fips",
     "PF_SEQ": "family_id",
+    "TAX_ID": "tax_unit_id",
+    "SPM_ID": "spm_unit_id",
     "A_LINENO": "person_number",
+    "A_SPOUSE": "spouse_person_number",
     "A_FAMREL": "family_relationship",
     "A_MARITL": "marital_status",
     # Weights
@@ -963,6 +966,28 @@ def _process_persons(df: pl.DataFrame, year: int) -> pl.DataFrame:
                 .otherwise(pl.col(col))
                 .alias(col)
             )
+    if "marital_status" in result.columns and "is_surviving_spouse" not in result.columns:
+        result = result.with_columns(
+            (pl.col("marital_status") == 4).alias("is_surviving_spouse")
+        )
+    if "marital_status" in result.columns and "is_separated" not in result.columns:
+        result = result.with_columns(
+            (pl.col("marital_status") == 6).alias("is_separated")
+        )
+    if (
+        {"household_id", "person_number", "spouse_person_number"}.issubset(result.columns)
+        and "marital_unit_id" not in result.columns
+    ):
+        raw_marital_unit_id = (
+            pl.col("household_id").cast(pl.Int64) * 1_000_000
+            + pl.max_horizontal(
+                pl.col("person_number").cast(pl.Int64),
+                pl.col("spouse_person_number").fill_null(0).cast(pl.Int64),
+            )
+        )
+        result = result.with_columns(
+            raw_marital_unit_id.rank("dense").cast(pl.Int64).alias("marital_unit_id")
+        )
 
     # Add year
     result = result.with_columns(pl.lit(year).alias("year"))

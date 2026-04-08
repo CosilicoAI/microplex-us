@@ -773,6 +773,10 @@ class USMicroplexPipeline:
             donor_inputs=[source for source in source_inputs if source is not scaffold_input],
         )
         seed_data = donor_integration["seed_data"]
+        seed_data = self._strip_generated_entity_ids(
+            seed_data,
+            scaffold_input=scaffold_input,
+        )
         targets = self.build_targets(seed_data)
         synthesis_variables = self._resolve_synthesis_variables(
             scaffold_input,
@@ -2693,6 +2697,22 @@ class USMicroplexPipeline:
             how="left",
         ).drop(columns=["source_person_id"])
 
+    def _strip_generated_entity_ids(
+        self,
+        frame: pd.DataFrame,
+        *,
+        scaffold_input: USMicroplexSourceInput,
+    ) -> pd.DataFrame:
+        scaffold_person_columns = set(scaffold_input.persons.columns)
+        ephemeral_entity_ids = [
+            column
+            for column in ("tax_unit_id", "family_id", "spm_unit_id", "marital_unit_id")
+            if column in frame.columns and column not in scaffold_person_columns
+        ]
+        if not ephemeral_entity_ids:
+            return frame
+        return frame.drop(columns=ephemeral_entity_ids)
+
     def _can_project_donor_block_to_entity(
         self,
         current_frame: pd.DataFrame,
@@ -3166,7 +3186,7 @@ class USMicroplexPipeline:
     def _build_policyengine_households(self, persons: pd.DataFrame) -> pd.DataFrame:
         household_columns = [
             column
-            for column in ("state_fips", "tenure", "state")
+            for column in ("state_fips", "county_fips", "tenure", "state")
             if column in persons.columns
         ]
         aggregations = {column: "first" for column in household_columns}
@@ -3359,9 +3379,33 @@ class USMicroplexPipeline:
         dependent_mask = relationship.eq(2)
 
         filer_ids: list[int] = []
+        spouse_pair_ids = self._find_preserved_tax_unit_spouse_pair(unit_persons)
         if head_mask.any():
-            filer_ids.append(int(unit_persons.loc[head_mask, "person_id"].iloc[0]))
-        if spouse_mask.any():
+            head_id = int(unit_persons.loc[head_mask, "person_id"].iloc[0])
+            filer_ids.append(head_id)
+            if head_id in spouse_pair_ids:
+                filer_ids.extend(
+                    [
+                        int(person_id)
+                        for person_id in spouse_pair_ids
+                        if int(person_id) != head_id
+                    ]
+                )
+            elif spouse_mask.any() and "spouse_person_number" not in unit_persons.columns:
+                filer_ids.append(int(unit_persons.loc[spouse_mask, "person_id"].iloc[0]))
+        elif spouse_pair_ids:
+            pair_rows = unit_persons.loc[
+                unit_persons["person_id"].astype(int).isin(spouse_pair_ids)
+            ].copy()
+            pair_rows["age"] = pd.to_numeric(pair_rows.get("age"), errors="coerce").fillna(0.0)
+            filer_ids.extend(
+                pair_rows.sort_values(["age", "person_id"], ascending=[False, True])[
+                    "person_id"
+                ]
+                .astype(int)
+                .tolist()[:2]
+            )
+        elif spouse_mask.any() and "spouse_person_number" not in unit_persons.columns:
             filer_ids.append(int(unit_persons.loc[spouse_mask, "person_id"].iloc[0]))
         if not filer_ids:
             adult_mask = pd.to_numeric(
@@ -3385,6 +3429,63 @@ class USMicroplexPipeline:
                 if int(person_id) not in filer_ids
             ]
         return filer_ids, dependent_ids
+
+    def _find_preserved_tax_unit_spouse_pair(
+        self,
+        unit_persons: pd.DataFrame,
+    ) -> list[int]:
+        required_columns = {"person_number", "spouse_person_number", "person_id"}
+        if not required_columns.issubset(unit_persons.columns):
+            return []
+        pairs: set[tuple[int, int]] = set()
+        by_number = {
+            int(person_number): {
+                "person_id": int(person_id),
+                "spouse_person_number": int(spouse_person_number),
+                "age": float(age),
+            }
+            for person_number, spouse_person_number, person_id, age in unit_persons[
+                ["person_number", "spouse_person_number", "person_id", "age"]
+            ]
+            .assign(
+                age=lambda frame: pd.to_numeric(frame["age"], errors="coerce").fillna(0.0),
+                spouse_person_number=lambda frame: pd.to_numeric(
+                    frame["spouse_person_number"], errors="coerce"
+                ).fillna(0),
+                person_number=lambda frame: pd.to_numeric(
+                    frame["person_number"], errors="coerce"
+                ).fillna(0),
+            )
+            .itertuples(index=False, name=None)
+        }
+        for person_number, data in by_number.items():
+            spouse_number = data["spouse_person_number"]
+            if spouse_number <= 0:
+                continue
+            spouse = by_number.get(spouse_number)
+            if spouse is None or spouse["spouse_person_number"] != person_number:
+                continue
+            pair = tuple(sorted((data["person_id"], spouse["person_id"])))
+            pairs.add(pair)
+        if not pairs:
+            return []
+        if len(pairs) == 1:
+            return list(next(iter(pairs)))
+
+        head_candidates = unit_persons.loc[
+            pd.to_numeric(unit_persons.get("relationship_to_head"), errors="coerce").fillna(3).eq(0),
+            "person_id",
+        ].astype(int)
+        if not head_candidates.empty:
+            head_id = int(head_candidates.iloc[0])
+            for pair in sorted(pairs):
+                if head_id in pair:
+                    return list(pair)
+        best_pair = max(
+            pairs,
+            key=lambda pair: sum(by_number[number]["age"] for number in by_number if by_number[number]["person_id"] in pair),
+        )
+        return list(best_pair)
 
     def _infer_preserved_tax_unit_filing_status(
         self,
@@ -3432,6 +3533,15 @@ class USMicroplexPipeline:
             dependent_ids = [
                 int(person_id) for person_id in unit_copy.get("dependent_ids", [])
             ]
+            if len(filer_ids) == 2:
+                separated_split = self._split_joint_tax_unit_for_separated_filers(
+                    person_lookup,
+                    filer_ids=filer_ids,
+                    dependent_ids=dependent_ids,
+                )
+                if separated_split is not None:
+                    updated_units.extend(separated_split)
+                    continue
             if len(filer_ids) != 1:
                 updated_units.append(unit_copy)
                 continue
@@ -3446,8 +3556,129 @@ class USMicroplexPipeline:
             )
             if hinted_status is not None:
                 unit_copy["filing_status"] = hinted_status
+            elif self._normalize_policyengine_filing_status(
+                unit_copy.get("filing_status", "single")
+            ) in {"HEAD_OF_HOUSEHOLD", "SEPARATE"}:
+                unit_copy["filing_status"] = "SINGLE"
             updated_units.append(unit_copy)
         return updated_units
+
+    def _split_joint_tax_unit_for_separated_filers(
+        self,
+        person_lookup: pd.DataFrame,
+        *,
+        filer_ids: list[int],
+        dependent_ids: list[int],
+    ) -> list[dict[str, Any]] | None:
+        if len(filer_ids) != 2:
+            return None
+        if not all(filer_id in person_lookup.index for filer_id in filer_ids):
+            return None
+
+        filer_rows = person_lookup.loc[filer_ids]
+        if isinstance(filer_rows, pd.Series):
+            filer_rows = filer_rows.to_frame().T
+        separated_mask = filer_rows.apply(
+            lambda row: self._has_explicit_separation_evidence(row), axis=1
+        )
+        if not bool(separated_mask.any()) and self._has_marriage_compatible_joint_evidence(
+            filer_rows
+        ):
+            return None
+
+        primary_filer_id = self._select_primary_tax_unit_filer(
+            filer_rows,
+            fallback_id=filer_ids[0],
+        )
+        secondary_filer_id = next(
+            filer_id for filer_id in filer_ids if filer_id != primary_filer_id
+        )
+        split_units: list[dict[str, Any]] = []
+        for filer_id, unit_dependent_ids in (
+            (primary_filer_id, dependent_ids),
+            (secondary_filer_id, []),
+        ):
+            filer_row = person_lookup.loc[filer_id]
+            total_income = float(
+                pd.to_numeric(filer_row.get("income", 0.0), errors="coerce") or 0.0
+            )
+            if unit_dependent_ids:
+                dependent_income = pd.to_numeric(
+                    person_lookup.loc[unit_dependent_ids, "income"],
+                    errors="coerce",
+                ).fillna(0.0)
+                total_income += float(dependent_income.sum())
+            hinted_status = self._infer_single_filer_filing_status(
+                filer_row,
+                has_dependents=bool(unit_dependent_ids),
+            )
+            split_units.append(
+                {
+                    "filer_ids": [int(filer_id)],
+                    "dependent_ids": [int(person_id) for person_id in unit_dependent_ids],
+                    "n_dependents": int(len(unit_dependent_ids)),
+                    "total_income": total_income,
+                    "tax_liability": 0.0,
+                    "filing_status": hinted_status or "SINGLE",
+                }
+            )
+        return split_units
+
+    def _has_marriage_compatible_joint_evidence(
+        self,
+        filer_rows: pd.DataFrame,
+    ) -> bool:
+        marital_status = pd.to_numeric(
+            filer_rows.get("marital_status"),
+            errors="coerce",
+        )
+        if marital_status is None:
+            return True
+        observed = marital_status.dropna().astype(int)
+        if observed.empty:
+            return True
+        # CPS spouse-present statuses are the only strong evidence that a
+        # spouse-coded pair should survive as one joint PE tax unit.
+        return bool(observed.isin({1, 2}).all())
+
+    def _has_explicit_separation_evidence(self, filer_row: pd.Series) -> bool:
+        if bool(filer_row.get("is_separated", False)):
+            return True
+        filing_status_code = self._coerce_policyengine_status_code(
+            filer_row.get("filing_status_code")
+        )
+        if filing_status_code == 3:
+            return True
+        marital_status = self._coerce_policyengine_status_code(
+            filer_row.get("marital_status")
+        )
+        return marital_status == 6
+
+    def _select_primary_tax_unit_filer(
+        self,
+        filer_rows: pd.DataFrame,
+        *,
+        fallback_id: int,
+    ) -> int:
+        relationship = pd.to_numeric(
+            filer_rows.get("relationship_to_head"),
+            errors="coerce",
+        )
+        if relationship is not None:
+            head_candidates = filer_rows.loc[relationship.eq(0)]
+            if not head_candidates.empty:
+                return int(head_candidates.iloc[0]["person_id"])
+        is_head = pd.to_numeric(
+            filer_rows.get("is_head"),
+            errors="coerce",
+        )
+        if is_head is not None:
+            head_candidates = filer_rows.loc[is_head.fillna(0).astype(float) > 0.0]
+            if not head_candidates.empty:
+                return int(head_candidates.iloc[0]["person_id"])
+        if fallback_id in filer_rows["person_id"].astype(int).tolist():
+            return int(fallback_id)
+        return int(filer_rows.iloc[0]["person_id"])
 
     def _infer_single_filer_filing_status(
         self,
@@ -3462,13 +3693,13 @@ class USMicroplexPipeline:
             return "SEPARATE"
         if filing_status_code == 4:
             return "HEAD_OF_HOUSEHOLD"
-        if filing_status_code == 5 and has_dependents:
+        if filing_status_code == 5:
             return "SURVIVING_SPOUSE"
 
         marital_status = self._coerce_policyengine_status_code(
             filer_row.get("marital_status")
         )
-        if marital_status in {3, 6}:
+        if marital_status == 6:
             return "SEPARATE"
         if marital_status == 4 and has_dependents:
             return "SURVIVING_SPOUSE"
@@ -3742,6 +3973,7 @@ class USMicroplexPipeline:
             "married_filing_separately": "SEPARATE",
             "separate": "SEPARATE",
             "head_of_household": "HEAD_OF_HOUSEHOLD",
+            "widow": "SURVIVING_SPOUSE",
             "qualifying_widow": "SURVIVING_SPOUSE",
             "surviving_spouse": "SURVIVING_SPOUSE",
         }
@@ -3791,12 +4023,43 @@ class USMicroplexPipeline:
             else:
                 result["is_hispanic"] = hispanic.fillna(0).astype(int).ne(0)
 
+        marital_status = (
+            pd.to_numeric(result["marital_status"], errors="coerce")
+            if "marital_status" in result.columns
+            else None
+        )
+        filing_status_code = (
+            pd.to_numeric(result["filing_status_code"], errors="coerce")
+            if "filing_status_code" in result.columns
+            else None
+        )
+        filing_status_text = (
+            result["filing_status"].astype(str).str.strip().str.upper()
+            if "filing_status" in result.columns
+            else None
+        )
+
         if "is_separated" in result.columns:
             result["is_separated"] = result["is_separated"].fillna(False).astype(bool)
+        elif marital_status is not None:
+            result["is_separated"] = marital_status.fillna(0).astype(int).eq(6)
+        elif filing_status_code is not None:
+            result["is_separated"] = filing_status_code.fillna(0).astype(int).eq(3)
+        elif filing_status_text is not None:
+            result["is_separated"] = filing_status_text.eq("SEPARATE")
+
         if "is_surviving_spouse" in result.columns:
             result["is_surviving_spouse"] = (
                 result["is_surviving_spouse"].fillna(False).astype(bool)
             )
+        elif marital_status is not None:
+            result["is_surviving_spouse"] = marital_status.fillna(0).astype(int).eq(4)
+        elif filing_status_code is not None:
+            result["is_surviving_spouse"] = (
+                filing_status_code.fillna(0).astype(int).eq(5)
+            )
+        elif filing_status_text is not None:
+            result["is_surviving_spouse"] = filing_status_text.eq("SURVIVING_SPOUSE")
 
         if "medicaid" in result.columns:
             result["medicaid"] = (

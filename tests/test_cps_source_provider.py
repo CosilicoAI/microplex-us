@@ -8,6 +8,7 @@ from microplex.core import EntityType, SourceArchetype, SourceProvider, SourceQu
 
 from microplex_us.data_sources import CPSASECParquetSourceProvider
 from microplex_us.data_sources.cps import (
+    CPS_ASEC_PROCESSED_CACHE_VERSION,
     CPSASECSourceProvider,
     _sample_households_and_persons,
     load_cps_asec,
@@ -175,8 +176,12 @@ def test_load_cps_asec_caches_household_geography_on_persons(tmp_path):
         {
             "PH_SEQ": [1, 1, 2],
             "A_LINENO": [1, 2, 1],
+            "A_SPOUSE": [2, 1, 0],
             "A_AGE": [34, 12, 52],
             "A_FNLWGT": [100, 100, 200],
+            "TAX_ID": [100, 100, 200],
+            "SPM_ID": [10, 10, 20],
+            "A_MARITL": [1, 1, 6],
             "PRDTRACE": [4, 4, 1],
             "PRDTHSP": [0, 1, 0],
             "PEHSPNON": [2, 1, 2],
@@ -224,6 +229,12 @@ def test_load_cps_asec_caches_household_geography_on_persons(tmp_path):
     assert "receives_wic" in first.persons.columns
     assert "has_marketplace_health_coverage" in first.persons.columns
     assert "has_esi" in first.persons.columns
+    assert "tax_unit_id" in first.persons.columns
+    assert "spm_unit_id" in first.persons.columns
+    assert "spouse_person_number" in first.persons.columns
+    assert "marital_unit_id" in first.persons.columns
+    assert "is_surviving_spouse" in first.persons.columns
+    assert "is_separated" in first.persons.columns
     assert cached_persons["state_fips"].to_list() == [6, 6, 36]
     assert cached_persons["county_fips"].to_list() == [1, 1, 61]
     assert cached_persons["cps_race"].to_list() == [4, 4, 1]
@@ -236,7 +247,15 @@ def test_load_cps_asec_caches_household_geography_on_persons(tmp_path):
     assert cached_persons["receives_wic"].to_list() == [True, False, False]
     assert cached_persons["has_marketplace_health_coverage"].to_list() == [True, False, False]
     assert cached_persons["has_esi"].to_list() == [False, True, False]
-    assert second.source.endswith("cps_asec_2023_processed_v20260403.parquet")
+    assert cached_persons["tax_unit_id"].to_list() == [100, 100, 200]
+    assert cached_persons["spm_unit_id"].to_list() == [10, 10, 20]
+    assert cached_persons["spouse_person_number"].to_list() == [2, 1, 0]
+    assert cached_persons["is_surviving_spouse"].to_list() == [False, False, False]
+    assert cached_persons["is_separated"].to_list() == [False, False, True]
+    assert cached_persons["marital_unit_id"].to_list() == [1, 1, 2]
+    assert second.source.endswith(
+        f"cps_asec_2023_processed_v{CPS_ASEC_PROCESSED_CACHE_VERSION}.parquet"
+    )
     assert sorted(second.households["state_fips"].to_list()) == [6, 36]
     assert sorted(second.households["county_fips"].to_list()) == [1, 61]
 

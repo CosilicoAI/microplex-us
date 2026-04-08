@@ -207,6 +207,8 @@ SAFE_POLICYENGINE_US_EXPORT_VARIABLES: set[str] = {
     "farm_income",
     "has_esi",
     "has_marketplace_health_coverage",
+    "is_separated",
+    "is_surviving_spouse",
     "net_worth",
     "taxable_private_pension_income",
     "taxable_public_pension_income",

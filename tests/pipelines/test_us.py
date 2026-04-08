@@ -786,7 +786,7 @@ class TestUSMicroplexPipeline:
         assert tax_units.iloc[0]["filing_status"] == "JOINT"
         assert tax_units.iloc[0]["n_dependents"] == 1
 
-    def test_build_policyengine_entity_tables_marks_spouse_absent_head_as_separate(self):
+    def test_build_policyengine_entity_tables_marks_separated_head_as_separate(self):
         pipeline = USMicroplexPipeline(USMicroplexBuildConfig())
         population = pd.DataFrame(
             {
@@ -796,7 +796,7 @@ class TestUSMicroplexPipeline:
                 "age": [45, 12],
                 "income": [60_000.0, 0.0],
                 "relationship_to_head": [0, 2],
-                "marital_status": [3, 7],
+                "marital_status": [6, 7],
                 "state_fips": [6, 6],
                 "tenure": [1, 1],
             }
@@ -808,6 +808,84 @@ class TestUSMicroplexPipeline:
         assert len(tax_units) == 1
         assert tax_units.iloc[0]["filing_status"] == "SEPARATE"
         assert tax_units.iloc[0]["n_dependents"] == 1
+
+    def test_build_policyengine_entity_tables_splits_separated_spouses_into_two_units(self):
+        pipeline = USMicroplexPipeline(USMicroplexBuildConfig())
+        population = pd.DataFrame(
+            {
+                "person_id": [1, 2],
+                "household_id": [10, 10],
+                "weight": [1.0, 1.0],
+                "age": [45, 43],
+                "income": [60_000.0, 15_000.0],
+                "relationship_to_head": [0, 1],
+                "marital_status": [6, 6],
+                "state_fips": [6, 6],
+                "tenure": [1, 1],
+            }
+        )
+
+        tables = pipeline.build_policyengine_entity_tables(population)
+        tax_units = tables.tax_units.sort_values("tax_unit_id").reset_index(drop=True)
+        person_rows = tables.persons.sort_values("person_id").reset_index(drop=True)
+
+        assert len(tax_units) == 2
+        assert tax_units["filing_status"].tolist() == ["SEPARATE", "SEPARATE"]
+        assert person_rows["tax_unit_id"].nunique() == 2
+
+    def test_build_policyengine_entity_tables_splits_separated_spouses_and_keeps_dependents_with_head(self):
+        pipeline = USMicroplexPipeline(USMicroplexBuildConfig())
+        population = pd.DataFrame(
+            {
+                "person_id": [1, 2, 3],
+                "household_id": [10, 10, 10],
+                "weight": [1.0, 1.0, 1.0],
+                "age": [45, 43, 12],
+                "income": [60_000.0, 15_000.0, 0.0],
+                "relationship_to_head": [0, 1, 2],
+                "marital_status": [6, 6, 7],
+                "state_fips": [6, 6, 6],
+                "tenure": [1, 1, 1],
+            }
+        )
+
+        tables = pipeline.build_policyengine_entity_tables(population)
+        tax_units = tables.tax_units.sort_values("tax_unit_id").reset_index(drop=True)
+        person_rows = tables.persons.sort_values("person_id").reset_index(drop=True)
+
+        assert len(tax_units) == 2
+        assert tax_units.iloc[0]["filing_status"] == "SEPARATE"
+        assert tax_units.iloc[0]["n_dependents"] == 1
+        assert tax_units.iloc[1]["filing_status"] == "SEPARATE"
+        assert tax_units.iloc[1]["n_dependents"] == 0
+        dependent_tax_unit_id = int(
+            person_rows.loc[person_rows["person_id"] == 3, "tax_unit_id"].iloc[0]
+        )
+        assert dependent_tax_unit_id == int(tax_units.iloc[0]["tax_unit_id"])
+
+    def test_build_policyengine_entity_tables_splits_spouse_coded_pair_without_marriage_evidence(self):
+        pipeline = USMicroplexPipeline(USMicroplexBuildConfig())
+        population = pd.DataFrame(
+            {
+                "person_id": [1, 2],
+                "household_id": [10, 10],
+                "weight": [1.0, 1.0],
+                "age": [45, 43],
+                "income": [60_000.0, 15_000.0],
+                "relationship_to_head": [0, 1],
+                "marital_status": [7, 7],
+                "state_fips": [6, 6],
+                "tenure": [1, 1],
+            }
+        )
+
+        tables = pipeline.build_policyengine_entity_tables(population)
+        tax_units = tables.tax_units.sort_values("tax_unit_id").reset_index(drop=True)
+        person_rows = tables.persons.sort_values("person_id").reset_index(drop=True)
+
+        assert len(tax_units) == 2
+        assert tax_units["filing_status"].tolist() == ["SINGLE", "SINGLE"]
+        assert person_rows["tax_unit_id"].nunique() == 2
 
     def test_build_policyengine_entity_tables_marks_widowed_head_with_child_as_surviving_spouse(self):
         pipeline = USMicroplexPipeline(USMicroplexBuildConfig())
@@ -830,6 +908,53 @@ class TestUSMicroplexPipeline:
 
         assert len(tax_units) == 1
         assert tax_units.iloc[0]["filing_status"] == "SURVIVING_SPOUSE"
+        assert tax_units.iloc[0]["n_dependents"] == 1
+
+    def test_build_policyengine_entity_tables_prefers_explicit_head_of_household_code(self):
+        pipeline = USMicroplexPipeline(USMicroplexBuildConfig())
+        population = pd.DataFrame(
+            {
+                "person_id": [1, 2],
+                "household_id": [10, 10],
+                "weight": [1.0, 1.0],
+                "age": [45, 12],
+                "income": [60_000.0, 0.0],
+                "relationship_to_head": [0, 2],
+                "marital_status": [5, 7],
+                "filing_status_code": [4, np.nan],
+                "state_fips": [6, 6],
+                "tenure": [1, 1],
+            }
+        )
+
+        tables = pipeline.build_policyengine_entity_tables(population)
+        tax_units = tables.tax_units.sort_values("tax_unit_id").reset_index(drop=True)
+
+        assert len(tax_units) == 1
+        assert tax_units.iloc[0]["filing_status"] == "HEAD_OF_HOUSEHOLD"
+        assert tax_units.iloc[0]["n_dependents"] == 1
+
+    def test_build_policyengine_entity_tables_does_not_infer_head_of_household_from_marital_status_alone(self):
+        pipeline = USMicroplexPipeline(USMicroplexBuildConfig())
+        population = pd.DataFrame(
+            {
+                "person_id": [1, 2],
+                "household_id": [10, 10],
+                "weight": [1.0, 1.0],
+                "age": [45, 12],
+                "income": [60_000.0, 0.0],
+                "relationship_to_head": [0, 2],
+                "marital_status": [5, 7],
+                "state_fips": [6, 6],
+                "tenure": [1, 1],
+            }
+        )
+
+        tables = pipeline.build_policyengine_entity_tables(population)
+        tax_units = tables.tax_units.sort_values("tax_unit_id").reset_index(drop=True)
+
+        assert len(tax_units) == 1
+        assert tax_units.iloc[0]["filing_status"] == "SINGLE"
         assert tax_units.iloc[0]["n_dependents"] == 1
 
     def test_build_policyengine_entity_tables_can_preserve_existing_tax_unit_ids(self):
@@ -859,6 +984,62 @@ class TestUSMicroplexPipeline:
         assert tax_units["tax_unit_id"].tolist() == [100, 200]
         assert tax_units["filing_status"].tolist() == ["JOINT", "SINGLE"]
         assert tax_units["n_dependents"].tolist() == [0, 0]
+
+    def test_build_policyengine_entity_tables_preserved_tax_units_require_reciprocal_spouse_pointer_for_joint(self):
+        pipeline = USMicroplexPipeline(
+            USMicroplexBuildConfig(policyengine_prefer_existing_tax_unit_ids=True)
+        )
+        population = pd.DataFrame(
+            {
+                "person_id": [1, 2],
+                "household_id": [10, 10],
+                "tax_unit_id": [100, 100],
+                "weight": [1.0, 1.0],
+                "age": [45, 43],
+                "income": [60_000.0, 15_000.0],
+                "relationship_to_head": [0, 1],
+                "person_number": [1, 2],
+                "spouse_person_number": [0, 0],
+                "marital_status": [5, 7],
+                "state_fips": [6, 6],
+                "tenure": [1, 1],
+            }
+        )
+
+        tables = pipeline.build_policyengine_entity_tables(population)
+        tax_units = tables.tax_units.sort_values("tax_unit_id").reset_index(drop=True)
+
+        assert tax_units["tax_unit_id"].tolist() == [100]
+        assert tax_units["filing_status"].tolist() == ["SINGLE"]
+        assert tax_units["n_dependents"].tolist() == [1]
+
+    def test_build_policyengine_entity_tables_preserved_tax_units_keep_joint_for_reciprocal_spouse_pointer(self):
+        pipeline = USMicroplexPipeline(
+            USMicroplexBuildConfig(policyengine_prefer_existing_tax_unit_ids=True)
+        )
+        population = pd.DataFrame(
+            {
+                "person_id": [1, 2],
+                "household_id": [10, 10],
+                "tax_unit_id": [100, 100],
+                "weight": [1.0, 1.0],
+                "age": [45, 43],
+                "income": [60_000.0, 15_000.0],
+                "relationship_to_head": [0, 1],
+                "person_number": [1, 2],
+                "spouse_person_number": [2, 1],
+                "marital_status": [1, 1],
+                "state_fips": [6, 6],
+                "tenure": [1, 1],
+            }
+        )
+
+        tables = pipeline.build_policyengine_entity_tables(population)
+        tax_units = tables.tax_units.sort_values("tax_unit_id").reset_index(drop=True)
+
+        assert tax_units["tax_unit_id"].tolist() == [100]
+        assert tax_units["filing_status"].tolist() == ["JOINT"]
+        assert tax_units["n_dependents"].tolist() == [0]
 
     def test_build_policyengine_entity_tables_falls_back_when_existing_tax_unit_ids_cross_households(self):
         pipeline = USMicroplexPipeline(
@@ -2460,6 +2641,10 @@ class TestUSMicroplexPipeline:
         output_path = pipeline.export_policyengine_dataset(result, tmp_path / "us_microplex.h5")
 
         assert output_path.exists()
+        with h5py.File(output_path, "r") as handle:
+            assert "county_fips" in handle
+            exported_counties = handle["county_fips"]["2024"][()]
+        assert set(np.asarray(exported_counties).tolist()) == {6037, 36061, 48201}
 
     def test_export_policyengine_dataset_passes_direct_overrides(
         self,
@@ -2509,6 +2694,36 @@ class TestUSMicroplexPipeline:
         augmented = pipeline._augment_policyengine_person_inputs(persons)
 
         assert augmented["non_sch_d_capital_gains"].tolist() == [250.0]
+
+    def test_augment_policyengine_person_inputs_derives_marital_status_flags_from_cps_codes(self):
+        pipeline = USMicroplexPipeline(USMicroplexBuildConfig())
+        persons = pd.DataFrame(
+            {
+                "age": [45, 52, 38],
+                "sex": [1, 2, 1],
+                "marital_status": [6, 4, 7],
+            }
+        )
+
+        augmented = pipeline._augment_policyengine_person_inputs(persons)
+
+        assert augmented["is_separated"].tolist() == [True, False, False]
+        assert augmented["is_surviving_spouse"].tolist() == [False, True, False]
+
+    def test_augment_policyengine_person_inputs_derives_marital_status_flags_from_filing_status_code(self):
+        pipeline = USMicroplexPipeline(USMicroplexBuildConfig())
+        persons = pd.DataFrame(
+            {
+                "age": [45, 52, 38],
+                "sex": [1, 2, 1],
+                "filing_status_code": [3, 5, 1],
+            }
+        )
+
+        augmented = pipeline._augment_policyengine_person_inputs(persons)
+
+        assert augmented["is_separated"].tolist() == [True, False, False]
+        assert augmented["is_surviving_spouse"].tolist() == [False, True, False]
 
     def test_calibrate_policyengine_tables_from_db(self, persons, households, tmp_path):
         db_path = tmp_path / "policyengine_targets.db"
@@ -6393,6 +6608,287 @@ class TestUSMicroplexPipeline:
         assert captured_fit_rows == [2]
         assert "spm_unit_id" in integration["seed_data"].columns
         assert integration["seed_data"]["snap"].tolist() == [120.0, 120.0, 0.0]
+
+    def test_strip_generated_entity_ids_drops_helper_ids_missing_from_scaffold(self):
+        pipeline = USMicroplexPipeline(
+            USMicroplexBuildConfig(
+                n_synthetic=6,
+                synthesis_backend="bootstrap",
+                calibration_backend="entropy",
+            )
+        )
+        cps_households = pd.DataFrame(
+            {
+                "household_id": [1],
+                "hh_weight": [100.0],
+                "state_fips": [6],
+                "tenure": [1],
+            }
+        )
+        cps_persons = pd.DataFrame(
+            {
+                "person_id": ["1:1", "1:2"],
+                "household_id": [1, 1],
+                "age": [40, 10],
+                "sex": [1, 2],
+                "education": [3, 1],
+                "employment_status": [1, 0],
+                "income": [40_000.0, 0.0],
+            }
+        )
+        cps_frame = ObservationFrame(
+            source=SourceDescriptor(
+                name="cps_like",
+                shareability=Shareability.PUBLIC,
+                time_structure=TimeStructure.REPEATED_CROSS_SECTION,
+                observations=(
+                    EntityObservation(
+                        entity=EntityType.HOUSEHOLD,
+                        key_column="household_id",
+                        variable_names=("state_fips", "tenure"),
+                        weight_column="hh_weight",
+                    ),
+                    EntityObservation(
+                        entity=EntityType.PERSON,
+                        key_column="person_id",
+                        variable_names=(
+                            "household_id",
+                            "age",
+                            "sex",
+                            "education",
+                            "employment_status",
+                            "income",
+                        ),
+                    ),
+                ),
+            ),
+            tables={
+                EntityType.HOUSEHOLD: cps_households,
+                EntityType.PERSON: cps_persons,
+            },
+            relationships=(
+                EntityRelationship(
+                    parent_entity=EntityType.HOUSEHOLD,
+                    child_entity=EntityType.PERSON,
+                    parent_key="household_id",
+                    child_key="household_id",
+                    cardinality=RelationshipCardinality.ONE_TO_MANY,
+                ),
+            ),
+        )
+        cps_input = pipeline.prepare_source_input(cps_frame)
+        frame = cps_persons.assign(
+            tax_unit_id=[100, 100],
+            family_id=[10, 10],
+            spm_unit_id=[20, 20],
+            marital_unit_id=[30, 31],
+        )
+
+        stripped = pipeline._strip_generated_entity_ids(
+            frame,
+            scaffold_input=cps_input,
+        )
+
+        assert "tax_unit_id" not in stripped.columns
+        assert "family_id" not in stripped.columns
+        assert "spm_unit_id" not in stripped.columns
+        assert "marital_unit_id" not in stripped.columns
+        assert stripped["person_id"].tolist() == ["1:1", "1:2"]
+
+    def test_strip_generated_entity_ids_preserves_observed_scaffold_ids(self):
+        pipeline = USMicroplexPipeline(
+            USMicroplexBuildConfig(
+                n_synthetic=6,
+                synthesis_backend="bootstrap",
+                calibration_backend="entropy",
+            )
+        )
+        cps_households = pd.DataFrame(
+            {
+                "household_id": [1],
+                "hh_weight": [100.0],
+                "state_fips": [6],
+                "tenure": [1],
+            }
+        )
+        cps_persons = pd.DataFrame(
+            {
+                "person_id": ["1:1", "1:2"],
+                "household_id": [1, 1],
+                "tax_unit_id": [100, 100],
+                "family_id": [10, 10],
+                "age": [40, 10],
+                "sex": [1, 2],
+                "education": [3, 1],
+                "employment_status": [1, 0],
+                "income": [40_000.0, 0.0],
+            }
+        )
+        cps_frame = ObservationFrame(
+            source=SourceDescriptor(
+                name="cps_like",
+                shareability=Shareability.PUBLIC,
+                time_structure=TimeStructure.REPEATED_CROSS_SECTION,
+                observations=(
+                    EntityObservation(
+                        entity=EntityType.HOUSEHOLD,
+                        key_column="household_id",
+                        variable_names=("state_fips", "tenure"),
+                        weight_column="hh_weight",
+                    ),
+                    EntityObservation(
+                        entity=EntityType.PERSON,
+                        key_column="person_id",
+                        variable_names=(
+                            "household_id",
+                            "tax_unit_id",
+                            "family_id",
+                            "age",
+                            "sex",
+                            "education",
+                            "employment_status",
+                            "income",
+                        ),
+                    ),
+                ),
+            ),
+            tables={
+                EntityType.HOUSEHOLD: cps_households,
+                EntityType.PERSON: cps_persons,
+            },
+            relationships=(
+                EntityRelationship(
+                    parent_entity=EntityType.HOUSEHOLD,
+                    child_entity=EntityType.PERSON,
+                    parent_key="household_id",
+                    child_key="household_id",
+                    cardinality=RelationshipCardinality.ONE_TO_MANY,
+                ),
+            ),
+        )
+        cps_input = pipeline.prepare_source_input(cps_frame)
+        frame = cps_persons.assign(
+            spm_unit_id=[20, 20],
+            marital_unit_id=[30, 31],
+        )
+
+        stripped = pipeline._strip_generated_entity_ids(
+            frame,
+            scaffold_input=cps_input,
+        )
+
+        assert stripped["tax_unit_id"].tolist() == [100, 100]
+        assert stripped["family_id"].tolist() == [10, 10]
+        assert "spm_unit_id" not in stripped.columns
+        assert "marital_unit_id" not in stripped.columns
+
+    def test_build_from_frames_drops_generated_entity_ids_before_synthesis(
+        self,
+        monkeypatch,
+    ):
+        cps_households = pd.DataFrame(
+            {
+                "household_id": [1],
+                "hh_weight": [100.0],
+                "state_fips": [6],
+                "tenure": [1],
+            }
+        )
+        cps_persons = pd.DataFrame(
+            {
+                "person_id": ["1:1", "1:2"],
+                "household_id": [1, 1],
+                "relationship_to_head": [0, 2],
+                "age": [40, 10],
+                "sex": [1, 2],
+                "education": [3, 1],
+                "employment_status": [1, 0],
+                "income": [40_000.0, 0.0],
+            }
+        )
+        cps_frame = ObservationFrame(
+            source=SourceDescriptor(
+                name="cps_like",
+                shareability=Shareability.PUBLIC,
+                time_structure=TimeStructure.REPEATED_CROSS_SECTION,
+                observations=(
+                    EntityObservation(
+                        entity=EntityType.HOUSEHOLD,
+                        key_column="household_id",
+                        variable_names=("state_fips", "tenure"),
+                        weight_column="hh_weight",
+                    ),
+                    EntityObservation(
+                        entity=EntityType.PERSON,
+                        key_column="person_id",
+                        variable_names=(
+                            "household_id",
+                            "relationship_to_head",
+                            "age",
+                            "sex",
+                            "education",
+                            "employment_status",
+                            "income",
+                        ),
+                    ),
+                ),
+            ),
+            tables={
+                EntityType.HOUSEHOLD: cps_households,
+                EntityType.PERSON: cps_persons,
+            },
+            relationships=(
+                EntityRelationship(
+                    parent_entity=EntityType.HOUSEHOLD,
+                    child_entity=EntityType.PERSON,
+                    parent_key="household_id",
+                    child_key="household_id",
+                    cardinality=RelationshipCardinality.ONE_TO_MANY,
+                ),
+            ),
+        )
+        pipeline = USMicroplexPipeline(
+            USMicroplexBuildConfig(
+                n_synthetic=2,
+                synthesis_backend="seed",
+                calibration_backend="entropy",
+            )
+        )
+        captured_seed_columns: list[str] = []
+
+        def fake_integrate(seed_data, *, scaffold_input, donor_inputs):
+            _ = scaffold_input, donor_inputs
+            return {
+                "seed_data": seed_data.assign(
+                    tax_unit_id=[100, 100],
+                    spm_unit_id=[200, 200],
+                    marital_unit_id=[300, 301],
+                ),
+                "integrated_variables": [],
+            }
+
+        def fake_synthesize(seed_data, synthesis_variables=None):
+            _ = synthesis_variables
+            captured_seed_columns[:] = seed_data.columns.tolist()
+            synthetic = seed_data.copy()
+            synthetic["weight"] = synthetic["hh_weight"].astype(float)
+            return synthetic, None, {}
+
+        def fake_calibrate(synthetic_data, targets):
+            _ = targets
+            return synthetic_data, {}
+
+        monkeypatch.setattr(pipeline, "_integrate_donor_sources", fake_integrate)
+        monkeypatch.setattr(pipeline, "synthesize", fake_synthesize)
+        monkeypatch.setattr(pipeline, "calibrate", fake_calibrate)
+
+        result = pipeline.build_from_frames([cps_frame])
+
+        assert "tax_unit_id" not in captured_seed_columns
+        assert "spm_unit_id" not in captured_seed_columns
+        assert "marital_unit_id" not in captured_seed_columns
+        assert "tax_unit_id" not in result.seed_data.columns
+        assert "spm_unit_id" not in result.seed_data.columns
 
     def test_build_from_frames_rank_matches_generated_donor_values(
         self,
