@@ -116,6 +116,27 @@ def test_default_policyengine_us_data_rebuild_checkpoint_config_skips_calibratio
     assert config.policyengine_selection_target_total_weight == 150_000_000.0
 
 
+def test_default_policyengine_us_data_rebuild_checkpoint_config_skips_inferred_total_weight_targets_for_no_calibration(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        "microplex_us.pipelines.pe_us_data_rebuild_checkpoint._infer_policyengine_baseline_household_weight_sum",
+        lambda dataset, *, target_period: 150_000_000.0,
+    )
+
+    config = default_policyengine_us_data_rebuild_checkpoint_config(
+        policyengine_baseline_dataset="/tmp/enhanced_cps_2024.h5",
+        policyengine_targets_db="/tmp/policy_data.db",
+        target_period=2024,
+        calibration_backend="none",
+    )
+
+    assert config.calibration_backend == "none"
+    assert config.policyengine_calibration_target_total_weight is None
+    assert config.policyengine_calibration_rescale_to_target_total_weight is False
+    assert config.policyengine_selection_target_total_weight is None
+
+
 def test_infer_policyengine_baseline_household_weight_sum_returns_none_when_weight_array_missing(
     tmp_path,
 ) -> None:

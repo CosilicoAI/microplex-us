@@ -735,7 +735,11 @@ def default_policyengine_us_data_rebuild_checkpoint_config(
         target_period=resolved_target_period,
     )
     resolved_overrides = dict(overrides)
-    if resolved_baseline_weight_sum is not None:
+    infer_total_weight_targets = (
+        resolved_baseline_weight_sum is not None
+        and resolved_overrides.get("calibration_backend") != "none"
+    )
+    if infer_total_weight_targets:
         resolved_overrides.setdefault(
             "policyengine_selection_target_total_weight",
             resolved_baseline_weight_sum,
