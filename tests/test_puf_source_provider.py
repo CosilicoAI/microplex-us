@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import pickle
 import sys
 import types
+from pathlib import Path
 
 import pandas as pd
 import pytest
@@ -505,6 +507,27 @@ def test_expand_to_persons_uses_pe_demographic_helpers_when_present():
     assert dependent_2["age"] == 27
 
 
+def test_expand_to_persons_clears_status_flags_for_non_head_members():
+    tax_units = pd.DataFrame(
+        {
+            "filing_status": ["SURVIVING_SPOUSE"],
+            "is_surviving_spouse": [True],
+            "weight": [1.0],
+            "household_id": ["widow-household"],
+            "exemptions_count": [3],
+            "_puf_recid": [202],
+            "_puf_agerange": [5],
+            "_puf_agedp1": [2],
+            "_puf_agedp2": [3],
+            "year": [2024],
+        }
+    )
+
+    persons = expand_to_persons(tax_units).sort_values("person_id").reset_index(drop=True)
+
+    assert persons["is_surviving_spouse"].tolist() == [True, False, False]
+
+
 def test_puf_source_provider_loads_observation_frame_from_local_files(tmp_path):
     puf = pd.DataFrame(
         {
@@ -830,6 +853,131 @@ def test_map_puf_variables_can_impute_pre_tax_contributions_with_injected_model(
     )
 
     assert mapped.loc[0, "pre_tax_contributions"] == 5_000.0
+
+
+def test_map_puf_variables_can_require_pre_tax_contribution_model(monkeypatch):
+    raw = pd.DataFrame(
+        {
+            "RECID": [101],
+            "MARS": [1],
+            "XTOT": [1],
+            "S006": [100.0],
+            "E00200": [50_000.0],
+            "AGE_HEAD": [45],
+            "GENDER": [1],
+        }
+    )
+
+    def _raise_missing_model(**_kwargs):
+        raise ModuleNotFoundError("policyengine_us_data")
+
+    monkeypatch.setattr(
+        puf_module,
+        "_default_pe_style_puf_pre_tax_contribution_model",
+        _raise_missing_model,
+    )
+
+    with pytest.raises(ModuleNotFoundError, match="policyengine_us_data"):
+        map_puf_variables(
+            raw,
+            impute_pre_tax_contributions=True,
+            require_pre_tax_contribution_model=True,
+        )
+
+
+def test_map_puf_variables_can_impute_pre_tax_contributions_via_policyengine_subprocess(
+    monkeypatch, tmp_path
+):
+    raw = pd.DataFrame(
+        {
+            "RECID": [101],
+            "MARS": [1],
+            "XTOT": [1],
+            "S006": [100.0],
+            "E00200": [50_000.0],
+            "AGE_HEAD": [45],
+            "GENDER": [1],
+        }
+    )
+    calls: dict[str, object] = {}
+
+    def _resolve_repo(_repo):
+        return tmp_path
+
+    def _resolve_python(_python, *, repo_root):
+        assert repo_root == tmp_path
+        return Path("/fake/python")
+
+    def _build_env(repo_root):
+        assert repo_root == tmp_path
+        return {"PE_ENV": "1"}
+
+    def _run(args, *, check, cwd, env):
+        calls["args"] = list(args)
+        calls["cwd"] = cwd
+        calls["env"] = dict(env)
+        assert check is True
+        out_path = Path(args[-1])
+        with out_path.open("wb") as handle:
+            pickle.dump(pd.DataFrame({"pre_tax_contributions": [4321.0]}), handle)
+
+    monkeypatch.setattr(puf_module, "resolve_policyengine_us_data_repo_root", _resolve_repo)
+    monkeypatch.setattr(puf_module, "resolve_policyengine_us_data_python", _resolve_python)
+    monkeypatch.setattr(puf_module, "build_policyengine_us_data_subprocess_env", _build_env)
+    monkeypatch.setattr(puf_module.subprocess, "run", _run)
+
+    mapped = map_puf_variables(
+        raw,
+        impute_pre_tax_contributions=True,
+        policyengine_us_data_repo=tmp_path,
+        policyengine_us_data_python="/fake/python",
+        require_pre_tax_contribution_model=True,
+    )
+
+    assert mapped.loc[0, "pre_tax_contributions"] == 4321.0
+    assert calls["cwd"] == tmp_path
+    assert calls["env"] == {"PE_ENV": "1"}
+
+
+def test_map_puf_variables_maps_widow_status_to_surviving_spouse():
+    raw = pd.DataFrame(
+        {
+            "RECID": [101],
+            "MARS": [5],
+            "XTOT": [1],
+            "S006": [100.0],
+            "E00200": [50_000.0],
+        }
+    )
+
+    mapped = map_puf_variables(
+        raw,
+        impute_pre_tax_contributions=False,
+    )
+
+    assert mapped.loc[0, "filing_status"] == "SURVIVING_SPOUSE"
+    assert bool(mapped.loc[0, "is_surviving_spouse"])
+
+
+def test_map_puf_variables_does_not_infer_is_separated_from_mars_code():
+    raw = pd.DataFrame(
+        {
+            "RECID": [101],
+            "MARS": [3],
+            "XTOT": [1],
+            "S006": [100.0],
+            "E00200": [50_000.0],
+        }
+    )
+
+    mapped = map_puf_variables(
+        raw,
+        impute_pre_tax_contributions=False,
+    )
+
+    assert mapped.loc[0, "filing_status"] == "SEPARATE"
+    assert "is_separated" not in mapped.columns
+    assert not bool(mapped.loc[0, "is_surviving_spouse"])
 
 
 def test_impute_missing_puf_demographics_uses_qrf_predictions(monkeypatch):

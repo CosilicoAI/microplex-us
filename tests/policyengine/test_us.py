@@ -40,6 +40,7 @@ from microplex_us.policyengine.us import (
     materialize_policyengine_us_variables,
     materialize_policyengine_us_variables_safely,
     project_frame_to_time_period_arrays,
+    resolve_policyengine_excluded_export_variables,
     write_policyengine_us_time_period_dataset,
 )
 
@@ -1287,7 +1288,7 @@ class TestPolicyEngineUSConstraintCompilation:
                 "marital_unit_id": [7000, 7000],
                 "age": [34, 12],
                 "age_group": ["18-34", "0-17"],
-                "employment_income": [20_000.0, 0.0],
+                "employment_income_before_lsr": [20_000.0, 0.0],
             }
         )
         tables = PolicyEngineUSEntityTableBundle(
@@ -1317,7 +1318,7 @@ class TestPolicyEngineUSConstraintCompilation:
             variables = {
                 "age": FakeVariable(FakeEntity("person")),
                 "age_group": FakeVariable(FakeEntity("person")),
-                "employment_income": FakeVariable(FakeEntity("person")),
+                "employment_income_before_lsr": FakeVariable(FakeEntity("person")),
                 "state_fips": FakeVariable(FakeEntity("household")),
                 "snap": FakeVariable(
                     FakeEntity("household"),
@@ -1332,7 +1333,7 @@ class TestPolicyEngineUSConstraintCompilation:
                 _ = dataset_year, kwargs
                 with h5py.File(dataset, "r") as handle:
                     assert "age" in handle
-                    assert "employment_income" in handle
+                    assert "employment_income_before_lsr" in handle
                     assert "state_fips" in handle
                     assert "age_group" not in handle
                     assert len(handle["age"]["2024"]) == 2
@@ -1397,8 +1398,16 @@ class TestPolicyEngineUSConstraintCompilation:
             simulation_cls=None,
             microsimulation_kwargs=None,
             temp_dir=None,
+            direct_override_variables=(),
         ):
-            _ = period, dataset_year, simulation_cls, microsimulation_kwargs, temp_dir
+            _ = (
+                period,
+                dataset_year,
+                simulation_cls,
+                microsimulation_kwargs,
+                temp_dir,
+                direct_override_variables,
+            )
             if tuple(variables) == ("a", "b"):
                 raise RuntimeError("batch failed")
             if tuple(variables) == ("a",):
@@ -1832,10 +1841,41 @@ class TestPolicyEngineUSProjection:
         assert overlaps == []
         assert "estate_income" in SAFE_POLICYENGINE_US_EXPORT_VARIABLES
         assert "child_support_expense" in SAFE_POLICYENGINE_US_EXPORT_VARIABLES
+        assert "farm_operations_income" in SAFE_POLICYENGINE_US_EXPORT_VARIABLES
+        assert "farm_rent_income" in SAFE_POLICYENGINE_US_EXPORT_VARIABLES
+        assert "health_savings_account_ald" in SAFE_POLICYENGINE_US_EXPORT_VARIABLES
         assert "non_sch_d_capital_gains" not in SAFE_POLICYENGINE_US_EXPORT_VARIABLES
         assert "receives_wic" in SAFE_POLICYENGINE_US_EXPORT_VARIABLES
         assert "is_separated" in SAFE_POLICYENGINE_US_EXPORT_VARIABLES
         assert "is_surviving_spouse" in SAFE_POLICYENGINE_US_EXPORT_VARIABLES
+        assert "self_employed_health_insurance_ald" not in SAFE_POLICYENGINE_US_EXPORT_VARIABLES
+        assert "self_employed_pension_contribution_ald" not in SAFE_POLICYENGINE_US_EXPORT_VARIABLES
+
+    def test_resolve_policyengine_excluded_export_variables_preserves_explicit_overrides(self):
+        class FakeVariable:
+            def __init__(self, adds=None, subtracts=None, formulas=None):
+                self.adds = adds or []
+                self.subtracts = subtracts or []
+                self.formulas = formulas or {}
+
+        class FakeSystem:
+            variables = {
+                "employment_income": FakeVariable(),
+                "self_employed_pension_contribution_ald_person": FakeVariable(
+                    formulas={"2024": object()}
+                ),
+                "self_employed_pension_contribution_ald": FakeVariable(
+                    adds=["self_employed_pension_contribution_ald_person"]
+                ),
+            }
+
+        excluded = resolve_policyengine_excluded_export_variables(
+            FakeSystem(),
+            ["employment_income", "self_employed_pension_contribution_ald"],
+            direct_override_variables=("self_employed_pension_contribution_ald",),
+        )
+
+        assert excluded == set()
 
     def test_build_policyengine_us_export_variable_maps_supports_exact_pre_sim_names(self):
         class FakeEntity:

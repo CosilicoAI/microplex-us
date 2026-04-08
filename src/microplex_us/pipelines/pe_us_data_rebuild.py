@@ -78,8 +78,11 @@ def default_policyengine_us_data_rebuild_config(
         donor_imputer_qrf_zero_threshold=0.05,
         prefer_cached_cps_asec_source=False,
         policyengine_direct_override_variables=(
+            "health_savings_account_ald",
             "non_sch_d_capital_gains",
             "pre_tax_contributions",
+            "self_employed_health_insurance_ald",
+            "self_employed_pension_contribution_ald",
         ),
         policyengine_prefer_existing_tax_unit_ids=False,
     )

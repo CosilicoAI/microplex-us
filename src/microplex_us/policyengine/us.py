@@ -205,8 +205,11 @@ SAFE_POLICYENGINE_US_EXPORT_VARIABLES: set[str] = {
     "partnership_s_corp_income",
     "estate_income",
     "farm_income",
+    "farm_operations_income",
+    "farm_rent_income",
     "has_esi",
     "has_marketplace_health_coverage",
+    "health_savings_account_ald",
     "is_separated",
     "is_surviving_spouse",
     "net_worth",
@@ -1154,6 +1157,22 @@ def detect_policyengine_pseudo_inputs(
     return pseudo_inputs
 
 
+def resolve_policyengine_excluded_export_variables(
+    tax_benefit_system: Any,
+    exported_inputs: list[str] | tuple[str, ...],
+    *,
+    direct_override_variables: tuple[str, ...] = (),
+) -> set[str]:
+    """Resolve pseudo-input exports to exclude, preserving explicit overrides."""
+    excluded_variables = detect_policyengine_pseudo_inputs(
+        tax_benefit_system,
+        exported_inputs,
+    )
+    if direct_override_variables:
+        excluded_variables -= set(direct_override_variables)
+    return excluded_variables
+
+
 def materialize_policyengine_us_variables(
     tables: PolicyEngineUSEntityTableBundle,
     *,
@@ -1185,9 +1204,10 @@ def materialize_policyengine_us_variables(
             for target in variable_map.values()
         }
     )
-    excluded_variables = detect_policyengine_pseudo_inputs(
+    excluded_variables = resolve_policyengine_excluded_export_variables(
         tax_benefit_system,
         exported_inputs,
+        direct_override_variables=direct_override_variables,
     )
     arrays = build_policyengine_us_time_period_arrays(
         tables,

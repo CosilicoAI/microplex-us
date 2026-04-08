@@ -60,11 +60,11 @@ from microplex_us.policyengine.us import (
     build_policyengine_us_export_variable_maps,
     build_policyengine_us_time_period_arrays,
     compile_supported_policyengine_us_household_linear_constraints,
-    detect_policyengine_pseudo_inputs,
     filter_supported_policyengine_us_targets,
     infer_policyengine_us_variable_bindings,
     materialize_policyengine_us_variables_safely,
     policyengine_us_variables_to_materialize,
+    resolve_policyengine_excluded_export_variables,
     write_policyengine_us_time_period_dataset,
 )
 from microplex_us.variables import (
@@ -2170,7 +2170,7 @@ class USMicroplexPipeline:
             tax_benefit_system=tax_benefit_system,
             direct_override_variables=export_direct_override_variables,
         )
-        excluded_variables = detect_policyengine_pseudo_inputs(
+        excluded_variables = resolve_policyengine_excluded_export_variables(
             tax_benefit_system,
             sorted(
                 {
@@ -2179,6 +2179,7 @@ class USMicroplexPipeline:
                     for target in variable_map.values()
                 }
             ),
+            direct_override_variables=export_direct_override_variables,
         )
         arrays = build_policyengine_us_time_period_arrays(
             tables,
@@ -3250,6 +3251,9 @@ class USMicroplexPipeline:
                 for person_id in unit_person_ids:
                     person_to_tax_unit[person_id] = global_tax_unit_id
                     assigned_person_ids.add(person_id)
+                unit_persons = hh_persons.loc[
+                    hh_persons["person_id"].astype(int).isin(unit_person_ids)
+                ].copy()
                 tax_unit_rows.append(
                     {
                         "tax_unit_id": global_tax_unit_id,
@@ -3260,6 +3264,7 @@ class USMicroplexPipeline:
                         "n_dependents": int(unit.get("n_dependents", 0)),
                         "total_income": float(unit.get("total_income", 0.0)),
                         "tax_liability": float(unit.get("tax_liability", 0.0)),
+                        **self._aggregate_policyengine_tax_unit_input_columns(unit_persons),
                     }
                 )
 
@@ -3272,6 +3277,9 @@ class USMicroplexPipeline:
                 global_tax_unit_id = next_tax_unit_id
                 next_tax_unit_id += 1
                 person_to_tax_unit[person_id] = global_tax_unit_id
+                unit_persons = hh_persons.loc[
+                    hh_persons["person_id"].astype(int).eq(person_id)
+                ].copy()
                 tax_unit_rows.append(
                     {
                         "tax_unit_id": global_tax_unit_id,
@@ -3284,6 +3292,7 @@ class USMicroplexPipeline:
                             ].iloc[0]
                         ),
                         "tax_liability": 0.0,
+                        **self._aggregate_policyengine_tax_unit_input_columns(unit_persons),
                     }
                 )
 
@@ -3361,10 +3370,32 @@ class USMicroplexPipeline:
                         .sum()
                     ),
                     "tax_liability": 0.0,
+                    **self._aggregate_policyengine_tax_unit_input_columns(ordered),
                 }
             )
 
         return pd.DataFrame(tax_unit_rows), person_rows
+
+    def _aggregate_policyengine_tax_unit_input_columns(
+        self,
+        unit_persons: pd.DataFrame,
+    ) -> dict[str, float]:
+        columns = (
+            "health_savings_account_ald",
+            "self_employed_health_insurance_ald",
+            "self_employed_pension_contribution_ald",
+        )
+        aggregated: dict[str, float] = {}
+        for column in columns:
+            if column not in unit_persons.columns:
+                continue
+            values = pd.to_numeric(unit_persons[column], errors="coerce").fillna(0.0)
+            nonzero_values = values.loc[~np.isclose(values.to_numpy(dtype=float), 0.0)]
+            if len(nonzero_values) > 1 and nonzero_values.nunique(dropna=True) == 1:
+                aggregated[column] = float(nonzero_values.iloc[0])
+                continue
+            aggregated[column] = float(values.sum())
+        return aggregated
 
     def _split_preserved_tax_unit_members(
         self,
@@ -3628,12 +3659,12 @@ class USMicroplexPipeline:
         self,
         filer_rows: pd.DataFrame,
     ) -> bool:
+        if "marital_status" not in filer_rows.columns:
+            return True
         marital_status = pd.to_numeric(
-            filer_rows.get("marital_status"),
+            pd.Series(filer_rows["marital_status"]),
             errors="coerce",
         )
-        if marital_status is None:
-            return True
         observed = marital_status.dropna().astype(int)
         if observed.empty:
             return True
@@ -4140,7 +4171,16 @@ class USMicroplexPipeline:
         )
         result["partnership_s_corp_income"] = first_present("partnership_s_corp_income")
         result["farm_income"] = first_present("farm_income")
+        result["farm_operations_income"] = first_present("farm_operations_income")
+        result["farm_rent_income"] = first_present("farm_rent_income")
         result["rental_income"] = first_present("rental_income")
+        result["health_savings_account_ald"] = first_present("health_savings_account_ald")
+        result["self_employed_health_insurance_ald"] = first_present(
+            "self_employed_health_insurance_ald"
+        )
+        result["self_employed_pension_contribution_ald"] = first_present(
+            "self_employed_pension_contribution_ald"
+        )
         result["taxable_private_pension_income"] = first_present(
             "taxable_private_pension_income",
             "taxable_pension_income",

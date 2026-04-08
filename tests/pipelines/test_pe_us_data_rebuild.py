@@ -77,8 +77,11 @@ def test_default_policyengine_us_data_rebuild_config_uses_incumbent_defaults() -
     assert config.donor_imputer_condition_selection == "pe_prespecified"
     assert config.donor_imputer_excluded_variables == ("filing_status_code",)
     assert config.policyengine_direct_override_variables == (
+        "health_savings_account_ald",
         "non_sch_d_capital_gains",
         "pre_tax_contributions",
+        "self_employed_health_insurance_ald",
+        "self_employed_pension_contribution_ald",
     )
     assert config.policyengine_prefer_existing_tax_unit_ids is False
     assert config.random_seed == 123

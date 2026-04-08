@@ -6,10 +6,15 @@ and maps to common variable schema for multi-survey fusion.
 
 from __future__ import annotations
 
+import pickle
+import subprocess
+import sys
+import tempfile
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from functools import cache, lru_cache
 from pathlib import Path
+from textwrap import dedent
 from typing import Any
 
 import numpy as np
@@ -32,6 +37,11 @@ from microplex_us.data_sources.share_imputation import (
     GroupedShareModel,
     fit_grouped_share_model,
     predict_grouped_component_shares,
+)
+from microplex_us.pipelines.pe_native_scores import (
+    build_policyengine_us_data_subprocess_env,
+    resolve_policyengine_us_data_python,
+    resolve_policyengine_us_data_repo_root,
 )
 from microplex_us.source_manifests import load_us_source_manifest
 from microplex_us.source_registry import resolve_source_variable_capabilities
@@ -295,6 +305,45 @@ class PEStyleQRFImputationModel:
     predictors: tuple[str, ...]
     imputed_variable: str
     fitted_model: Any
+
+
+@dataclass(frozen=True)
+class PEStyleSubprocessImputationPredictor:
+    """Run PE-style QRF imputation in the PE-US-data environment."""
+
+    policyengine_us_data_repo: str | Path
+    policyengine_us_data_python: str | Path | None = None
+
+    def predict(self, X_test: pd.DataFrame) -> pd.DataFrame:
+        resolved_repo = resolve_policyengine_us_data_repo_root(
+            self.policyengine_us_data_repo
+        )
+        resolved_python = resolve_policyengine_us_data_python(
+            self.policyengine_us_data_python,
+            repo_root=resolved_repo,
+        )
+        env = build_policyengine_us_data_subprocess_env(resolved_repo)
+        with tempfile.TemporaryDirectory(prefix="microplex-us-puf-pretax-") as tempdir:
+            predictors_path = Path(tempdir) / "predictors.pkl"
+            predictions_path = Path(tempdir) / "predictions.pkl"
+            with predictors_path.open("wb") as handle:
+                pickle.dump(pd.DataFrame(X_test), handle)
+            subprocess.run(
+                [
+                    str(resolved_python),
+                    "-c",
+                    _build_pe_style_puf_pre_tax_subprocess_script(),
+                    str(resolved_repo),
+                    str(predictors_path),
+                    str(predictions_path),
+                ],
+                check=True,
+                cwd=resolved_repo,
+                env=env,
+            )
+            with predictions_path.open("rb") as handle:
+                predictions = pickle.load(handle)
+        return pd.DataFrame(predictions)
 
 
 PUF_DEMOGRAPHIC_VARIABLES = (
@@ -688,6 +737,10 @@ def map_puf_variables(
     random_seed: int = 42,
     impute_pre_tax_contributions: bool = False,
     pre_tax_contribution_model: PEStyleQRFImputationModel | None = None,
+    policyengine_us_data_repo: str | Path | None = None,
+    policyengine_us_data_python: str | Path | None = None,
+    pre_tax_training_year: int = 2024,
+    require_pre_tax_contribution_model: bool = False,
 ) -> pd.DataFrame:
     """Map PUF variable codes to common names."""
     result = pd.DataFrame(index=puf.index)
@@ -762,9 +815,11 @@ def map_puf_variables(
         2: "JOINT",
         3: "SEPARATE",
         4: "HEAD_OF_HOUSEHOLD",
-        5: "WIDOW",
+        5: "SURVIVING_SPOUSE",
     }
     result["filing_status"] = result["filing_status_code"].map(filing_status_map).fillna("UNKNOWN")
+    filing_status_code = pd.to_numeric(result["filing_status_code"], errors="coerce").fillna(0).astype(int)
+    result["is_surviving_spouse"] = filing_status_code.eq(5)
 
     # Add age from demographics if available
     if "age" in puf.columns:
@@ -804,19 +859,36 @@ def map_puf_variables(
         model = pre_tax_contribution_model
         if model is None:
             try:
-                model = _default_pe_style_puf_pre_tax_contribution_model()
-            except (ImportError, ValueError):
+                model = _default_pe_style_puf_pre_tax_contribution_model(
+                    policyengine_us_data_repo=policyengine_us_data_repo,
+                    policyengine_us_data_python=policyengine_us_data_python,
+                    pre_tax_training_year=pre_tax_training_year,
+                )
+            except (FileNotFoundError, ImportError, ValueError):
+                if require_pre_tax_contribution_model:
+                    raise
                 model = None
         if model is not None:
             predictor_frame = result.loc[:, model.predictors].copy()
             predictor_frame = predictor_frame.apply(
                 lambda column: pd.to_numeric(column, errors="coerce").fillna(0.0)
             )
-            predictions = model.fitted_model.predict(X_test=predictor_frame)
-            result[model.imputed_variable] = pd.to_numeric(
-                predictions[model.imputed_variable],
-                errors="coerce",
-            ).fillna(0.0)
+            try:
+                predictions = model.fitted_model.predict(X_test=predictor_frame)
+            except (FileNotFoundError, ImportError, ValueError, subprocess.CalledProcessError):
+                if require_pre_tax_contribution_model:
+                    raise
+                model = None
+            else:
+                result[model.imputed_variable] = pd.to_numeric(
+                    predictions[model.imputed_variable],
+                    errors="coerce",
+                ).fillna(0.0)
+        elif require_pre_tax_contribution_model:
+            raise RuntimeError(
+                "pre_tax_contributions imputation was requested but no PE-style "
+                "pre-tax contribution model was available"
+            )
 
     # Mark survey source
     result["_survey"] = "puf"
@@ -1139,13 +1211,170 @@ def _default_pe_style_puf_social_security_share_model(
     )
 
 
-@lru_cache(maxsize=1)
-def _default_pe_style_puf_pre_tax_contribution_model() -> PEStyleQRFImputationModel:
+def _ensure_policyengine_us_data_repo_on_sys_path(
+    policyengine_us_data_repo: str | Path | None,
+) -> None:
+    if policyengine_us_data_repo is None:
+        return
+    repo_root = Path(policyengine_us_data_repo).expanduser().resolve()
+    if not repo_root.exists():
+        raise ValueError(
+            f"PolicyEngine US-data repo does not exist: {repo_root}"
+        )
+    repo_root_str = str(repo_root)
+    if repo_root_str not in sys.path:
+        sys.path.insert(0, repo_root_str)
+
+
+def _build_pe_style_puf_pre_tax_subprocess_script() -> str:
+    return dedent(
+        """
+import pickle
+import sys
+
+import pandas as pd
+
+repo_root = sys.argv[1]
+predictors_path = sys.argv[2]
+predictions_path = sys.argv[3]
+
+if repo_root not in sys.path:
+    sys.path.insert(0, repo_root)
+
+from microimpute.models.qrf import QRF
+from policyengine_us import Microsimulation
+from policyengine_us_data.datasets.cps import CPS_2021
+
+with open(predictors_path, "rb") as handle:
+    X_test = pickle.load(handle)
+X_test = pd.DataFrame(X_test)
+
+predictors = ["employment_income", "age", "is_male"]
+cps = Microsimulation(dataset=CPS_2021)
+cps.subsample(10_000)
+cps_df = cps.calculate_dataframe(
+    [*predictors, "household_weight", "pre_tax_contributions"]
+)
+train = cps_df.loc[:, [*predictors, "pre_tax_contributions"]].copy()
+train = train.apply(lambda column: pd.to_numeric(column, errors="coerce").fillna(0.0))
+X_test = X_test.loc[:, predictors].copy()
+X_test = X_test.apply(lambda column: pd.to_numeric(column, errors="coerce").fillna(0.0))
+
+qrf = QRF(log_level="WARNING", memory_efficient=True)
+fitted_model = qrf.fit(
+    X_train=train,
+    predictors=predictors,
+    imputed_variables=["pre_tax_contributions"],
+    n_jobs=1,
+)
+predictions = fitted_model.predict(X_test=X_test)
+
+with open(predictions_path, "wb") as handle:
+    pickle.dump(
+        pd.DataFrame(
+            {
+                "pre_tax_contributions": pd.to_numeric(
+                    predictions["pre_tax_contributions"],
+                    errors="coerce",
+                ).fillna(0.0)
+            }
+        ),
+        handle,
+    )
+"""
+    ).strip()
+
+
+def _load_pe_extended_cps_pre_tax_training_frame(
+    *,
+    policyengine_us_data_repo: str | Path,
+    training_year: int,
+) -> pd.DataFrame:
+    import h5py
+
+    repo_root = Path(policyengine_us_data_repo).expanduser().resolve()
+    storage_dir = repo_root / "policyengine_us_data" / "storage"
+    candidate_paths = (
+        storage_dir / f"extended_cps_{int(training_year)}.h5",
+        storage_dir / "extended_cps_2024.h5",
+    )
+    dataset_path = next((path for path in candidate_paths if path.exists()), None)
+    if dataset_path is None:
+        raise FileNotFoundError(
+            "Could not locate an extended CPS training artifact for PE-style "
+            f"pre-tax contributions under {storage_dir}"
+        )
+
+    with h5py.File(dataset_path, "r") as h5:
+        period_key = str(int(training_year))
+        if period_key not in h5["pre_tax_contributions"]:
+            period_key = sorted(h5["pre_tax_contributions"].keys())[-1]
+        train = pd.DataFrame(
+            {
+                "employment_income": np.asarray(
+                    h5["employment_income"][period_key], dtype=float
+                ),
+                "age": np.asarray(h5["age"][period_key], dtype=float),
+                "is_male": 1.0
+                - np.asarray(h5["is_female"][period_key], dtype=float),
+                "pre_tax_contributions": np.asarray(
+                    h5["pre_tax_contributions"][period_key], dtype=float
+                ),
+            }
+        )
+    if len(train) > 10_000:
+        train = train.sample(n=10_000, random_state=0)
+    return train
+
+
+@lru_cache(maxsize=4)
+def _default_pe_style_puf_pre_tax_contribution_model(
+    *,
+    policyengine_us_data_repo: str | Path | None = None,
+    policyengine_us_data_python: str | Path | None = None,
+    pre_tax_training_year: int = 2024,
+) -> PEStyleQRFImputationModel:
+    predictors = ("employment_income", "age", "is_male")
+    if policyengine_us_data_repo is not None:
+        try:
+            train = _load_pe_extended_cps_pre_tax_training_frame(
+                policyengine_us_data_repo=policyengine_us_data_repo,
+                training_year=pre_tax_training_year,
+            )
+        except (FileNotFoundError, KeyError, OSError, ValueError):
+            return PEStyleQRFImputationModel(
+                predictors=predictors,
+                imputed_variable="pre_tax_contributions",
+                fitted_model=PEStyleSubprocessImputationPredictor(
+                    policyengine_us_data_repo=policyengine_us_data_repo,
+                    policyengine_us_data_python=policyengine_us_data_python,
+                ),
+            )
+
+        from microimpute.models.qrf import QRF
+
+        train = train.apply(
+            lambda column: pd.to_numeric(column, errors="coerce").fillna(0.0)
+        )
+        qrf = QRF(log_level="WARNING", memory_efficient=True)
+        fitted_model = qrf.fit(
+            X_train=train,
+            predictors=list(predictors),
+            imputed_variables=["pre_tax_contributions"],
+            n_jobs=1,
+        )
+        return PEStyleQRFImputationModel(
+            predictors=predictors,
+            imputed_variable="pre_tax_contributions",
+            fitted_model=fitted_model,
+        )
+
     from microimpute.models.qrf import QRF
     from policyengine_us import Microsimulation
+
+    _ensure_policyengine_us_data_repo_on_sys_path(policyengine_us_data_repo)
     from policyengine_us_data.datasets.cps import CPS_2021
 
-    predictors = ("employment_income", "age", "is_male")
     cps = Microsimulation(dataset=CPS_2021)
     cps.subsample(10_000)
     cps_df = cps.calculate_dataframe(
@@ -1395,6 +1624,7 @@ def expand_to_persons(df: pd.DataFrame) -> pd.DataFrame:
             spouse["is_dependent"] = 0
             spouse["person_id"] = f"{pe_tax_unit_id}:2" if has_pe_demographics else f"{idx}_spouse"
             spouse["tax_unit_id"] = pe_tax_unit_id if has_pe_demographics else str(idx)
+            spouse["is_surviving_spouse"] = False
 
             if has_pe_demographics:
                 spouse["age"] = _decode_puf_filer_age(row.get("_puf_agerange"), fallback=row.get("age", 40.0))
@@ -1424,6 +1654,7 @@ def expand_to_persons(df: pd.DataFrame) -> pd.DataFrame:
                     row.get(f"_puf_agedp{dependent_idx + 1}")
                 )
                 dependent["is_male"] = 0.0
+                dependent["is_surviving_spouse"] = False
                 for column in split_columns:
                     dependent[column] = 0.0
                 records.append(dependent)
@@ -1445,7 +1676,11 @@ def load_puf(
     social_security_split_strategy: str = SOCIAL_SECURITY_SPLIT_STRATEGY_GROUPED_SHARE,
     uprating_mode: str = PUF_UPRATING_MODE_INTERPOLATED,
     policyengine_us_data_repo: str | Path | None = None,
+    policyengine_us_data_python: str | Path | None = None,
+    impute_pre_tax_contributions: bool = False,
+    pre_tax_training_year: int = 2024,
     soi_path: str | Path | None = None,
+    require_pre_tax_contribution_model: bool = False,
 ) -> pd.DataFrame:
     """Load and process PUF for multi-survey fusion.
 
@@ -1474,7 +1709,14 @@ def load_puf(
         )
 
     # Map to common variables
-    df = map_puf_variables(raw, impute_pre_tax_contributions=True)
+    df = map_puf_variables(
+        raw,
+        impute_pre_tax_contributions=impute_pre_tax_contributions,
+        policyengine_us_data_repo=policyengine_us_data_repo,
+        policyengine_us_data_python=policyengine_us_data_python,
+        pre_tax_training_year=pre_tax_training_year,
+        require_pre_tax_contribution_model=require_pre_tax_contribution_model,
+    )
 
     # Uprate to target year
     if resolved_uprating_mode == PUF_UPRATING_MODE_PE_SOI:
@@ -1594,7 +1836,11 @@ def _build_puf_tax_units(
     random_seed: int = 42,
     uprating_mode: str = PUF_UPRATING_MODE_INTERPOLATED,
     policyengine_us_data_repo: str | Path | None = None,
+    policyengine_us_data_python: str | Path | None = None,
+    impute_pre_tax_contributions: bool = False,
+    pre_tax_training_year: int = 2024,
     soi_path: str | Path | None = None,
+    require_pre_tax_contribution_model: bool = False,
 ) -> pd.DataFrame:
     """Map raw PUF records into a normalized tax-unit table."""
     resolved_uprating_mode = _normalize_puf_uprating_mode(uprating_mode)
@@ -1610,7 +1856,11 @@ def _build_puf_tax_units(
     tax_units = map_puf_variables(
         raw,
         random_seed=random_seed,
-        impute_pre_tax_contributions=True,
+        impute_pre_tax_contributions=impute_pre_tax_contributions,
+        policyengine_us_data_repo=policyengine_us_data_repo,
+        policyengine_us_data_python=policyengine_us_data_python,
+        pre_tax_training_year=pre_tax_training_year,
+        require_pre_tax_contribution_model=require_pre_tax_contribution_model,
     )
     if resolved_uprating_mode == PUF_UPRATING_MODE_PE_SOI:
         if target_year > PE_PUF_SOI_END_YEAR:
@@ -1749,7 +1999,11 @@ class PUFSourceProvider:
     uprating_mode: str = PUF_UPRATING_MODE_INTERPOLATED
     cps_reference_year: int | None = None
     policyengine_us_data_repo: str | Path | None = None
+    policyengine_us_data_python: str | Path | None = None
+    impute_pre_tax_contributions: bool = False
+    pre_tax_training_year: int = 2024
     soi_path: str | Path | None = None
+    require_pre_tax_contribution_model: bool = False
     social_security_split_strategy: str = SOCIAL_SECURITY_SPLIT_STRATEGY_GROUPED_SHARE
     shareability: Shareability = Shareability.PUBLIC
     loader: Callable[[Path | None], tuple[Path, Path | None]] | None = None
@@ -1829,7 +2083,29 @@ class PUFSourceProvider:
             "policyengine_us_data_repo",
             self.policyengine_us_data_repo,
         )
+        policyengine_us_data_python = provider_filters.get(
+            "policyengine_us_data_python",
+            self.policyengine_us_data_python,
+        )
+        impute_pre_tax_contributions = bool(
+            provider_filters.get(
+                "impute_pre_tax_contributions",
+                self.impute_pre_tax_contributions,
+            )
+        )
+        pre_tax_training_year = int(
+            provider_filters.get(
+                "pre_tax_training_year",
+                self.pre_tax_training_year,
+            )
+        )
         soi_path = provider_filters.get("soi_path", self.soi_path)
+        require_pre_tax_contribution_model = bool(
+            provider_filters.get(
+                "require_pre_tax_contribution_model",
+                self.require_pre_tax_contribution_model,
+            )
+        )
         if puf_path is None:
             loader = self.loader or download_puf
             loaded_puf_path, loaded_demographics_path = loader(self.cache_dir)
@@ -1852,7 +2128,11 @@ class PUFSourceProvider:
             random_seed=int(provider_filters.get("random_seed", 0)),
             uprating_mode=uprating_mode,
             policyengine_us_data_repo=policyengine_us_data_repo,
+            policyengine_us_data_python=policyengine_us_data_python,
+            impute_pre_tax_contributions=impute_pre_tax_contributions,
+            pre_tax_training_year=pre_tax_training_year,
             soi_path=soi_path,
+            require_pre_tax_contribution_model=require_pre_tax_contribution_model,
         )
         persons = _tax_units_to_persons(
             tax_units,

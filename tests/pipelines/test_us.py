@@ -455,7 +455,7 @@ class TestUSMicroplexPipeline:
     def test_bootstrap_explicit_missing_strata_column_raises(self, persons, households):
         config = USMicroplexBuildConfig(
             synthesis_backend="bootstrap",
-            bootstrap_strata_columns=("county_fips",),
+            bootstrap_strata_columns=("missing_geo",),
         )
         pipeline = USMicroplexPipeline(config)
         seed = pipeline.prepare_seed_data(persons, households)
@@ -984,6 +984,56 @@ class TestUSMicroplexPipeline:
         assert tax_units["tax_unit_id"].tolist() == [100, 200]
         assert tax_units["filing_status"].tolist() == ["JOINT", "SINGLE"]
         assert tax_units["n_dependents"].tolist() == [0, 0]
+
+    def test_build_policyengine_entity_tables_preserves_tax_unit_agi_inputs(self):
+        pipeline = USMicroplexPipeline(
+            USMicroplexBuildConfig(policyengine_prefer_existing_tax_unit_ids=True)
+        )
+        population = pd.DataFrame(
+            {
+                "person_id": [1, 2],
+                "household_id": [10, 10],
+                "tax_unit_id": [100, 100],
+                "weight": [1.0, 1.0],
+                "age": [45, 43],
+                "income": [60_000.0, 15_000.0],
+                "relationship_to_head": [0, 1],
+                "filing_status": ["JOINT", "JOINT"],
+                "health_savings_account_ald": [60.0, 15.0],
+                "self_employed_health_insurance_ald": [20.0, 5.0],
+                "self_employed_pension_contribution_ald": [30.0, 10.0],
+            }
+        )
+
+        tables = pipeline.build_policyengine_entity_tables(population)
+        tax_units = tables.tax_units.sort_values("tax_unit_id").reset_index(drop=True)
+
+        assert tax_units["health_savings_account_ald"].tolist() == [75.0]
+        assert tax_units["self_employed_health_insurance_ald"].tolist() == [25.0]
+        assert tax_units["self_employed_pension_contribution_ald"].tolist() == [40.0]
+
+    def test_build_policyengine_entity_tables_deduplicates_repeated_tax_unit_ald_values(self):
+        pipeline = USMicroplexPipeline(
+            USMicroplexBuildConfig(policyengine_prefer_existing_tax_unit_ids=True)
+        )
+        population = pd.DataFrame(
+            {
+                "person_id": [1, 2],
+                "household_id": [10, 10],
+                "tax_unit_id": [100, 100],
+                "weight": [1.0, 1.0],
+                "age": [45, 43],
+                "income": [60_000.0, 15_000.0],
+                "relationship_to_head": [0, 1],
+                "filing_status": ["JOINT", "JOINT"],
+                "self_employed_pension_contribution_ald": [30.0, 30.0],
+            }
+        )
+
+        tables = pipeline.build_policyengine_entity_tables(population)
+        tax_units = tables.tax_units.sort_values("tax_unit_id").reset_index(drop=True)
+
+        assert tax_units["self_employed_pension_contribution_ald"].tolist() == [30.0]
 
     def test_build_policyengine_entity_tables_preserved_tax_units_require_reciprocal_spouse_pointer_for_joint(self):
         pipeline = USMicroplexPipeline(
@@ -2694,6 +2744,28 @@ class TestUSMicroplexPipeline:
         augmented = pipeline._augment_policyengine_person_inputs(persons)
 
         assert augmented["non_sch_d_capital_gains"].tolist() == [250.0]
+
+    def test_augment_policyengine_person_inputs_materializes_agi_parity_inputs(self):
+        pipeline = USMicroplexPipeline(USMicroplexBuildConfig())
+        persons = pd.DataFrame(
+            {
+                "farm_operations_income": [120.0],
+                "farm_rent_income": [35.0],
+                "health_savings_account_ald": [20.0],
+                "self_employed_health_insurance_ald": [15.0],
+                "self_employed_pension_contribution_ald": [10.0],
+                "age": [45],
+                "sex": [1],
+            }
+        )
+
+        augmented = pipeline._augment_policyengine_person_inputs(persons)
+
+        assert augmented["farm_operations_income"].tolist() == [120.0]
+        assert augmented["farm_rent_income"].tolist() == [35.0]
+        assert augmented["health_savings_account_ald"].tolist() == [20.0]
+        assert augmented["self_employed_health_insurance_ald"].tolist() == [15.0]
+        assert augmented["self_employed_pension_contribution_ald"].tolist() == [10.0]
 
     def test_augment_policyengine_person_inputs_derives_marital_status_flags_from_cps_codes(self):
         pipeline = USMicroplexPipeline(USMicroplexBuildConfig())
@@ -6072,7 +6144,8 @@ class TestUSMicroplexPipeline:
             def generate(self, frame, seed=None):
                 _ = seed
                 result = frame.copy()
-                result["taxable_interest_income"] = [25.0, 75.0]
+                result["taxable_interest_income"] = np.zeros(len(result), dtype=float)
+                result.loc[result.index[-1], "taxable_interest_income"] = 100.0
                 return result
 
         monkeypatch.setattr("microplex_us.pipelines.us.Synthesizer", FakeSynthesizer)
@@ -6222,7 +6295,7 @@ class TestUSMicroplexPipeline:
         assert {"age", "income", "state_fips", "tenure"}.issubset(
             set(captured_conditions[0])
         )
-        assert captured_fit_rows == [2]
+        assert captured_fit_rows == [3]
         assert integration["seed_data"]["taxable_interest_income"].tolist() == [0.0, 0.0, 100.0]
 
     def test_integrate_donor_sources_allows_person_conditions_for_labor_tax_unit_blocks(
@@ -6244,7 +6317,12 @@ class TestUSMicroplexPipeline:
             def generate(self, frame, seed=None):
                 _ = seed
                 result = frame.copy()
-                result["self_employment_income"] = [0.0, 15.0, 90.0]
+                result["self_employment_income"] = np.linspace(
+                    0.0,
+                    90.0,
+                    num=len(result),
+                    dtype=float,
+                )
                 return result
 
         monkeypatch.setattr("microplex_us.pipelines.us.Synthesizer", FakeSynthesizer)
@@ -6406,7 +6484,7 @@ class TestUSMicroplexPipeline:
         )
 
         assert captured_conditions == [("age",)]
-        assert captured_fit_rows == [3]
+        assert captured_fit_rows == [4]
 
     def test_project_frame_to_entity_uses_variable_projection_aggregation(self):
         pipeline = USMicroplexPipeline(
