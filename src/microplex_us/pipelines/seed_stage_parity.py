@@ -228,6 +228,7 @@ def build_us_seed_stage_parity_audit(
         "referenceStructure": _reference_person_structure_summary(
             reference_person_rows,
             reference_weights,
+            bundle=reference_bundle,
         ),
         "focusVariables": {
             spec.label: _seed_focus_variable_audit(
@@ -319,10 +320,32 @@ def _seed_focus_variable_audit(
         value_kind=focus_spec.value_kind,
     )
     if payload["comparison"].get("type") == "numeric":
+        weighted_sum_case = _undefined_ratio_case(
+            payload["seed"]["weighted_sum"],
+            payload["reference"]["weighted_sum"],
+        )
+        weighted_positive_share_case = _undefined_ratio_case(
+            payload["seed"]["weighted_positive_share"],
+            payload["reference"]["weighted_positive_share"],
+        )
+        payload["comparison"]["weighted_sum_ratio_defined"] = weighted_sum_case == "defined"
+        payload["comparison"]["weighted_sum_ratio_case"] = weighted_sum_case
+        payload["comparison"]["weighted_positive_share_ratio_defined"] = (
+            weighted_positive_share_case == "defined"
+        )
+        payload["comparison"]["weighted_positive_share_ratio_case"] = (
+            weighted_positive_share_case
+        )
         payload["comparison"]["reference_scaled_weighted_sum_ratio"] = _safe_ratio(
             payload["seed"]["weighted_sum"]
             * _safe_ratio(float(reference_weights.sum()), float(seed_weights.sum())),
             payload["reference"]["weighted_sum"],
+        )
+        payload["comparison"]["reference_scaled_weighted_sum_ratio_defined"] = (
+            weighted_sum_case == "defined"
+        )
+        payload["comparison"]["reference_scaled_weighted_sum_ratio_case"] = (
+            weighted_sum_case
         )
 
     seed_positive = _positive_mask(seed_series)
@@ -408,12 +431,10 @@ def _seed_structure_summary(rows: pd.DataFrame, weights: pd.Series) -> dict[str,
             summary[f"{column}_count"] = int(rows[column].nunique(dropna=True))
     if "household_id" in rows.columns:
         household_sizes = rows.groupby("household_id", observed=True).size()
-        household_weights = (
-            rows.loc[:, ["household_id", _seed_weight_column(rows)]]
-            .drop_duplicates(subset=["household_id"])
-            .set_index("household_id")[_seed_weight_column(rows)]
-            .reindex(household_sizes.index)
+        household_sizes.index = pd.Index(
+            _stringify_id_series(pd.Series(household_sizes.index)).tolist()
         )
+        household_weights = _seed_household_weights(rows).reindex(household_sizes.index)
         summary["mean_rows_per_household"] = float(household_sizes.mean())
         summary["weighted_mean_rows_per_household"] = _weighted_mean(
             household_sizes.astype(float).to_numpy(),
@@ -428,6 +449,8 @@ def _seed_structure_summary(rows: pd.DataFrame, weights: pd.Series) -> dict[str,
 def _reference_person_structure_summary(
     rows: pd.DataFrame,
     weights: pd.Series,
+    *,
+    bundle: PolicyEngineUSEntityTableBundle,
 ) -> dict[str, Any]:
     summary: dict[str, Any] = {"person_row_count": int(len(rows))}
     for column in ("person_id", "household_id", "tax_unit_id"):
@@ -435,12 +458,10 @@ def _reference_person_structure_summary(
             summary[f"{column}_count"] = int(rows[column].nunique(dropna=True))
     if "household_id" in rows.columns:
         household_sizes = rows.groupby("household_id", observed=True).size()
-        household_weights = (
-            rows.loc[:, ["household_id", "weight"]]
-            .drop_duplicates(subset=["household_id"])
-            .set_index("household_id")["weight"]
-            .reindex(household_sizes.index)
+        household_sizes.index = pd.Index(
+            _stringify_id_series(pd.Series(household_sizes.index)).tolist()
         )
+        household_weights = _reference_household_weights(bundle).reindex(household_sizes.index)
         summary["mean_rows_per_household"] = float(household_sizes.mean())
         summary["weighted_mean_rows_per_household"] = _weighted_mean(
             household_sizes.astype(float).to_numpy(),
@@ -595,6 +616,33 @@ def _seed_weight_series(rows: pd.DataFrame) -> pd.Series:
     return pd.to_numeric(rows[_seed_weight_column(rows)], errors="coerce").fillna(0.0)
 
 
+def _seed_household_weights(rows: pd.DataFrame) -> pd.Series:
+    if "household_id" not in rows.columns:
+        raise ValueError("Seed rows must contain household_id to summarize households")
+    household_ids = _stringify_id_series(rows["household_id"])
+    if "hh_weight" in rows.columns:
+        values = pd.to_numeric(rows["hh_weight"], errors="coerce").fillna(0.0)
+    elif "household_weight" in rows.columns:
+        values = pd.to_numeric(rows["household_weight"], errors="coerce").fillna(0.0)
+    else:
+        values = pd.to_numeric(rows["weight"], errors="coerce").fillna(0.0)
+    grouped = (
+        pd.DataFrame({"household_id": household_ids, "weight": values.to_numpy(dtype=float)})
+        .groupby("household_id", observed=True)["weight"]
+        .mean()
+    )
+    return grouped
+
+
+def _reference_household_weights(bundle: PolicyEngineUSEntityTableBundle) -> pd.Series:
+    households = bundle.households
+    if households is None or "household_id" not in households.columns:
+        return pd.Series(dtype=float)
+    household_ids = _stringify_id_series(households["household_id"])
+    weights = _entity_weights(bundle, EntityType.HOUSEHOLD)
+    return pd.Series(weights.to_numpy(dtype=float), index=household_ids)
+
+
 def _positive_mask(values: pd.Series) -> pd.Series:
     return pd.to_numeric(values, errors="coerce").fillna(0.0).gt(0.0)
 
@@ -623,6 +671,14 @@ def _weighted_mean(values: np.ndarray, weights: np.ndarray) -> float:
     if total_weight <= 0.0:
         return 0.0
     return float(np.dot(values, weights) / total_weight)
+
+
+def _undefined_ratio_case(candidate_value: float, reference_value: float) -> str:
+    if float(reference_value) != 0.0:
+        return "defined"
+    if float(candidate_value) != 0.0:
+        return "candidate_nonzero_reference_zero"
+    return "both_zero"
 
 
 def _transform_profile_series(series: pd.Series, transform: str) -> pd.Series:

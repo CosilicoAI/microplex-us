@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import json
+import subprocess
+import sys
+from pathlib import Path
 
 import h5py
 import pandas as pd
@@ -191,3 +194,119 @@ def test_write_us_seed_stage_parity_audit_persists_json(tmp_path) -> None:
     assert payload["focusVariables"]["health_savings_account_ald"]["comparison"]["type"] == (
         "numeric"
     )
+
+
+def test_build_us_seed_stage_parity_audit_uses_household_weights_not_row_order(tmp_path) -> None:
+    reference_path = tmp_path / "reference.h5"
+    seed_a_path = tmp_path / "seed_a.parquet"
+    seed_b_path = tmp_path / "seed_b.parquet"
+
+    rows = pd.DataFrame(
+        {
+            "person_id": ["1", "2", "3"],
+            "household_id": ["10", "10", "20"],
+            "weight": [100.0, 1.0, 200.0],
+            "taxable_interest_income": [1.0, 0.0, 2.0],
+        }
+    )
+    rows.to_parquet(seed_a_path, index=False)
+    rows.iloc[[1, 0, 2]].reset_index(drop=True).to_parquet(seed_b_path, index=False)
+
+    _write_period_dataset(
+        reference_path,
+        {
+            "household_id": [10, 20],
+            "household_weight": [5.0, 10.0],
+            "person_id": [101, 102, 103],
+            "person_household_id": [10, 10, 20],
+            "taxable_interest_income": [1.0, 0.0, 2.0],
+        },
+    )
+
+    audit_a = build_us_seed_stage_parity_audit(
+        seed_a_path,
+        reference_path,
+        focus_variables=("taxable_interest_income",),
+        boolean_landing_features=(),
+        categorical_landing_features=(),
+        candidate_only_landing_features=(),
+    )
+    audit_b = build_us_seed_stage_parity_audit(
+        seed_b_path,
+        reference_path,
+        focus_variables=("taxable_interest_income",),
+        boolean_landing_features=(),
+        categorical_landing_features=(),
+        candidate_only_landing_features=(),
+    )
+
+    assert audit_a["seedStructure"]["weighted_mean_rows_per_household"] == pytest.approx(
+        audit_b["seedStructure"]["weighted_mean_rows_per_household"]
+    )
+
+
+def test_build_us_seed_stage_parity_audit_marks_zero_reference_numeric_ratios(tmp_path) -> None:
+    seed_path = tmp_path / "seed.parquet"
+    reference_path = tmp_path / "reference.h5"
+
+    pd.DataFrame(
+        {
+            "person_id": ["1"],
+            "household_id": ["10"],
+            "hh_weight": [10.0],
+            "taxable_interest_income": [25.0],
+        }
+    ).to_parquet(seed_path, index=False)
+    _write_period_dataset(
+        reference_path,
+        {
+            "household_id": [10],
+            "household_weight": [10.0],
+            "person_id": [101],
+            "person_household_id": [10],
+            "taxable_interest_income": [0.0],
+        },
+    )
+
+    audit = build_us_seed_stage_parity_audit(
+        seed_path,
+        reference_path,
+        focus_variables=("taxable_interest_income",),
+        boolean_landing_features=(),
+        categorical_landing_features=(),
+        candidate_only_landing_features=(),
+    )
+
+    comparison = audit["focusVariables"]["taxable_interest_income"]["comparison"]
+    assert comparison["weighted_sum_ratio_defined"] is False
+    assert comparison["weighted_sum_ratio_case"] == "candidate_nonzero_reference_zero"
+    assert comparison["reference_scaled_weighted_sum_ratio_defined"] is False
+    assert comparison["weighted_positive_share_ratio_defined"] is False
+
+
+def test_seed_stage_module_imports_without_duckdb(tmp_path) -> None:
+    repo_root = Path("/Users/maxghenis/CosilicoAI/microplex-us")
+    code = """
+import builtins
+import sys
+
+real_import = builtins.__import__
+
+def hooked(name, globals=None, locals=None, fromlist=(), level=0):
+    if name == "duckdb":
+        raise ModuleNotFoundError("No module named 'duckdb'")
+    return real_import(name, globals, locals, fromlist, level)
+
+builtins.__import__ = hooked
+
+import microplex_us.pipelines.seed_stage_parity as mod
+assert callable(mod.build_us_seed_stage_parity_audit)
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", code],
+        cwd=repo_root,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr

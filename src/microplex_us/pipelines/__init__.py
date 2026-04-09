@@ -1,37 +1,78 @@
 """US production pipeline APIs."""
 
-from microplex_us.pipelines.artifacts import (
-    USMicroplexArtifactPaths,
-    USMicroplexVersionedBuildArtifacts,
-    build_and_save_versioned_us_microplex,
-    build_and_save_versioned_us_microplex_from_data_dir,
-    build_and_save_versioned_us_microplex_from_source_provider,
-    build_and_save_versioned_us_microplex_from_source_providers,
-    save_us_microplex_artifacts,
-    save_versioned_us_microplex_artifacts,
-    save_versioned_us_microplex_build_result,
-)
 from microplex_us.pipelines.calibration_stage_parity import (
     build_us_calibration_stage_parity_audit,
     write_us_calibration_stage_parity_audit,
 )
-from microplex_us.pipelines.experiments import (
-    USMicroplexExperimentReport,
-    USMicroplexExperimentResult,
-    USMicroplexSourceExperimentSpec,
-    build_us_n_synthetic_sweep_experiments,
-    default_us_source_mix_experiments,
-    run_us_microplex_n_synthetic_sweep,
-    run_us_microplex_source_experiments,
-)
-from microplex_us.pipelines.index_db import (
-    append_us_microplex_run_index_entry,
-    compare_us_microplex_target_delta_rows,
-    list_us_microplex_target_delta_rows,
-    rebuild_us_microplex_run_index,
-    resolve_us_microplex_run_index_path,
-    select_us_microplex_frontier_index_row,
-)
+
+try:
+    from microplex_us.pipelines.artifacts import (
+        USMicroplexArtifactPaths,
+        USMicroplexVersionedBuildArtifacts,
+        build_and_save_versioned_us_microplex,
+        build_and_save_versioned_us_microplex_from_data_dir,
+        build_and_save_versioned_us_microplex_from_source_provider,
+        build_and_save_versioned_us_microplex_from_source_providers,
+        save_us_microplex_artifacts,
+        save_versioned_us_microplex_artifacts,
+        save_versioned_us_microplex_build_result,
+    )
+    from microplex_us.pipelines.experiments import (
+        USMicroplexExperimentReport,
+        USMicroplexExperimentResult,
+        USMicroplexSourceExperimentSpec,
+        build_us_n_synthetic_sweep_experiments,
+        default_us_source_mix_experiments,
+        run_us_microplex_n_synthetic_sweep,
+        run_us_microplex_source_experiments,
+    )
+    from microplex_us.pipelines.index_db import (
+        append_us_microplex_run_index_entry,
+        compare_us_microplex_target_delta_rows,
+        list_us_microplex_target_delta_rows,
+        rebuild_us_microplex_run_index,
+        resolve_us_microplex_run_index_path,
+        select_us_microplex_frontier_index_row,
+    )
+    from microplex_us.pipelines.pe_us_data_rebuild_checkpoint import (
+        PEUSDataRebuildCheckpointEvidenceResult,
+        PEUSDataRebuildCheckpointResult,
+        attach_policyengine_us_data_rebuild_checkpoint_evidence,
+        default_policyengine_us_data_rebuild_checkpoint_config,
+        default_policyengine_us_data_rebuild_queries,
+        run_policyengine_us_data_rebuild_checkpoint,
+    )
+except ModuleNotFoundError as exc:
+    if exc.name != "duckdb" and "duckdb" not in str(exc):
+        raise
+    USMicroplexArtifactPaths = None
+    USMicroplexVersionedBuildArtifacts = None
+    build_and_save_versioned_us_microplex = None
+    build_and_save_versioned_us_microplex_from_data_dir = None
+    build_and_save_versioned_us_microplex_from_source_provider = None
+    build_and_save_versioned_us_microplex_from_source_providers = None
+    save_us_microplex_artifacts = None
+    save_versioned_us_microplex_artifacts = None
+    save_versioned_us_microplex_build_result = None
+    USMicroplexExperimentReport = None
+    USMicroplexExperimentResult = None
+    USMicroplexSourceExperimentSpec = None
+    build_us_n_synthetic_sweep_experiments = None
+    default_us_source_mix_experiments = None
+    run_us_microplex_n_synthetic_sweep = None
+    run_us_microplex_source_experiments = None
+    append_us_microplex_run_index_entry = None
+    compare_us_microplex_target_delta_rows = None
+    list_us_microplex_target_delta_rows = None
+    rebuild_us_microplex_run_index = None
+    resolve_us_microplex_run_index_path = None
+    select_us_microplex_frontier_index_row = None
+    PEUSDataRebuildCheckpointEvidenceResult = None
+    PEUSDataRebuildCheckpointResult = None
+    attach_policyengine_us_data_rebuild_checkpoint_evidence = None
+    default_policyengine_us_data_rebuild_checkpoint_config = None
+    default_policyengine_us_data_rebuild_queries = None
+    run_policyengine_us_data_rebuild_checkpoint = None
 from microplex_us.pipelines.local_reweighting import (
     USHouseholdTargetReweightingResult,
     reweight_us_household_targets,
@@ -66,14 +107,6 @@ from microplex_us.pipelines.pe_us_data_rebuild import (
 from microplex_us.pipelines.pe_us_data_rebuild_audit import (
     build_policyengine_us_data_rebuild_native_audit,
     write_policyengine_us_data_rebuild_native_audit,
-)
-from microplex_us.pipelines.pe_us_data_rebuild_checkpoint import (
-    PEUSDataRebuildCheckpointEvidenceResult,
-    PEUSDataRebuildCheckpointResult,
-    attach_policyengine_us_data_rebuild_checkpoint_evidence,
-    default_policyengine_us_data_rebuild_checkpoint_config,
-    default_policyengine_us_data_rebuild_queries,
-    run_policyengine_us_data_rebuild_checkpoint,
 )
 from microplex_us.pipelines.pe_us_data_rebuild_parity import (
     build_policyengine_us_data_rebuild_parity_artifact,
