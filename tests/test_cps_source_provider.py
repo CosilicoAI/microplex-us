@@ -278,6 +278,8 @@ def test_load_cps_asec_derives_policyengine_value_inputs(tmp_path):
             "RESNSS1": [2, 1],
             "RESNSS2": [0, 0],
             "SS_VAL": [1200, 800],
+            "MCARE": [1, 2],
+            "MCAID": [2, 1],
             "WICYN": [1, 2],
             "PHIP_VAL": [900, -1],
             "POTC_VAL": [120, -1],
@@ -299,12 +301,13 @@ def test_load_cps_asec_derives_policyengine_value_inputs(tmp_path):
     assert persons["social_security_retirement"].tolist() == [0, 800]
     assert persons["social_security_survivors"].tolist() == [0, 0]
     assert persons["social_security_dependents"].tolist() == [0, 0]
+    assert persons["has_medicare"].tolist() == [True, False]
+    assert persons["has_medicaid"].tolist() == [False, True]
     assert persons["receives_wic"].tolist() == [True, False]
     assert persons["health_insurance_premiums_without_medicare_part_b"].tolist() == [900, 0]
     assert persons["over_the_counter_health_expenses"].tolist() == [120, 0]
     assert persons["other_medical_expenses"].tolist() == [450, 0]
     assert persons["medicare_part_b_premiums"].tolist() == [600, 0]
-
 
 def test_load_cps_asec_derives_survivor_and_dependent_social_security(tmp_path):
     person_rows = pd.DataFrame(

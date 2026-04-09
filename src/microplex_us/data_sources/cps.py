@@ -33,7 +33,7 @@ from microplex_us.source_registry import resolve_source_variable_capabilities
 
 # Default cache directory
 DEFAULT_CACHE_DIR = Path.home() / ".cache" / "microplex"
-CPS_ASEC_PROCESSED_CACHE_VERSION = "20260408"
+CPS_ASEC_PROCESSED_CACHE_VERSION = "20260408coverage"
 
 # CPS ASEC data URLs by year
 CPS_URLS = {
@@ -952,6 +952,8 @@ def _process_persons(df: pl.DataFrame, year: int) -> pl.DataFrame:
         if value_column not in result.columns:
             result = result.with_columns(pl.lit(0.0).alias(value_column))
     for bool_column in (
+        "has_medicare",
+        "has_medicaid",
         "has_esi",
         "has_marketplace_health_coverage",
         "receives_wic",
