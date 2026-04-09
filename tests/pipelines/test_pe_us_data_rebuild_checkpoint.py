@@ -185,6 +185,26 @@ def test_default_policyengine_us_data_rebuild_queries_assign_sample_sizes_by_pro
         }
 
 
+def test_default_policyengine_us_data_rebuild_queries_derive_donor_sample_size_from_sampled_sources() -> None:
+    providers = default_policyengine_us_data_rebuild_source_providers(
+        include_donor_surveys=True,
+        cps_download=False,
+    )
+
+    queries = default_policyengine_us_data_rebuild_queries(
+        providers,
+        cps_sample_n=11,
+        puf_sample_n=22,
+        random_seed=7,
+    )
+
+    for provider in providers[2:]:
+        assert queries[provider.descriptor.name].provider_filters == {
+            "sample_n": 22,
+            "random_seed": 7,
+        }
+
+
 @dataclass(frozen=True)
 class _FakeProvider:
     descriptor: Any

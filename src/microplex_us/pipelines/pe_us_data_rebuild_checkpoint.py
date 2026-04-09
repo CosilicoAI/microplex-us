@@ -791,6 +791,16 @@ def default_policyengine_us_data_rebuild_queries(
     from microplex_us.data_sources.donor_surveys import DonorSurveySourceProvider
     from microplex_us.data_sources.puf import PUFSourceProvider
 
+    resolved_donor_sample_n = donor_sample_n
+    if resolved_donor_sample_n is None:
+        source_sample_sizes = tuple(
+            int(sample_n)
+            for sample_n in (cps_sample_n, puf_sample_n)
+            if sample_n is not None
+        )
+        if source_sample_sizes:
+            resolved_donor_sample_n = max(source_sample_sizes)
+
     queries: dict[str, SourceQuery] = {}
     for provider in providers:
         sample_n: int | None = None
@@ -799,7 +809,7 @@ def default_policyengine_us_data_rebuild_queries(
         elif isinstance(provider, PUFSourceProvider):
             sample_n = puf_sample_n
         elif isinstance(provider, DonorSurveySourceProvider):
-            sample_n = donor_sample_n
+            sample_n = resolved_donor_sample_n
         if sample_n is None:
             continue
         queries[provider.descriptor.name] = SourceQuery(
