@@ -166,6 +166,35 @@ def test_donor_imputation_block_specs_include_match_strategies_and_restored_vari
     )
 
 
+def test_donor_imputation_block_specs_use_zero_inflated_matching_for_sparse_irs_amounts():
+    specs = donor_imputation_block_specs(
+        {
+            "health_savings_account_ald",
+            "self_employed_health_insurance_ald",
+            "self_employed_pension_contribution_ald",
+            "partnership_s_corp_income",
+        }
+    )
+
+    by_variable = {spec.model_variables[0]: spec for spec in specs}
+    for variable_name in (
+        "health_savings_account_ald",
+        "self_employed_health_insurance_ald",
+        "self_employed_pension_contribution_ald",
+        "partnership_s_corp_income",
+    ):
+        assert by_variable[variable_name].native_entity is EntityType.PERSON
+        assert by_variable[variable_name].condition_entities == (
+            EntityType.PERSON,
+            EntityType.HOUSEHOLD,
+            EntityType.TAX_UNIT,
+        )
+        assert (
+            by_variable[variable_name].strategy_for(variable_name)
+            is DonorMatchStrategy.ZERO_INFLATED_POSITIVE
+        )
+
+
 def test_condition_var_compatibility_allows_household_controls_for_tax_unit_targets():
     assert is_condition_var_compatible_with_entity(
         "state_fips",
@@ -265,6 +294,22 @@ def test_state_program_proxy_semantics_are_registered():
         spec = variable_semantic_spec_for(variable_name)
         assert spec.support_family is VariableSupportFamily.ZERO_INFLATED_POSITIVE
         assert spec.donor_match_strategy is DonorMatchStrategy.ZERO_INFLATED_POSITIVE
+
+
+def test_sparse_irs_ald_semantics_are_registered():
+    from microplex_us.variables import variable_semantic_spec_for
+
+    for variable_name in (
+        "health_savings_account_ald",
+        "self_employed_health_insurance_ald",
+        "self_employed_pension_contribution_ald",
+        "partnership_s_corp_income",
+    ):
+        spec = variable_semantic_spec_for(variable_name)
+        assert spec.native_entity is EntityType.PERSON
+        assert spec.support_family is VariableSupportFamily.ZERO_INFLATED_POSITIVE
+        assert spec.donor_match_strategy is DonorMatchStrategy.ZERO_INFLATED_POSITIVE
+        assert spec.condition_score_mode is ConditionScoreMode.VALUE_AND_SUPPORT
 
 
 def test_person_native_irs_semantics_match_current_policyengine_entities():

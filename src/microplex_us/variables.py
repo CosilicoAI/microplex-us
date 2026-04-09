@@ -318,6 +318,36 @@ VARIABLE_SEMANTIC_SPECS: dict[str, VariableSemanticSpec] = {
         support_family=VariableSupportFamily.ZERO_INFLATED_POSITIVE,
         donor_match_strategy=DonorMatchStrategy.ZERO_INFLATED_POSITIVE,
     ),
+    "health_savings_account_ald": VariableSemanticSpec(
+        native_entity=EntityType.PERSON,
+        condition_entities=(
+            EntityType.PERSON,
+            EntityType.HOUSEHOLD,
+            EntityType.TAX_UNIT,
+        ),
+        support_family=VariableSupportFamily.ZERO_INFLATED_POSITIVE,
+        donor_match_strategy=DonorMatchStrategy.ZERO_INFLATED_POSITIVE,
+    ),
+    "self_employed_health_insurance_ald": VariableSemanticSpec(
+        native_entity=EntityType.PERSON,
+        condition_entities=(
+            EntityType.PERSON,
+            EntityType.HOUSEHOLD,
+            EntityType.TAX_UNIT,
+        ),
+        support_family=VariableSupportFamily.ZERO_INFLATED_POSITIVE,
+        donor_match_strategy=DonorMatchStrategy.ZERO_INFLATED_POSITIVE,
+    ),
+    "self_employed_pension_contribution_ald": VariableSemanticSpec(
+        native_entity=EntityType.PERSON,
+        condition_entities=(
+            EntityType.PERSON,
+            EntityType.HOUSEHOLD,
+            EntityType.TAX_UNIT,
+        ),
+        support_family=VariableSupportFamily.ZERO_INFLATED_POSITIVE,
+        donor_match_strategy=DonorMatchStrategy.ZERO_INFLATED_POSITIVE,
+    ),
     "qualified_dividend_share": VariableSemanticSpec(
         native_entity=EntityType.TAX_UNIT,
         condition_entities=(EntityType.HOUSEHOLD, EntityType.TAX_UNIT),
@@ -371,6 +401,16 @@ VARIABLE_SEMANTIC_SPECS: dict[str, VariableSemanticSpec] = {
             EntityType.TAX_UNIT,
         ),
         notes="Self-employment income is signed and must preserve losses.",
+    ),
+    "partnership_s_corp_income": VariableSemanticSpec(
+        native_entity=EntityType.PERSON,
+        condition_entities=(
+            EntityType.PERSON,
+            EntityType.HOUSEHOLD,
+            EntityType.TAX_UNIT,
+        ),
+        support_family=VariableSupportFamily.ZERO_INFLATED_POSITIVE,
+        donor_match_strategy=DonorMatchStrategy.ZERO_INFLATED_POSITIVE,
     ),
     "has_medicaid": VariableSemanticSpec(
         projection_aggregation=ProjectionAggregation.MAX,
