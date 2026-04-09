@@ -11,6 +11,10 @@ from microplex_us.pipelines.artifacts import (
     save_versioned_us_microplex_artifacts,
     save_versioned_us_microplex_build_result,
 )
+from microplex_us.pipelines.calibration_stage_parity import (
+    build_us_calibration_stage_parity_audit,
+    write_us_calibration_stage_parity_audit,
+)
 from microplex_us.pipelines.experiments import (
     USMicroplexExperimentReport,
     USMicroplexExperimentResult,
@@ -217,6 +221,7 @@ __all__ = [
     "default_policyengine_us_data_rebuild_program",
     "default_policyengine_us_data_rebuild_queries",
     "default_policyengine_us_data_rebuild_source_providers",
+    "build_us_calibration_stage_parity_audit",
     "DEFAULT_PRE_SIM_FOCUS_VARIABLES",
     "PreSimParityVariableSpec",
     "build_us_pre_sim_parity_audit",
@@ -255,6 +260,7 @@ __all__ = [
     "run_us_microplex_reduced_benchmark_harness",
     "write_us_pe_native_scores",
     "write_policyengine_us_data_rebuild_parity_artifact",
+    "write_us_calibration_stage_parity_audit",
     "write_us_pre_sim_parity_audit",
     "write_us_microplex_site_snapshot",
     "USMicroplexBuildConfig",
