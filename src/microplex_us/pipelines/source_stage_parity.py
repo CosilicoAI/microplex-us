@@ -1061,7 +1061,8 @@ def _summarize_categorical(
     total_weight: float,
     nonnull_weight: float,
 ) -> dict[str, Any]:
-    normalized = values.replace({"": pd.NA, "nan": pd.NA}).dropna()
+    normalized_values = _normalize_categorical_series(values)
+    normalized = normalized_values.dropna()
     if normalized.empty:
         return {
             "kind": "categorical",
@@ -1071,7 +1072,7 @@ def _summarize_categorical(
             "unique_count": 0,
             "top_values": [],
         }
-    aligned_weights = weights[values.replace({"": pd.NA, "nan": pd.NA}).notna()].astype(float)
+    aligned_weights = weights[normalized_values.notna()].astype(float)
     grouped = (
         pd.DataFrame({"value": normalized.astype(str), "weight": aligned_weights.to_numpy(dtype=float)})
         .groupby("value", observed=True)["weight"]
@@ -1153,17 +1154,27 @@ def _compare_series(
             candidate_summary["weighted_nonnull_share"]
             - reference_summary["weighted_nonnull_share"]
         ),
-    }
+        }
 
 
 def _categorical_support(values: pd.Series) -> set[str]:
-    normalized = (
-        values.astype("string")
-        .replace({"": pd.NA, "nan": pd.NA})
-        .dropna()
-        .astype(str)
-    )
+    normalized = _normalize_categorical_series(values).dropna().astype(str)
     return set(normalized.tolist())
+
+
+def _normalize_categorical_series(values: pd.Series) -> pd.Series:
+    normalized = values.astype("string").replace({"": pd.NA, "nan": pd.NA})
+    lowered = normalized.str.strip().str.lower()
+    nonnull = lowered.dropna()
+    truthy = {"1", "1.0", "true", "t", "yes", "y"}
+    falsy = {"0", "0.0", "false", "f", "no", "n"}
+    bool_tokens = truthy | falsy
+    if not nonnull.empty and set(nonnull.tolist()) <= bool_tokens:
+        mapped = normalized.copy()
+        mapped.loc[lowered.isin(truthy)] = "True"
+        mapped.loc[lowered.isin(falsy)] = "False"
+        return mapped
+    return normalized
 
 
 def _resolve_value_kind(values: pd.Series, value_kind: str) -> str:

@@ -3,37 +3,104 @@
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 import pandas as pd
 
+from microplex_us.pipelines.source_stage_parity import (
+    _compare_series,
+    _normalize_categorical_series,
+    _resolve_bundle_variable,
+    _summarize_series,
+)
 from microplex_us.policyengine.us import (
     _decode_policyengine_array,
     _load_policyengine_us_period_arrays,
     load_policyengine_us_entity_tables,
 )
 
-DEFAULT_PRE_SIM_FOCUS_VARIABLES: tuple[str, ...] = (
-    "age",
-    "state_fips",
-    "county_fips",
-    "employment_income_before_lsr",
-    "self_employment_income_before_lsr",
-    "dividend_income",
-    "interest_income",
-    "long_term_capital_gains_before_response",
-    "partnership_s_corp_income",
-    "farm_income",
-    "rent",
-    "real_estate_taxes",
-    "net_worth",
-    "is_household_head",
-    "is_hispanic",
-    "is_disabled",
-    "has_esi",
-    "has_marketplace_health_coverage",
+
+@dataclass(frozen=True)
+class PreSimParityVariableSpec:
+    """One pre-sim input comparison between candidate and reference datasets."""
+
+    label: str
+    candidate_variable: str
+    reference_variable: str | None = None
+    value_kind: str = "auto"
+
+    @property
+    def resolved_reference_variable(self) -> str:
+        return self.reference_variable or self.candidate_variable
+
+
+DEFAULT_PRE_SIM_FOCUS_VARIABLES: tuple[PreSimParityVariableSpec, ...] = (
+    PreSimParityVariableSpec("age", "age", value_kind="numeric"),
+    PreSimParityVariableSpec("state_fips", "state_fips", value_kind="categorical"),
+    PreSimParityVariableSpec("county_fips", "county_fips", value_kind="categorical"),
+    PreSimParityVariableSpec(
+        "employment_income_before_lsr",
+        "employment_income_before_lsr",
+        value_kind="numeric",
+    ),
+    PreSimParityVariableSpec(
+        "self_employment_income_before_lsr",
+        "self_employment_income_before_lsr",
+        value_kind="numeric",
+    ),
+    PreSimParityVariableSpec("dividend_income", "dividend_income", value_kind="numeric"),
+    PreSimParityVariableSpec("interest_income", "interest_income", value_kind="numeric"),
+    PreSimParityVariableSpec(
+        "long_term_capital_gains_before_response",
+        "long_term_capital_gains_before_response",
+        value_kind="numeric",
+    ),
+    PreSimParityVariableSpec(
+        "partnership_s_corp_income",
+        "partnership_s_corp_income",
+        value_kind="numeric",
+    ),
+    PreSimParityVariableSpec("farm_income", "farm_income", value_kind="numeric"),
+    PreSimParityVariableSpec("rent", "rent", value_kind="numeric"),
+    PreSimParityVariableSpec(
+        "real_estate_taxes",
+        "real_estate_taxes",
+        value_kind="numeric",
+    ),
+    PreSimParityVariableSpec("net_worth", "net_worth", value_kind="numeric"),
+    PreSimParityVariableSpec(
+        "health_savings_account_ald",
+        "health_savings_account_ald",
+        value_kind="numeric",
+    ),
+    PreSimParityVariableSpec(
+        "self_employed_health_insurance_ald",
+        "self_employed_health_insurance_ald",
+        value_kind="numeric",
+    ),
+    PreSimParityVariableSpec(
+        "self_employed_pension_contribution_ald",
+        "self_employed_pension_contribution_ald",
+        value_kind="numeric",
+    ),
+    PreSimParityVariableSpec(
+        "is_household_head",
+        "is_household_head",
+        value_kind="categorical",
+    ),
+    PreSimParityVariableSpec("is_hispanic", "is_hispanic", value_kind="categorical"),
+    PreSimParityVariableSpec("is_disabled", "is_disabled", value_kind="categorical"),
+    PreSimParityVariableSpec("has_esi", "has_esi", value_kind="categorical"),
+    PreSimParityVariableSpec(
+        "has_marketplace_health_coverage",
+        "has_marketplace_health_coverage",
+        value_kind="categorical",
+    ),
+    PreSimParityVariableSpec("has_medicare", "has_medicare", value_kind="categorical"),
+    PreSimParityVariableSpec("has_medicaid", "has_medicaid", value_kind="categorical"),
 )
 
 DEFAULT_CRITICAL_REFERENCE_VARIABLES: tuple[str, ...] = (
@@ -60,7 +127,8 @@ def build_us_pre_sim_parity_audit(
     reference_dataset: str | Path,
     *,
     period: int = 2024,
-    focus_variables: tuple[str, ...] | list[str] = DEFAULT_PRE_SIM_FOCUS_VARIABLES,
+    focus_variables: tuple[PreSimParityVariableSpec | str, ...]
+    | list[PreSimParityVariableSpec | str] = DEFAULT_PRE_SIM_FOCUS_VARIABLES,
     critical_reference_variables: tuple[str, ...]
     | list[str] = DEFAULT_CRITICAL_REFERENCE_VARIABLES,
 ) -> dict[str, Any]:
@@ -88,7 +156,7 @@ def build_us_pre_sim_parity_audit(
     candidate_bundle = load_policyengine_us_entity_tables(candidate_path, period=period)
     reference_bundle = load_policyengine_us_entity_tables(reference_path, period=period)
 
-    focus = tuple(dict.fromkeys(str(variable) for variable in focus_variables))
+    focus = _normalize_focus_variable_specs(focus_variables)
     critical = tuple(
         dict.fromkeys(str(variable) for variable in critical_reference_variables)
     )
@@ -118,12 +186,14 @@ def build_us_pre_sim_parity_audit(
             "reference": _entity_structure_summary(reference_bundle),
         },
         "focus_variables": {
-            variable: _variable_comparison(
-                variable=variable,
+            spec.label: _variable_comparison(
+                spec=spec,
+                candidate_bundle=candidate_bundle,
+                reference_bundle=reference_bundle,
                 candidate_arrays=candidate_arrays,
                 reference_arrays=reference_arrays,
             )
-            for variable in focus
+            for spec in focus
         },
         "state_age_support": _state_age_support_comparison(
             candidate_bundle=candidate_bundle,
@@ -138,7 +208,8 @@ def write_us_pre_sim_parity_audit(
     output_path: str | Path,
     *,
     period: int = 2024,
-    focus_variables: tuple[str, ...] | list[str] = DEFAULT_PRE_SIM_FOCUS_VARIABLES,
+    focus_variables: tuple[PreSimParityVariableSpec | str, ...]
+    | list[PreSimParityVariableSpec | str] = DEFAULT_PRE_SIM_FOCUS_VARIABLES,
     critical_reference_variables: tuple[str, ...]
     | list[str] = DEFAULT_CRITICAL_REFERENCE_VARIABLES,
 ) -> Path:
@@ -276,61 +347,137 @@ def _state_age_support(bundle) -> dict[str, Any]:
 
 def _variable_comparison(
     *,
-    variable: str,
+    spec: PreSimParityVariableSpec,
+    candidate_bundle,
+    reference_bundle,
     candidate_arrays: dict[str, np.ndarray],
     reference_arrays: dict[str, np.ndarray],
 ) -> dict[str, Any]:
-    candidate_present = variable in candidate_arrays
-    reference_present = variable in reference_arrays
+    candidate_present = spec.candidate_variable in candidate_arrays
+    reference_present = spec.resolved_reference_variable in reference_arrays
     result: dict[str, Any] = {
+        "candidate_variable": spec.candidate_variable,
+        "reference_variable": spec.resolved_reference_variable,
         "candidate_present": candidate_present,
         "reference_present": reference_present,
     }
     if not reference_present and not candidate_present:
         return result
-    if reference_present:
-        reference_values = _decode_policyengine_array(reference_arrays[variable])
-        result["reference"] = _summarize_values(reference_values)
-    if candidate_present:
-        candidate_values = _decode_policyengine_array(candidate_arrays[variable])
-        result["candidate"] = _summarize_values(candidate_values)
-    if candidate_present and reference_present:
-        result["comparison"] = _compare_values(candidate_values, reference_values)
+
+    reference_entry = _resolve_bundle_variable(
+        reference_bundle,
+        spec.resolved_reference_variable,
+    )
+    candidate_entry = _resolve_bundle_variable(
+        candidate_bundle,
+        spec.candidate_variable,
+        preferred_entity=reference_entry["entity"] if reference_entry is not None else None,
+    )
+
+    if reference_entry is not None:
+        result["reference_entity"] = reference_entry["entity"].value
+        result["reference"] = _summarize_series(
+            reference_entry["series"],
+            weights=reference_entry["weights"],
+            value_kind=spec.value_kind,
+        )
+    elif reference_present:
+        reference_values = _decode_policyengine_array(
+            reference_arrays[spec.resolved_reference_variable]
+        )
+        result["reference"] = _summarize_values(
+            reference_values,
+            value_kind=spec.value_kind,
+        )
+
+    if candidate_entry is not None:
+        result["candidate_entity"] = candidate_entry["entity"].value
+        result["candidate"] = _summarize_series(
+            candidate_entry["series"],
+            weights=candidate_entry["weights"],
+            value_kind=spec.value_kind,
+        )
+    elif candidate_present:
+        candidate_values = _decode_policyengine_array(candidate_arrays[spec.candidate_variable])
+        result["candidate"] = _summarize_values(
+            candidate_values,
+            value_kind=spec.value_kind,
+        )
+
+    if candidate_entry is not None and reference_entry is not None:
+        result["comparison"] = _compare_series(
+            candidate_entry["series"],
+            reference_entry["series"],
+            candidate_weights=candidate_entry["weights"],
+            reference_weights=reference_entry["weights"],
+            value_kind=spec.value_kind,
+        )
+    elif candidate_present and reference_present:
+        candidate_values = _decode_policyengine_array(candidate_arrays[spec.candidate_variable])
+        reference_values = _decode_policyengine_array(
+            reference_arrays[spec.resolved_reference_variable]
+        )
+        result["comparison"] = _compare_values(
+            candidate_values,
+            reference_values,
+            value_kind=spec.value_kind,
+        )
     return result
 
 
-def _summarize_values(values: np.ndarray) -> dict[str, Any]:
+def _summarize_values(values: np.ndarray, *, value_kind: str = "auto") -> dict[str, Any]:
     array = np.asarray(values)
-    if array.dtype.kind in {"U", "S", "O"}:
+    if value_kind == "categorical" or array.dtype.kind in {"U", "S", "O"}:
         series = pd.Series(array.astype(str))
-        normalized = series.replace({"": pd.NA, "nan": pd.NA})
+        normalized = _normalize_categorical_series(series)
         value_counts = normalized.dropna().value_counts()
         return {
             "kind": "categorical",
             "n": int(len(series)),
             "nonnull_share": _safe_ratio(int(normalized.notna().sum()), len(series)),
+            "weighted_nonnull_share": _safe_ratio(int(normalized.notna().sum()), len(series)),
             "unique_count": int(normalized.nunique(dropna=True)),
             "top_values": [
-                {"value": str(value), "count": int(count)}
+                {
+                    "value": str(value),
+                    "count": int(count),
+                    "weighted_sum": float(count),
+                    "weighted_share": _safe_ratio(int(count), len(normalized)),
+                }
                 for value, count in value_counts.head(10).items()
             ],
         }
 
     numeric = pd.Series(array).replace([np.inf, -np.inf], np.nan).dropna()
     if numeric.empty:
-        return {"kind": "numeric", "n": int(len(array)), "nonnull_share": 0.0}
+        return {
+            "kind": "numeric",
+            "n": int(len(array)),
+            "nonnull_share": 0.0,
+            "weighted_nonnull_share": 0.0,
+        }
 
     unique_count = int(numeric.nunique())
-    is_categorical = unique_count <= 64 and numeric.dtype.kind in {"i", "u", "b"}
+    is_categorical = value_kind == "categorical" or (
+        value_kind == "auto"
+        and unique_count <= 64
+        and numeric.dtype.kind in {"i", "u", "b"}
+    )
     if is_categorical:
         value_counts = numeric.astype(int).astype(str).value_counts()
         return {
             "kind": "categorical",
             "n": int(len(array)),
             "nonnull_share": _safe_ratio(int(len(numeric)), len(array)),
+            "weighted_nonnull_share": _safe_ratio(int(len(numeric)), len(array)),
             "unique_count": unique_count,
             "top_values": [
-                {"value": str(value), "count": int(count)}
+                {
+                    "value": str(value),
+                    "count": int(count),
+                    "weighted_sum": float(count),
+                    "weighted_share": _safe_ratio(int(count), len(numeric)),
+                }
                 for value, count in value_counts.head(10).items()
             ],
         }
@@ -340,32 +487,42 @@ def _summarize_values(values: np.ndarray) -> dict[str, Any]:
         "kind": "numeric",
         "n": int(len(array)),
         "nonnull_share": _safe_ratio(int(len(numeric_values)), len(array)),
+        "weighted_nonnull_share": _safe_ratio(int(len(numeric_values)), len(array)),
         "zero_share": float((numeric_values == 0).mean()),
+        "weighted_zero_share": float((numeric_values == 0).mean()),
         "positive_share": float((numeric_values > 0).mean()),
+        "weighted_positive_share": float((numeric_values > 0).mean()),
         "negative_share": float((numeric_values < 0).mean()),
+        "weighted_negative_share": float((numeric_values < 0).mean()),
         "mean": float(numeric_values.mean()),
+        "weighted_mean": float(numeric_values.mean()),
         "p50": float(np.quantile(numeric_values, 0.5)),
         "p90": float(np.quantile(numeric_values, 0.9)),
         "p99": float(np.quantile(numeric_values, 0.99)),
         "sum": float(numeric_values.sum()),
+        "weighted_sum": float(numeric_values.sum()),
     }
 
 
-def _compare_values(candidate: np.ndarray, reference: np.ndarray) -> dict[str, Any]:
+def _compare_values(
+    candidate: np.ndarray,
+    reference: np.ndarray,
+    *,
+    value_kind: str = "auto",
+) -> dict[str, Any]:
     candidate_array = np.asarray(candidate)
     reference_array = np.asarray(reference)
-    if candidate_array.dtype.kind in {"U", "S", "O"} or reference_array.dtype.kind in {
-        "U",
-        "S",
-        "O",
-    }:
+    if value_kind == "categorical" or (
+        candidate_array.dtype.kind in {"U", "S", "O"}
+        or reference_array.dtype.kind in {"U", "S", "O"}
+    ):
         return _compare_categorical(candidate_array.astype(str), reference_array.astype(str))
 
     candidate_numeric = pd.Series(candidate_array).replace([np.inf, -np.inf], np.nan).dropna()
     reference_numeric = pd.Series(reference_array).replace([np.inf, -np.inf], np.nan).dropna()
     candidate_unique = int(candidate_numeric.nunique()) if not candidate_numeric.empty else 0
     reference_unique = int(reference_numeric.nunique()) if not reference_numeric.empty else 0
-    if max(candidate_unique, reference_unique) <= 64 and (
+    if value_kind != "numeric" and max(candidate_unique, reference_unique) <= 64 and (
         candidate_numeric.dtype.kind in {"i", "u", "b"}
         or reference_numeric.dtype.kind in {"i", "u", "b"}
     ):
@@ -377,8 +534,8 @@ def _compare_values(candidate: np.ndarray, reference: np.ndarray) -> dict[str, A
 
 
 def _compare_categorical(candidate: np.ndarray, reference: np.ndarray) -> dict[str, Any]:
-    candidate_series = pd.Series(candidate).replace({"": pd.NA, "nan": pd.NA}).dropna()
-    reference_series = pd.Series(reference).replace({"": pd.NA, "nan": pd.NA}).dropna()
+    candidate_series = _normalize_categorical_series(pd.Series(candidate)).dropna()
+    reference_series = _normalize_categorical_series(pd.Series(reference)).dropna()
     candidate_support = set(candidate_series.astype(str))
     reference_support = set(reference_series.astype(str))
     missing = sorted(reference_support - candidate_support)
@@ -422,6 +579,25 @@ def _safe_ratio(numerator: int | float, denominator: int | float) -> float:
     if not denominator:
         return 0.0
     return float(numerator) / float(denominator)
+
+
+def _normalize_focus_variable_specs(
+    focus_variables: tuple[PreSimParityVariableSpec | str, ...]
+    | list[PreSimParityVariableSpec | str],
+) -> tuple[PreSimParityVariableSpec, ...]:
+    specs: list[PreSimParityVariableSpec] = []
+    seen_labels: set[str] = set()
+    for variable in focus_variables:
+        spec = (
+            variable
+            if isinstance(variable, PreSimParityVariableSpec)
+            else PreSimParityVariableSpec(str(variable), str(variable))
+        )
+        if spec.label in seen_labels:
+            continue
+        seen_labels.add(spec.label)
+        specs.append(spec)
+    return tuple(specs)
 
 
 def main() -> None:

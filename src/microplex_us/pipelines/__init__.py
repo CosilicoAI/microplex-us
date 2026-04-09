@@ -84,6 +84,8 @@ from microplex_us.pipelines.performance import (
     warm_us_microplex_parity_cache,
 )
 from microplex_us.pipelines.pre_sim_parity import (
+    DEFAULT_PRE_SIM_FOCUS_VARIABLES,
+    PreSimParityVariableSpec,
     build_us_pre_sim_parity_audit,
     write_us_pre_sim_parity_audit,
 )
@@ -215,6 +217,8 @@ __all__ = [
     "default_policyengine_us_data_rebuild_program",
     "default_policyengine_us_data_rebuild_queries",
     "default_policyengine_us_data_rebuild_source_providers",
+    "DEFAULT_PRE_SIM_FOCUS_VARIABLES",
+    "PreSimParityVariableSpec",
     "build_us_pre_sim_parity_audit",
     "build_us_source_stage_parity_audit",
     "build_us_cps_source_stage_parity_audit",
