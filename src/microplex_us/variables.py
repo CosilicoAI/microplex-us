@@ -50,6 +50,17 @@ class ProjectionAggregation(Enum):
     MEAN = "mean"
 
 
+PE_STYLE_PUF_IRS_DEMOGRAPHIC_PREDICTORS = (
+    "age",
+    "is_male",
+    "tax_unit_is_joint",
+    "tax_unit_count_dependents",
+    "is_tax_unit_head",
+    "is_tax_unit_spouse",
+    "is_tax_unit_dependent",
+)
+
+
 @dataclass(frozen=True)
 class DonorImputationBlockSpec:
     """Declarative donor-model spec for one imputation block."""
@@ -78,6 +89,7 @@ class VariableSemanticSpec:
     donor_match_strategy: DonorMatchStrategy = DonorMatchStrategy.RANK
     donor_transform: FrameSemanticTransform | None = None
     donor_check: FrameSemanticCheck | None = None
+    preferred_condition_vars: tuple[str, ...] = ()
     notes: str | None = None
 
     def is_redundant_given(self, variable_names: Iterable[str]) -> bool:
@@ -241,6 +253,7 @@ VARIABLE_SEMANTIC_SPECS: dict[str, VariableSemanticSpec] = {
         ),
         support_family=VariableSupportFamily.ZERO_INFLATED_POSITIVE,
         donor_match_strategy=DonorMatchStrategy.ZERO_INFLATED_POSITIVE,
+        preferred_condition_vars=PE_STYLE_PUF_IRS_DEMOGRAPHIC_PREDICTORS,
     ),
     "tax_exempt_interest_income": VariableSemanticSpec(
         native_entity=EntityType.PERSON,

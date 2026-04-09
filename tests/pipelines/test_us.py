@@ -2749,6 +2749,7 @@ class TestUSMicroplexPipeline:
         pipeline = USMicroplexPipeline(USMicroplexBuildConfig())
         persons = pd.DataFrame(
             {
+                "estate_income": [22.0],
                 "farm_operations_income": [120.0],
                 "farm_rent_income": [35.0],
                 "health_savings_account_ald": [20.0],
@@ -2761,6 +2762,7 @@ class TestUSMicroplexPipeline:
 
         augmented = pipeline._augment_policyengine_person_inputs(persons)
 
+        assert augmented["estate_income"].tolist() == [22.0]
         assert augmented["farm_operations_income"].tolist() == [120.0]
         assert augmented["farm_rent_income"].tolist() == [35.0]
         assert augmented["health_savings_account_ald"].tolist() == [20.0]
@@ -5755,6 +5757,238 @@ class TestUSMicroplexPipeline:
 
         assert captured == [("age",)]
 
+    def test_augment_donor_condition_frame_for_targets_derives_pe_style_puf_predictors(
+        self,
+    ):
+        pipeline = USMicroplexPipeline(USMicroplexBuildConfig())
+        frame = pd.DataFrame(
+            {
+                "person_id": ["1:1", "1:2", "1:3"],
+                "household_id": [1, 1, 1],
+                "tax_unit_id": ["1001", "1001", "1001"],
+                "person_number": [1, 2, 3],
+                "spouse_person_number": [2, 1, 0],
+                "family_relationship": [1, 2, 3],
+                "age": [45, 43, 12],
+                "sex": [1, 2, 2],
+            }
+        )
+
+        result = pipeline._augment_donor_condition_frame_for_targets(
+            frame,
+            ("taxable_interest_income",),
+        )
+
+        assert result["is_male"].tolist() == [1.0, 0.0, 0.0]
+        assert result["tax_unit_is_joint"].tolist() == [1.0, 1.0, 1.0]
+        assert result["tax_unit_count_dependents"].tolist() == [1.0, 1.0, 1.0]
+        assert result["is_tax_unit_head"].tolist() == [1.0, 0.0, 0.0]
+        assert result["is_tax_unit_spouse"].tolist() == [0.0, 1.0, 0.0]
+        assert result["is_tax_unit_dependent"].tolist() == [0.0, 0.0, 1.0]
+
+    def test_integrate_donor_sources_uses_pe_style_puf_predictors_for_generic_irs_vars(
+        self,
+        monkeypatch,
+    ):
+        captured: list[tuple[str, ...]] = []
+
+        class FakeSynthesizer:
+            def __init__(self, *, target_vars, condition_vars, **kwargs):
+                _ = target_vars, kwargs
+                captured.append(tuple(condition_vars))
+
+            def fit(self, *args, **kwargs):
+                _ = args, kwargs
+
+            def generate(self, frame, seed=None):
+                _ = seed
+                result = frame.copy()
+                result["taxable_interest_income"] = [10.0, 20.0, 0.0, 25.0, 15.0, 0.0]
+                return result
+
+        monkeypatch.setattr("microplex_us.pipelines.us.Synthesizer", FakeSynthesizer)
+
+        cps_households = pd.DataFrame(
+            {
+                "household_id": [1, 2, 3],
+                "hh_weight": [100.0, 120.0, 90.0],
+                "state_fips": [6, 36, 12],
+                "tenure": [1, 2, 1],
+            }
+        )
+        cps_persons = pd.DataFrame(
+            {
+                "person_id": ["1:1", "1:2", "1:3", "2:1", "3:1", "3:2"],
+                "household_id": [1, 1, 1, 2, 3, 3],
+                "age": [45, 43, 12, 61, 38, 10],
+                "sex": [1, 2, 2, 1, 2, 1],
+                "education": [2, 2, 1, 2, 2, 1],
+                "employment_status": [1, 1, 0, 1, 1, 0],
+                "income": [80_000.0, 50_000.0, 0.0, 70_000.0, 55_000.0, 0.0],
+                "tax_unit_id": ["1001", "1001", "1001", "2001", "3001", "3001"],
+                "person_number": [1, 2, 3, 1, 1, 2],
+                "spouse_person_number": [2, 1, 0, 0, 0, 0],
+                "family_relationship": [1, 2, 3, 1, 1, 3],
+            }
+        )
+        donor_households = pd.DataFrame(
+            {
+                "household_id": [101, 102, 103],
+                "hh_weight": [80.0, 110.0, 95.0],
+                "state_fips": [6, 36, 12],
+                "tenure": [1, 2, 1],
+            }
+        )
+        donor_persons = pd.DataFrame(
+            {
+                "person_id": ["101:1", "101:2", "101:3", "102:1", "103:1", "103:2"],
+                "household_id": [101, 101, 101, 102, 103, 103],
+                "age": [46, 42, 11, 60, 39, 9],
+                "sex": [1, 2, 2, 1, 2, 1],
+                "education": [2, 2, 1, 2, 2, 1],
+                "employment_status": [1, 1, 0, 1, 1, 0],
+                "income": [70_000.0, 45_000.0, 0.0, 68_000.0, 52_000.0, 0.0],
+                "tax_unit_id": ["2101", "2101", "2101", "2201", "2301", "2301"],
+                "person_number": [1, 2, 3, 1, 1, 2],
+                "spouse_person_number": [2, 1, 0, 0, 0, 0],
+                "is_head": [1, 0, 0, 1, 1, 0],
+                "is_spouse": [0, 1, 0, 0, 0, 0],
+                "is_dependent": [0, 0, 1, 0, 0, 1],
+                "taxable_interest_income": [5.0, 10.0, 0.0, 12.0, 8.0, 0.0],
+            }
+        )
+        cps_frame = ObservationFrame(
+            source=SourceDescriptor(
+                name="cps_like",
+                shareability=Shareability.PUBLIC,
+                time_structure=TimeStructure.REPEATED_CROSS_SECTION,
+                observations=(
+                    EntityObservation(
+                        entity=EntityType.HOUSEHOLD,
+                        key_column="household_id",
+                        variable_names=("state_fips", "tenure"),
+                        weight_column="hh_weight",
+                    ),
+                    EntityObservation(
+                        entity=EntityType.PERSON,
+                        key_column="person_id",
+                        variable_names=(
+                            "household_id",
+                            "age",
+                            "sex",
+                            "education",
+                            "employment_status",
+                            "income",
+                            "tax_unit_id",
+                            "person_number",
+                            "spouse_person_number",
+                            "family_relationship",
+                        ),
+                    ),
+                ),
+            ),
+            tables={
+                EntityType.HOUSEHOLD: cps_households,
+                EntityType.PERSON: cps_persons,
+            },
+            relationships=(
+                EntityRelationship(
+                    parent_entity=EntityType.HOUSEHOLD,
+                    child_entity=EntityType.PERSON,
+                    parent_key="household_id",
+                    child_key="household_id",
+                    cardinality=RelationshipCardinality.ONE_TO_MANY,
+                ),
+            ),
+        )
+        donor_frame = ObservationFrame(
+            source=SourceDescriptor(
+                name="irs_soi_puf_2024",
+                shareability=Shareability.RESTRICTED,
+                time_structure=TimeStructure.REPEATED_CROSS_SECTION,
+                observations=(
+                    EntityObservation(
+                        entity=EntityType.HOUSEHOLD,
+                        key_column="household_id",
+                        variable_names=("state_fips", "tenure"),
+                        weight_column="hh_weight",
+                    ),
+                    EntityObservation(
+                        entity=EntityType.PERSON,
+                        key_column="person_id",
+                        variable_names=(
+                            "household_id",
+                            "age",
+                            "sex",
+                            "education",
+                            "employment_status",
+                            "income",
+                            "tax_unit_id",
+                            "person_number",
+                            "spouse_person_number",
+                            "is_head",
+                            "is_spouse",
+                            "is_dependent",
+                            "taxable_interest_income",
+                        ),
+                    ),
+                ),
+                variable_capabilities={
+                    "income": SourceVariableCapability(
+                        authoritative=False,
+                        usable_as_condition=True,
+                    ),
+                    "taxable_interest_income": SourceVariableCapability(
+                        authoritative=True,
+                        usable_as_condition=True,
+                    ),
+                },
+            ),
+            tables={
+                EntityType.HOUSEHOLD: donor_households,
+                EntityType.PERSON: donor_persons,
+            },
+            relationships=(
+                EntityRelationship(
+                    parent_entity=EntityType.HOUSEHOLD,
+                    child_entity=EntityType.PERSON,
+                    parent_key="household_id",
+                    child_key="household_id",
+                    cardinality=RelationshipCardinality.ONE_TO_MANY,
+                ),
+            ),
+        )
+        pipeline = USMicroplexPipeline(
+            USMicroplexBuildConfig(
+                n_synthetic=6,
+                synthesis_backend="bootstrap",
+                calibration_backend="entropy",
+                donor_imputer_condition_selection="top_correlated",
+                donor_imputer_max_condition_vars=1,
+            )
+        )
+        cps_input = pipeline.prepare_source_input(cps_frame)
+        donor_input = pipeline.prepare_source_input(donor_frame)
+        seed_data = pipeline.prepare_seed_data_from_source(cps_input)
+
+        pipeline._integrate_donor_sources(
+            seed_data,
+            scaffold_input=cps_input,
+            donor_inputs=[donor_input],
+        )
+
+        assert captured == [
+            (
+                "age",
+                "is_male",
+                "tax_unit_is_joint",
+                "tax_unit_count_dependents",
+                "is_tax_unit_head",
+                "is_tax_unit_spouse",
+                "is_tax_unit_dependent",
+            )
+        ]
+
     def test_integrate_donor_sources_uses_pe_prespecified_acs_predictors(
         self,
         monkeypatch,
@@ -6125,7 +6359,7 @@ class TestUSMicroplexPipeline:
 
         assert captured == [("age",)]
 
-    def test_integrate_donor_sources_projects_tax_unit_native_blocks_when_ids_present(
+    def test_integrate_donor_sources_keeps_person_native_irs_blocks_on_person_rows_when_ids_present(
         self,
         monkeypatch,
     ):

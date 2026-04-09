@@ -181,7 +181,6 @@ def test_donor_imputation_block_specs_use_zero_inflated_matching_for_sparse_irs_
         "health_savings_account_ald",
         "self_employed_health_insurance_ald",
         "self_employed_pension_contribution_ald",
-        "partnership_s_corp_income",
     ):
         assert by_variable[variable_name].native_entity is EntityType.PERSON
         assert by_variable[variable_name].condition_entities == (
@@ -193,6 +192,13 @@ def test_donor_imputation_block_specs_use_zero_inflated_matching_for_sparse_irs_
             by_variable[variable_name].strategy_for(variable_name)
             is DonorMatchStrategy.ZERO_INFLATED_POSITIVE
         )
+    assert by_variable["partnership_s_corp_income"].native_entity is EntityType.PERSON
+    assert (
+        by_variable["partnership_s_corp_income"].strategy_for(
+            "partnership_s_corp_income"
+        )
+        is DonorMatchStrategy.ZERO_INFLATED_POSITIVE
+    )
 
 
 def test_condition_var_compatibility_allows_household_controls_for_tax_unit_targets():
@@ -303,13 +309,41 @@ def test_sparse_irs_ald_semantics_are_registered():
         "health_savings_account_ald",
         "self_employed_health_insurance_ald",
         "self_employed_pension_contribution_ald",
-        "partnership_s_corp_income",
     ):
         spec = variable_semantic_spec_for(variable_name)
         assert spec.native_entity is EntityType.PERSON
         assert spec.support_family is VariableSupportFamily.ZERO_INFLATED_POSITIVE
         assert spec.donor_match_strategy is DonorMatchStrategy.ZERO_INFLATED_POSITIVE
         assert spec.condition_score_mode is ConditionScoreMode.VALUE_AND_SUPPORT
+
+
+def test_partnership_income_semantics_remain_person_native():
+    from microplex_us.variables import variable_semantic_spec_for
+
+    spec = variable_semantic_spec_for("partnership_s_corp_income")
+    assert spec.native_entity is EntityType.PERSON
+    assert spec.support_family is VariableSupportFamily.ZERO_INFLATED_POSITIVE
+    assert spec.donor_match_strategy is DonorMatchStrategy.ZERO_INFLATED_POSITIVE
+    assert spec.condition_score_mode is ConditionScoreMode.VALUE_AND_SUPPORT
+
+
+def test_only_taxable_interest_uses_pe_style_puf_irs_predictors():
+    from microplex_us.variables import (
+        PE_STYLE_PUF_IRS_DEMOGRAPHIC_PREDICTORS,
+        variable_semantic_spec_for,
+    )
+
+    assert (
+        variable_semantic_spec_for("taxable_interest_income").preferred_condition_vars
+        == PE_STYLE_PUF_IRS_DEMOGRAPHIC_PREDICTORS
+    )
+    for variable_name in (
+        "health_savings_account_ald",
+        "self_employed_health_insurance_ald",
+        "self_employed_pension_contribution_ald",
+        "partnership_s_corp_income",
+    ):
+        assert variable_semantic_spec_for(variable_name).preferred_condition_vars == ()
 
 
 def test_person_native_irs_semantics_match_current_policyengine_entities():

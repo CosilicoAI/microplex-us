@@ -68,6 +68,7 @@ from microplex_us.policyengine.us import (
     write_policyengine_us_time_period_dataset,
 )
 from microplex_us.variables import (
+    PE_STYLE_PUF_IRS_DEMOGRAPHIC_PREDICTORS,
     DonorMatchStrategy,
     VariableSupportFamily,
     donor_imputation_block_specs,
@@ -2571,8 +2572,19 @@ class USMicroplexPipeline:
                         current = result.updated_frame
                         integrated_variables.extend(result.integrated_variables)
                     continue
+                donor_condition_source = self._augment_donor_condition_frame_for_targets(
+                    donor_condition_source,
+                    donor_block_spec.model_variables,
+                )
+                current_condition_source = (
+                    self._augment_donor_condition_frame_for_targets(
+                        current_condition_source,
+                        donor_block_spec.model_variables,
+                    )
+                )
                 donor_condition_vars = self._select_donor_condition_vars(
                     donor_condition_source,
+                    current_condition_source,
                     shared_vars_for_block,
                     donor_block_spec.model_variables,
                 )
@@ -2615,9 +2627,17 @@ class USMicroplexPipeline:
     def _select_donor_condition_vars(
         self,
         donor_frame: pd.DataFrame,
+        current_frame: pd.DataFrame,
         shared_vars: list[str],
         donor_block: tuple[str, ...],
     ) -> list[str]:
+        preferred_condition_vars = self._resolve_preferred_donor_condition_vars(
+            donor_frame=donor_frame,
+            current_frame=current_frame,
+            donor_block=donor_block,
+        )
+        if preferred_condition_vars:
+            return preferred_condition_vars
         condition_vars = [
             variable for variable in shared_vars if variable in donor_frame.columns
         ]
@@ -2659,6 +2679,200 @@ class USMicroplexPipeline:
             variable
             for _, variable in scored_conditions[:max_condition_vars]
         ]
+
+    def _resolve_preferred_donor_condition_vars(
+        self,
+        *,
+        donor_frame: pd.DataFrame,
+        current_frame: pd.DataFrame,
+        donor_block: tuple[str, ...],
+    ) -> list[str]:
+        if len(donor_block) != 1:
+            return []
+        preferred_condition_vars = variable_semantic_spec_for(
+            donor_block[0]
+        ).preferred_condition_vars
+        if not preferred_condition_vars:
+            return []
+        resolved: list[str] = []
+        for variable in preferred_condition_vars:
+            if variable not in donor_frame.columns or variable not in current_frame.columns:
+                return []
+            if not pd.api.types.is_numeric_dtype(donor_frame[variable]):
+                return []
+            if not pd.api.types.is_numeric_dtype(current_frame[variable]):
+                return []
+            if not self._is_compatible_donor_condition(
+                current_frame[variable],
+                donor_frame[variable],
+            ):
+                return []
+            resolved.append(variable)
+        return resolved
+
+    def _augment_donor_condition_frame_for_targets(
+        self,
+        frame: pd.DataFrame,
+        target_variables: tuple[str, ...],
+    ) -> pd.DataFrame:
+        preferred_condition_vars = [
+            variable
+            for target_variable in target_variables
+            for variable in variable_semantic_spec_for(
+                target_variable
+            ).preferred_condition_vars
+        ]
+        if not preferred_condition_vars:
+            return frame
+        if not set(PE_STYLE_PUF_IRS_DEMOGRAPHIC_PREDICTORS) & set(preferred_condition_vars):
+            return frame
+        predictor_frame = self._build_pe_style_puf_irs_condition_frame(frame)
+        if predictor_frame.empty:
+            return frame
+        result = frame.copy()
+        for column in predictor_frame.columns:
+            result[column] = predictor_frame[column]
+        return result
+
+    def _build_pe_style_puf_irs_condition_frame(
+        self,
+        frame: pd.DataFrame,
+    ) -> pd.DataFrame:
+        result = pd.DataFrame(index=frame.index)
+        sex = (
+            pd.to_numeric(frame["sex"], errors="coerce")
+            if "sex" in frame.columns
+            else pd.Series(np.nan, index=frame.index, dtype=float)
+        )
+        if "age" in frame.columns:
+            result["age"] = pd.to_numeric(frame["age"], errors="coerce").astype(float)
+        if "sex" in frame.columns:
+            result["is_male"] = pd.Series(
+                np.where(sex == 1, 1.0, np.where(sex == 2, 0.0, np.nan)),
+                index=frame.index,
+                dtype=float,
+            )
+        elif "is_male" in frame.columns:
+            result["is_male"] = pd.to_numeric(frame["is_male"], errors="coerce").astype(
+                float
+            )
+        if "tax_unit_id" not in frame.columns:
+            return result
+
+        relationship = (
+            self._normalize_relationship_to_head(frame)
+            if "relationship_to_head" not in frame.columns
+            else pd.to_numeric(frame["relationship_to_head"], errors="coerce")
+            .fillna(3)
+            .astype(int)
+        )
+        result["tax_unit_is_joint"] = 0.0
+        result["tax_unit_count_dependents"] = 0.0
+        result["is_tax_unit_head"] = 0.0
+        result["is_tax_unit_spouse"] = 0.0
+        result["is_tax_unit_dependent"] = 0.0
+
+        ages = (
+            pd.to_numeric(frame["age"], errors="coerce").fillna(0.0)
+            if "age" in frame.columns
+            else pd.Series(0.0, index=frame.index, dtype=float)
+        )
+        spouse_person_number = (
+            pd.to_numeric(frame.get("spouse_person_number"), errors="coerce")
+            .fillna(0)
+            .astype(int)
+            if "spouse_person_number" in frame.columns
+            else pd.Series(0, index=frame.index, dtype=int)
+        )
+        person_number = (
+            pd.to_numeric(frame.get("person_number"), errors="coerce")
+            .fillna(0)
+            .astype(int)
+            if "person_number" in frame.columns
+            else pd.Series(0, index=frame.index, dtype=int)
+        )
+
+        tax_unit_ids = frame["tax_unit_id"]
+        valid_tax_unit_ids = tax_unit_ids.notna() & tax_unit_ids.astype(str).str.strip().ne(
+            ""
+        )
+        for _, unit_persons in frame.loc[valid_tax_unit_ids].groupby(
+            "tax_unit_id",
+            sort=False,
+        ):
+            member_index = unit_persons.index
+            unit_relationship = relationship.loc[member_index]
+            dependent_index = unit_relationship[unit_relationship.eq(2)].index.tolist()
+
+            spouse_index: list[int] = []
+            by_number = {
+                int(number): idx
+                for idx, number in person_number.loc[member_index].items()
+                if int(number) > 0
+            }
+            for idx in member_index:
+                spouse_number = int(spouse_person_number.loc[idx])
+                current_number = int(person_number.loc[idx])
+                if spouse_number <= 0 or current_number <= 0:
+                    continue
+                spouse_idx = by_number.get(spouse_number)
+                if spouse_idx is None:
+                    continue
+                if int(spouse_person_number.loc[spouse_idx]) != current_number:
+                    continue
+                spouse_index.extend([int(idx), int(spouse_idx)])
+            if not spouse_index:
+                spouse_index = (
+                    unit_relationship[unit_relationship.eq(1)].index.astype(int).tolist()
+                )
+            spouse_index = [
+                idx for idx in dict.fromkeys(spouse_index) if idx not in dependent_index
+            ]
+
+            head_index: int | None = None
+            head_candidates = [
+                int(idx)
+                for idx in unit_relationship[unit_relationship.eq(0)].index.tolist()
+                if int(idx) not in spouse_index
+            ]
+            if head_candidates:
+                head_index = head_candidates[0]
+            else:
+                nondependent_candidates = [
+                    int(idx)
+                    for idx in member_index.tolist()
+                    if int(idx) not in spouse_index and int(idx) not in dependent_index
+                ]
+                if nondependent_candidates:
+                    head_index = max(
+                        nondependent_candidates,
+                        key=lambda idx: (float(ages.loc[idx]), -int(idx)),
+                    )
+                elif spouse_index:
+                    head_index = spouse_index[0]
+                    spouse_index = [idx for idx in spouse_index if idx != head_index]
+                else:
+                    head_index = int(member_index[0])
+
+            spouse_index = [idx for idx in spouse_index if idx != head_index]
+            if len(spouse_index) > 1:
+                spouse_index = [
+                    max(
+                        spouse_index,
+                        key=lambda idx: (float(ages.loc[idx]), -int(idx)),
+                    )
+                ]
+
+            result.loc[member_index, "tax_unit_is_joint"] = float(bool(spouse_index))
+            result.loc[member_index, "tax_unit_count_dependents"] = float(
+                len(dependent_index)
+            )
+            result.loc[dependent_index, "is_tax_unit_dependent"] = 1.0
+            if head_index is not None:
+                result.loc[head_index, "is_tax_unit_head"] = 1.0
+            result.loc[spouse_index, "is_tax_unit_spouse"] = 1.0
+
+        return result
 
     def _entity_key_column(self, entity: EntityType) -> str | None:
         return ENTITY_ID_COLUMNS.get(entity)
@@ -4170,6 +4384,8 @@ class USMicroplexPipeline:
             else first_present("capital_gains")
         )
         result["partnership_s_corp_income"] = first_present("partnership_s_corp_income")
+        result["partnership_se_income"] = first_present("partnership_se_income")
+        result["estate_income"] = first_present("estate_income")
         result["farm_income"] = first_present("farm_income")
         result["farm_operations_income"] = first_present("farm_operations_income")
         result["farm_rent_income"] = first_present("farm_rent_income")
