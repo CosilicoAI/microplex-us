@@ -26,6 +26,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: CosilicoAI/microplex
+          ref: codex/core-semantic-guards
           path: microplex
 
       - name: Set up Python
