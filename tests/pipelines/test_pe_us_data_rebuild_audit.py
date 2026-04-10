@@ -60,6 +60,31 @@ def test_build_policyengine_us_data_rebuild_native_audit_summarizes_saved_artifa
             }
         )
     )
+    (artifact_dir / "imputation_ablation.json").write_text(
+        json.dumps(
+            {
+                "summary": {
+                    "source_count": 5,
+                    "target_count": 94,
+                    "production_variant": "structured_pe_conditioning",
+                    "production_mean_weighted_mae": 34116.09,
+                    "production_mean_support_f1": 0.5375,
+                    "best_mean_weighted_mae_variant": "top_correlated_qrf",
+                    "best_mean_support_f1_variant": "structured_pe_conditioning",
+                    "variant_scorecard": {
+                        "structured_pe_conditioning": {
+                            "mean_weighted_mae": 34116.09,
+                            "mean_support_f1": 0.5375,
+                        },
+                        "top_correlated_qrf": {
+                            "mean_weighted_mae": 32873.70,
+                            "mean_support_f1": 0.5352,
+                        },
+                    },
+                }
+            }
+        )
+    )
 
     def fake_target_delta(**kwargs):
         assert kwargs["from_dataset_path"] == baseline_dataset
@@ -144,8 +169,15 @@ def test_build_policyengine_us_data_rebuild_native_audit_summarizes_saved_artifa
     assert audit["topTargetRegressions"][0]["target_name"].startswith("state/CA/")
     assert audit["supportAuditSummary"]["missingStoredCriticalInputs"] == ["has_esi"]
     assert audit["supportAuditSummary"]["topCriticalInputSupportGaps"][0]["variable"] == "has_esi"
+    assert (
+        audit["imputationAblationSummary"]["best_mean_weighted_mae_variant"]
+        == "top_correlated_qrf"
+    )
     assert audit["verdictHints"]["largestRegressingFamily"] == "national_irs_other"
     assert audit["verdictHints"]["largestRegressingTarget"].startswith("state/CA/")
+    assert audit["verdictHints"]["productionImputationVariant"] == "structured_pe_conditioning"
+    assert audit["verdictHints"]["productionImputationVariantIsMaeWinner"] is False
+    assert audit["verdictHints"]["productionImputationVariantIsSupportWinner"] is True
 
 
 def test_write_policyengine_us_data_rebuild_native_audit_writes_default_sidecar(
@@ -193,3 +225,7 @@ def test_write_policyengine_us_data_rebuild_native_audit_writes_default_sidecar(
     payload = json.loads(output_path.read_text())
     assert payload["candidateDatasetPath"] == str(candidate_dataset)
     assert payload["baselineDatasetPath"] == str(baseline_dataset.resolve())
+    assert payload["imputationAblationSummary"] is None
+    assert payload["verdictHints"]["productionImputationVariant"] is None
+    assert payload["verdictHints"]["productionImputationVariantIsMaeWinner"] is None
+    assert payload["verdictHints"]["productionImputationVariantIsSupportWinner"] is None

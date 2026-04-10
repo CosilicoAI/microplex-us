@@ -38,6 +38,9 @@ from microplex_us.pipelines.pe_us_data_rebuild import (
     default_policyengine_us_data_rebuild_program,
     default_policyengine_us_data_rebuild_source_providers,
 )
+from microplex_us.pipelines.pe_us_data_rebuild_audit import (
+    build_policyengine_us_data_rebuild_native_audit,
+)
 from microplex_us.pipelines.pe_us_data_rebuild_parity import (
     build_policyengine_us_data_rebuild_parity_artifact,
     write_policyengine_us_data_rebuild_parity_artifact,
@@ -81,7 +84,7 @@ def _resolve_checkpoint_calibration_target_variables(
 
 @dataclass(frozen=True)
 class PEUSDataRebuildCheckpointResult:
-    """Saved artifact bundle plus parity sidecar for one rebuild checkpoint."""
+    """Saved artifact bundle plus attached PE comparison sidecars."""
 
     build_config: USMicroplexBuildConfig
     provider_names: tuple[str, ...]
@@ -89,6 +92,8 @@ class PEUSDataRebuildCheckpointResult:
     artifacts: USMicroplexVersionedBuildArtifacts
     parity_path: Path
     parity_payload: dict[str, Any]
+    native_audit_path: Path | None = None
+    native_audit_payload: dict[str, Any] | None = None
     imputation_ablation_path: Path | None = None
     imputation_ablation_payload: dict[str, Any] | None = None
 
@@ -103,6 +108,8 @@ class PEUSDataRebuildCheckpointEvidenceResult:
     native_scores_path: Path | None
     parity_path: Path
     parity_payload: dict[str, Any]
+    native_audit_path: Path | None = None
+    native_audit_payload: dict[str, Any] | None = None
     imputation_ablation_path: Path | None = None
     imputation_ablation_payload: dict[str, Any] | None = None
 
@@ -937,11 +944,25 @@ def _build_checkpoint_imputation_ablation_payload(
     }
 
 
-def _build_checkpoint_benchmark_stage(manifest: dict[str, Any]) -> dict[str, Any]:
+def _build_checkpoint_benchmark_stage(
+    manifest: dict[str, Any],
+    *,
+    extra_outputs: tuple[str, ...] = (),
+) -> dict[str, Any]:
     artifacts = dict(manifest.get("artifacts", {}))
     harness_summary = dict(manifest.get("policyengine_harness", {}))
     native_scores_summary = dict(manifest.get("policyengine_native_scores", {}))
     imputation_ablation_summary = dict(manifest.get("imputation_ablation", {}))
+    outputs = [
+        value
+        for value in (
+            artifacts.get("policyengine_harness"),
+            artifacts.get("policyengine_native_scores"),
+            artifacts.get("imputation_ablation"),
+            *extra_outputs,
+        )
+        if value
+    ]
     return {
         "id": "benchmark",
         "step": "06",
@@ -979,21 +1000,15 @@ def _build_checkpoint_benchmark_stage(manifest: dict[str, Any]) -> dict[str, Any
                 "value": imputation_ablation_summary.get("production_mean_support_f1"),
             },
         ],
-        "outputs": [
-            value
-            for value in (
-                artifacts.get("policyengine_harness"),
-                artifacts.get("policyengine_native_scores"),
-                artifacts.get("imputation_ablation"),
-            )
-            if value
-        ],
+        "outputs": list(dict.fromkeys(outputs)),
     }
 
 
 def _refresh_checkpoint_data_flow_snapshot(
     artifact_root: Path,
     manifest: dict[str, Any],
+    *,
+    extra_outputs: tuple[str, ...] = (),
 ) -> Path | None:
     snapshot_path = artifact_root / "data_flow_snapshot.json"
     if not snapshot_path.exists():
@@ -1002,7 +1017,10 @@ def _refresh_checkpoint_data_flow_snapshot(
     if snapshot.get("schemaVersion") != 1:
         return snapshot_path
     stages = list(snapshot.get("stages", []))
-    benchmark_stage = _build_checkpoint_benchmark_stage(manifest)
+    benchmark_stage = _build_checkpoint_benchmark_stage(
+        manifest,
+        extra_outputs=extra_outputs,
+    )
     replaced = False
     for index, stage in enumerate(stages):
         if isinstance(stage, dict) and stage.get("id") == "benchmark":
@@ -1284,6 +1302,7 @@ def attach_policyengine_us_data_rebuild_checkpoint_evidence(
     policyengine_us_data_python: str | Path | None = None,
     compute_harness: bool = True,
     compute_native_scores: bool = True,
+    compute_native_audit: bool = True,
     compute_imputation_ablation: bool = False,
     require_policyengine_native_score: bool = False,
     precomputed_policyengine_harness_payload: dict[str, Any] | None = None,
@@ -1476,7 +1495,6 @@ def attach_policyengine_us_data_rebuild_checkpoint_evidence(
             else ()
         ),
     )
-    _refresh_checkpoint_data_flow_snapshot(artifact_root, manifest)
     _write_json_atomically(manifest_path, manifest)
 
     resolved_program = program or default_policyengine_us_data_rebuild_program()
@@ -1488,6 +1506,24 @@ def attach_policyengine_us_data_rebuild_checkpoint_evidence(
         artifact_root,
         program=resolved_program,
     )
+    native_audit_path: Path | None = None
+    native_audit_payload: dict[str, Any] | None = None
+    if compute_native_audit and artifacts.get("policyengine_native_scores") is not None:
+        native_audit_payload = build_policyengine_us_data_rebuild_native_audit(
+            artifact_root,
+            manifest_payload=manifest,
+            native_scores_payload=native_scores_payload,
+            imputation_ablation_payload=imputation_ablation_payload,
+            policyengine_us_data_repo=policyengine_us_data_repo,
+            policyengine_us_data_python=policyengine_us_data_python,
+        )
+        native_audit_path = artifact_root / "pe_us_data_rebuild_native_audit.json"
+        _write_json_atomically(native_audit_path, native_audit_payload)
+    _refresh_checkpoint_data_flow_snapshot(
+        artifact_root,
+        manifest,
+        extra_outputs=(native_audit_path.name,) if native_audit_path is not None else (),
+    )
     return PEUSDataRebuildCheckpointEvidenceResult(
         artifact_dir=artifact_root,
         manifest_path=manifest_path,
@@ -1495,6 +1531,8 @@ def attach_policyengine_us_data_rebuild_checkpoint_evidence(
         native_scores_path=native_scores_path,
         parity_path=parity_path,
         parity_payload=parity_payload,
+        native_audit_path=native_audit_path,
+        native_audit_payload=native_audit_payload,
         imputation_ablation_path=imputation_ablation_path,
         imputation_ablation_payload=imputation_ablation_payload,
     )
@@ -1660,6 +1698,7 @@ def run_policyengine_us_data_rebuild_checkpoint(
     defer_policyengine_harness: bool = False,
     require_policyengine_native_score: bool = False,
     defer_policyengine_native_score: bool = False,
+    defer_native_audit: bool = False,
     defer_imputation_ablation: bool = False,
     precomputed_policyengine_harness_payload: dict[str, Any] | None = None,
     precomputed_policyengine_native_scores: dict[str, Any] | None = None,
@@ -1668,7 +1707,7 @@ def run_policyengine_us_data_rebuild_checkpoint(
     run_index_path: str | Path | None = None,
     run_registry_metadata: dict[str, Any] | None = None,
 ) -> PEUSDataRebuildCheckpointResult:
-    """Run one saved rebuild checkpoint and write its parity sidecar."""
+    """Run one saved rebuild checkpoint and write its PE comparison sidecars."""
 
     if config is not None and config_overrides:
         raise ValueError(
@@ -1807,6 +1846,7 @@ def run_policyengine_us_data_rebuild_checkpoint(
         policyengine_us_data_python=policyengine_us_data_python,
         compute_harness=not defer_policyengine_harness,
         compute_native_scores=not defer_policyengine_native_score,
+        compute_native_audit=not defer_native_audit,
         compute_imputation_ablation=not defer_imputation_ablation,
         require_policyengine_native_score=require_policyengine_native_score,
         precomputed_policyengine_harness_payload=precomputed_policyengine_harness_payload,
@@ -1828,6 +1868,8 @@ def run_policyengine_us_data_rebuild_checkpoint(
         artifacts=refreshed_artifacts,
         parity_path=evidence.parity_path,
         parity_payload=evidence.parity_payload,
+        native_audit_path=evidence.native_audit_path,
+        native_audit_payload=evidence.native_audit_payload,
         imputation_ablation_path=evidence.imputation_ablation_path,
         imputation_ablation_payload=evidence.imputation_ablation_payload,
     )
@@ -1880,6 +1922,7 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--no-puf-expand-persons", action="store_true")
     parser.add_argument("--defer-policyengine-harness", action="store_true")
     parser.add_argument("--defer-policyengine-native-score", action="store_true")
+    parser.add_argument("--defer-native-audit", action="store_true")
     parser.add_argument("--defer-imputation-ablation", action="store_true")
     parser.add_argument("--require-policyengine-native-score", action="store_true")
     args = parser.parse_args(argv)
@@ -1925,6 +1968,7 @@ def main(argv: list[str] | None = None) -> None:
         defer_policyengine_harness=args.defer_policyengine_harness,
         require_policyengine_native_score=args.require_policyengine_native_score,
         defer_policyengine_native_score=args.defer_policyengine_native_score,
+        defer_native_audit=args.defer_native_audit,
         defer_imputation_ablation=args.defer_imputation_ablation,
     )
 

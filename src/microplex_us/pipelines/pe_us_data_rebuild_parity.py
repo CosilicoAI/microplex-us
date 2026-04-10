@@ -42,6 +42,18 @@ _NATIVE_SUMMARY_KEYS = (
     "n_state_targets",
 )
 
+_IMPUTATION_SUMMARY_KEYS = (
+    "source_count",
+    "skipped_source_count",
+    "target_count",
+    "production_variant",
+    "production_mean_weighted_mae",
+    "production_mean_support_f1",
+    "best_mean_weighted_mae_variant",
+    "best_mean_support_f1_variant",
+    "variant_scorecard",
+)
+
 _PROFILE_CONTEXT_KEYS = {
     "cps_asec_cache_dir",
     "policyengine_baseline_dataset",
@@ -59,6 +71,7 @@ def build_policyengine_us_data_rebuild_parity_artifact(
     manifest_payload: dict[str, Any] | None = None,
     harness_payload: dict[str, Any] | None = None,
     native_scores_payload: dict[str, Any] | None = None,
+    imputation_ablation_payload: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build a compact rebuild-parity sidecar from one saved artifact bundle."""
 
@@ -90,6 +103,15 @@ def build_policyengine_us_data_rebuild_parity_artifact(
         if native_scores_payload is not None
         else _load_optional_json(artifact_root / "policyengine_native_scores.json")
     )
+    imputation_ablation_source = _resolve_payload_source(
+        artifact_root / "imputation_ablation.json",
+        override_supplied=imputation_ablation_payload is not None,
+    )
+    imputation_ablation = (
+        dict(imputation_ablation_payload)
+        if imputation_ablation_payload is not None
+        else _load_optional_json(artifact_root / "imputation_ablation.json")
+    )
 
     resolved_program = program or default_policyengine_us_data_rebuild_program()
     config = _normalize_observed_config(dict(manifest.get("config", {})))
@@ -97,6 +119,11 @@ def build_policyengine_us_data_rebuild_parity_artifact(
     harness_summary = dict(harness.get("summary", {})) if harness is not None else {}
     native_summary = (
         dict(native_scores.get("summary", {})) if native_scores is not None else {}
+    )
+    imputation_summary = (
+        dict(imputation_ablation.get("summary", {}))
+        if imputation_ablation is not None
+        else {}
     )
     baseline_dataset_path = config.get("policyengine_baseline_dataset")
     harness_is_pe_comparison = bool(
@@ -118,6 +145,7 @@ def build_policyengine_us_data_rebuild_parity_artifact(
             "manifest": manifest_source,
             "policyengineHarness": harness_source,
             "policyengineNativeScores": native_scores_source,
+            "imputationAblation": imputation_ablation_source,
         },
         "program": {
             "programId": resolved_program.program_id,
@@ -169,6 +197,17 @@ def build_policyengine_us_data_rebuild_parity_artifact(
                 if native_scores is not None
                 else {"available": False}
             ),
+            "imputationAblation": (
+                {
+                    "available": True,
+                    **{
+                        key: imputation_summary.get(key)
+                        for key in _IMPUTATION_SUMMARY_KEYS
+                    },
+                }
+                if imputation_ablation is not None
+                else {"available": False}
+            ),
         },
         "verdict": {
             "candidateBeatsHarnessMeanAbsRelativeError": (
@@ -186,8 +225,21 @@ def build_policyengine_us_data_rebuild_parity_artifact(
                 if native_is_pe_comparison
                 else None
             ),
+            "productionImputationVariantIsMaeWinner": (
+                imputation_summary.get("production_variant")
+                == imputation_summary.get("best_mean_weighted_mae_variant")
+                if imputation_ablation is not None
+                else None
+            ),
+            "productionImputationVariantIsSupportWinner": (
+                imputation_summary.get("production_variant")
+                == imputation_summary.get("best_mean_support_f1_variant")
+                if imputation_ablation is not None
+                else None
+            ),
             "hasRealPolicyEngineComparison": harness_is_pe_comparison
             or native_is_pe_comparison,
+            "hasImputationAblation": imputation_ablation is not None,
         },
     }
 
@@ -200,6 +252,7 @@ def write_policyengine_us_data_rebuild_parity_artifact(
     manifest_payload: dict[str, Any] | None = None,
     harness_payload: dict[str, Any] | None = None,
     native_scores_payload: dict[str, Any] | None = None,
+    imputation_ablation_payload: dict[str, Any] | None = None,
 ) -> Path:
     """Write the PE rebuild parity sidecar for one saved artifact bundle."""
 
@@ -215,6 +268,7 @@ def write_policyengine_us_data_rebuild_parity_artifact(
         manifest_payload=manifest_payload,
         harness_payload=harness_payload,
         native_scores_payload=native_scores_payload,
+        imputation_ablation_payload=imputation_ablation_payload,
     )
     destination.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
     return destination

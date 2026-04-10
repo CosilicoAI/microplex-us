@@ -27,6 +27,7 @@ def test_build_policyengine_us_data_rebuild_parity_artifact_summarizes_compariso
         "artifacts": {
             "policyengine_harness": "policyengine_harness.json",
             "policyengine_native_scores": "policyengine_native_scores.json",
+            "imputation_ablation": "imputation_ablation.json",
         },
     }
     harness_payload = {
@@ -67,12 +68,37 @@ def test_build_policyengine_us_data_rebuild_parity_artifact_summarizes_compariso
             "n_state_targets": 70,
         },
     }
+    imputation_ablation_payload = {
+        "schema_version": 1,
+        "production_variant": "structured_pe_conditioning",
+        "summary": {
+            "source_count": 5,
+            "skipped_source_count": 0,
+            "target_count": 94,
+            "production_variant": "structured_pe_conditioning",
+            "production_mean_weighted_mae": 34116.09,
+            "production_mean_support_f1": 0.5375,
+            "best_mean_weighted_mae_variant": "top_correlated_qrf",
+            "best_mean_support_f1_variant": "structured_pe_conditioning",
+            "variant_scorecard": {
+                "structured_pe_conditioning": {
+                    "mean_weighted_mae": 34116.09,
+                    "mean_support_f1": 0.5375,
+                },
+                "top_correlated_qrf": {
+                    "mean_weighted_mae": 32873.70,
+                    "mean_support_f1": 0.5352,
+                },
+            },
+        },
+    }
 
     payload = build_policyengine_us_data_rebuild_parity_artifact(
         artifact_dir,
         manifest_payload=manifest,
         harness_payload=harness_payload,
         native_scores_payload=native_scores_payload,
+        imputation_ablation_payload=imputation_ablation_payload,
     )
 
     assert payload["schemaVersion"] == 1
@@ -81,6 +107,7 @@ def test_build_policyengine_us_data_rebuild_parity_artifact_summarizes_compariso
     assert payload["evidence"]["manifest"]["source"] == "in_memory_override"
     assert payload["evidence"]["policyengineHarness"]["source"] == "in_memory_override"
     assert payload["evidence"]["policyengineNativeScores"]["source"] == "in_memory_override"
+    assert payload["evidence"]["imputationAblation"]["source"] == "in_memory_override"
     assert payload["baselineSlice"]["baselineDatasetPath"] == "/tmp/enhanced_cps_2024.h5"
     assert payload["baselineSlice"]["baselineLabel"] == "policyengine_us_data"
     assert payload["comparison"]["policyengineHarness"]["isPolicyEngineComparison"] is True
@@ -96,9 +123,21 @@ def test_build_policyengine_us_data_rebuild_parity_artifact_summarizes_compariso
         payload["comparison"]["policyengineNativeScores"]["enhanced_cps_native_loss_delta"]
         == 0.10
     )
+    assert payload["comparison"]["imputationAblation"]["available"] is True
+    assert (
+        payload["comparison"]["imputationAblation"]["best_mean_weighted_mae_variant"]
+        == "top_correlated_qrf"
+    )
+    assert (
+        payload["comparison"]["imputationAblation"]["best_mean_support_f1_variant"]
+        == "structured_pe_conditioning"
+    )
     assert payload["verdict"]["candidateBeatsHarnessMeanAbsRelativeError"] is False
     assert payload["verdict"]["candidateBeatsNativeBroadLoss"] is False
+    assert payload["verdict"]["productionImputationVariantIsMaeWinner"] is False
+    assert payload["verdict"]["productionImputationVariantIsSupportWinner"] is True
     assert payload["verdict"]["hasRealPolicyEngineComparison"] is True
+    assert payload["verdict"]["hasImputationAblation"] is True
 
 
 def test_write_policyengine_us_data_rebuild_parity_artifact_records_config_drift(
@@ -205,11 +244,16 @@ def test_write_policyengine_us_data_rebuild_parity_artifact_uses_bundle_files_an
     assert written["evidence"]["manifest"]["exists"] is True
     assert written["evidence"]["policyengineHarness"]["exists"] is True
     assert written["evidence"]["policyengineNativeScores"]["exists"] is True
+    assert written["evidence"]["imputationAblation"]["exists"] is False
     assert written["comparison"]["policyengineHarness"]["isPolicyEngineComparison"] is False
     assert (
         written["comparison"]["policyengineNativeScores"]["isPolicyEngineComparison"]
         is False
     )
+    assert written["comparison"]["imputationAblation"]["available"] is False
     assert written["verdict"]["candidateBeatsHarnessMeanAbsRelativeError"] is None
     assert written["verdict"]["candidateBeatsNativeBroadLoss"] is None
+    assert written["verdict"]["productionImputationVariantIsMaeWinner"] is None
+    assert written["verdict"]["productionImputationVariantIsSupportWinner"] is None
     assert written["verdict"]["hasRealPolicyEngineComparison"] is False
+    assert written["verdict"]["hasImputationAblation"] is False

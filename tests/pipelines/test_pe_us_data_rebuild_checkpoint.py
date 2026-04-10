@@ -456,6 +456,8 @@ def test_run_policyengine_us_data_rebuild_checkpoint_builds_bundle_and_parity(
                 artifact_dir_arg,
                 program=kwargs.get("program"),
             ),
+            native_audit_path=artifact_root / "pe_us_data_rebuild_native_audit.json",
+            native_audit_payload={"verdictHints": {"largestRegressingFamily": None}},
             imputation_ablation_path=(
                 artifact_root / "imputation_ablation.json"
                 if kwargs.get("precomputed_imputation_ablation_payload") is not None
@@ -511,6 +513,7 @@ def test_run_policyengine_us_data_rebuild_checkpoint_builds_bundle_and_parity(
     ]
     assert captured["run_registry_metadata"]["rebuild_profile_expected"] is True
     assert captured["attach_kwargs"]["build_result"].config == captured["config"]
+    assert captured["attach_kwargs"]["compute_native_audit"] is True
     assert captured["attach_kwargs"]["compute_imputation_ablation"] is True
     assert captured["attach_kwargs"]["precomputed_imputation_ablation_payload"] is None
     assert (
@@ -530,6 +533,10 @@ def test_run_policyengine_us_data_rebuild_checkpoint_builds_bundle_and_parity(
     assert result.artifacts.frontier_entry is not None
     assert result.artifacts.frontier_entry.artifact_id == "run-1"
     assert result.artifacts.frontier_delta == 0.0
+    assert result.native_audit_path == artifact_dir / "pe_us_data_rebuild_native_audit.json"
+    assert result.native_audit_payload == {
+        "verdictHints": {"largestRegressingFamily": None}
+    }
     assert result.imputation_ablation_path is None
     assert result.imputation_ablation_payload is None
 
@@ -771,6 +778,17 @@ def test_attach_policyengine_us_data_rebuild_checkpoint_evidence_updates_manifes
             "verdict": {"hasRealPolicyEngineComparison": True},
         },
     )
+    native_audit_payload = {
+        "artifactId": "artifact",
+        "verdictHints": {
+            "productionImputationVariantIsMaeWinner": True,
+            "productionImputationVariantIsSupportWinner": True,
+        },
+    }
+    monkeypatch.setattr(
+        f"{module_name}.build_policyengine_us_data_rebuild_native_audit",
+        lambda artifact_dir_arg, **kwargs: native_audit_payload,
+    )
 
     result = attach_policyengine_us_data_rebuild_checkpoint_evidence(
         artifact_dir,
@@ -794,7 +812,12 @@ def test_attach_policyengine_us_data_rebuild_checkpoint_evidence_updates_manifes
     registry_entries = load_us_microplex_run_registry(tmp_path / "run_registry.jsonl")
     assert result.harness_path == artifact_dir / "policyengine_harness.json"
     assert result.native_scores_path == artifact_dir / "policyengine_native_scores.json"
+    assert result.native_audit_path == artifact_dir / "pe_us_data_rebuild_native_audit.json"
+    assert result.native_audit_payload == native_audit_payload
     assert result.imputation_ablation_path == artifact_dir / "imputation_ablation.json"
+    written_native_audit = json.loads(
+        (artifact_dir / "pe_us_data_rebuild_native_audit.json").read_text()
+    )
     assert (
         written_manifest["artifacts"]["policyengine_harness"]
         == "policyengine_harness.json"
@@ -818,6 +841,7 @@ def test_attach_policyengine_us_data_rebuild_checkpoint_evidence_updates_manifes
     assert (
         written_manifest["imputation_ablation"]["production_mean_weighted_mae"] == 0.21
     )
+    assert written_native_audit["verdictHints"]["productionImputationVariantIsMaeWinner"] is True
     assert written_manifest["run_registry"]["artifact_id"] == "artifact"
     assert written_manifest["run_index"]["artifact_id"] == "artifact"
     assert (tmp_path / "run_index.duckdb").exists()
@@ -829,6 +853,7 @@ def test_attach_policyengine_us_data_rebuild_checkpoint_evidence_updates_manifes
         "policyengine_harness.json",
         "policyengine_native_scores.json",
         "imputation_ablation.json",
+        "pe_us_data_rebuild_native_audit.json",
     ]
     assert {metric["label"]: metric["value"] for metric in benchmark_stage["metrics"]}[
         "Imputation MAE"
@@ -930,6 +955,17 @@ def test_attach_policyengine_us_data_rebuild_checkpoint_evidence_computes_imputa
             "verdict": {"hasRealPolicyEngineComparison": True},
         },
     )
+    native_audit_payload = {
+        "artifactId": "artifact",
+        "verdictHints": {
+            "productionImputationVariantIsMaeWinner": False,
+            "productionImputationVariantIsSupportWinner": True,
+        },
+    }
+    monkeypatch.setattr(
+        f"{module_name}.build_policyengine_us_data_rebuild_native_audit",
+        lambda artifact_dir_arg, **kwargs: native_audit_payload,
+    )
 
     def fake_build_checkpoint_imputation_ablation_payload(
         build_result_arg,
@@ -971,6 +1007,8 @@ def test_attach_policyengine_us_data_rebuild_checkpoint_evidence_computes_imputa
         == 0.10
     )
     assert result.imputation_ablation_payload == imputation_ablation_payload
+    assert result.native_audit_payload == native_audit_payload
+    assert result.native_audit_path == artifact_dir / "pe_us_data_rebuild_native_audit.json"
     assert result.imputation_ablation_path == artifact_dir / "imputation_ablation.json"
     assert (
         written_manifest["artifacts"]["imputation_ablation"]

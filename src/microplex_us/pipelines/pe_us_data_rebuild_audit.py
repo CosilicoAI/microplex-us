@@ -19,6 +19,7 @@ def build_policyengine_us_data_rebuild_native_audit(
     top_k: int = 15,
     manifest_payload: dict[str, Any] | None = None,
     native_scores_payload: dict[str, Any] | None = None,
+    imputation_ablation_payload: dict[str, Any] | None = None,
     target_delta_payload: dict[str, Any] | None = None,
     support_audit_payload: dict[str, Any] | None = None,
     policyengine_us_data_repo: str | Path | None = None,
@@ -36,6 +37,11 @@ def build_policyengine_us_data_rebuild_native_audit(
         dict(native_scores_payload)
         if native_scores_payload is not None
         else json.loads((artifact_root / "policyengine_native_scores.json").read_text())
+    )
+    imputation_ablation = (
+        dict(imputation_ablation_payload)
+        if imputation_ablation_payload is not None
+        else _load_optional_json(artifact_root / "imputation_ablation.json")
     )
     config = dict(manifest.get("config", {}))
     artifacts = dict(manifest.get("artifacts", {}))
@@ -95,6 +101,16 @@ def build_policyengine_us_data_rebuild_native_audit(
     ][:top_k]
 
     support_summary = _build_support_summary(support_audit, top_k=top_k)
+    imputation_summary = (
+        dict(imputation_ablation.get("summary", {}))
+        if imputation_ablation is not None
+        else None
+    )
+    production_variant = (
+        imputation_summary.get("production_variant")
+        if imputation_summary is not None
+        else None
+    )
 
     return {
         "schemaVersion": 1,
@@ -109,6 +125,7 @@ def build_policyengine_us_data_rebuild_native_audit(
         "topTargetRegressions": list(target_delta.get("top_regressions", ())),
         "topTargetImprovements": list(target_delta.get("top_improvements", ())),
         "supportAuditSummary": support_summary,
+        "imputationAblationSummary": imputation_summary,
         "supportAudit": support_audit,
         "targetDelta": target_delta,
         "verdictHints": {
@@ -123,6 +140,19 @@ def build_policyengine_us_data_rebuild_native_audit(
             "missingStoredCriticalInputs": support_summary[
                 "missingStoredCriticalInputs"
             ],
+            "productionImputationVariant": production_variant,
+            "productionImputationVariantIsMaeWinner": (
+                production_variant
+                == imputation_summary.get("best_mean_weighted_mae_variant")
+                if imputation_summary is not None
+                else None
+            ),
+            "productionImputationVariantIsSupportWinner": (
+                production_variant
+                == imputation_summary.get("best_mean_support_f1_variant")
+                if imputation_summary is not None
+                else None
+            ),
         },
     }
 
@@ -134,6 +164,7 @@ def write_policyengine_us_data_rebuild_native_audit(
     top_k: int = 15,
     manifest_payload: dict[str, Any] | None = None,
     native_scores_payload: dict[str, Any] | None = None,
+    imputation_ablation_payload: dict[str, Any] | None = None,
     target_delta_payload: dict[str, Any] | None = None,
     support_audit_payload: dict[str, Any] | None = None,
     policyengine_us_data_repo: str | Path | None = None,
@@ -152,6 +183,7 @@ def write_policyengine_us_data_rebuild_native_audit(
         top_k=top_k,
         manifest_payload=manifest_payload,
         native_scores_payload=native_scores_payload,
+        imputation_ablation_payload=imputation_ablation_payload,
         target_delta_payload=target_delta_payload,
         support_audit_payload=support_audit_payload,
         policyengine_us_data_repo=policyengine_us_data_repo,
@@ -176,6 +208,12 @@ def _resolve_candidate_dataset_path(
             f"Artifact bundle is missing saved policyengine dataset: {dataset_path}"
         )
     return dataset_path
+
+
+def _load_optional_json(path: Path) -> dict[str, Any] | None:
+    if not path.exists():
+        return None
+    return json.loads(path.read_text())
 
 
 def _resolve_baseline_dataset_path(config: dict[str, Any]) -> Path:
