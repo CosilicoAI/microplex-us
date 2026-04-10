@@ -303,11 +303,20 @@ from microplex_us.target_registry import (
     get_registry,
     print_registry_summary,
 )
-from microplex_us.targets import (
-    POLICYENGINE_US_COUNT_ENTITIES,
-    policyengine_db_target_to_canonical_spec,
-    policyengine_db_targets_to_canonical_set,
+
+_TARGETS_EXPORTS = (
+    "POLICYENGINE_US_COUNT_ENTITIES",
+    "policyengine_db_target_to_canonical_spec",
+    "policyengine_db_targets_to_canonical_set",
 )
+try:
+    from microplex_us.targets import (
+        POLICYENGINE_US_COUNT_ENTITIES,
+        policyengine_db_target_to_canonical_spec,
+        policyengine_db_targets_to_canonical_set,
+    )
+except ImportError:
+    globals().update(dict.fromkeys(_TARGETS_EXPORTS))
 from microplex_us.unified_calibration import (
     CalibrationTarget,
     UnifiedCalibrator,
