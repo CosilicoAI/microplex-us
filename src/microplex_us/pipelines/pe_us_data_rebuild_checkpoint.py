@@ -959,6 +959,7 @@ def _build_checkpoint_benchmark_stage(
             artifacts.get("policyengine_harness"),
             artifacts.get("policyengine_native_scores"),
             artifacts.get("imputation_ablation"),
+            artifacts.get("policyengine_native_audit"),
             *extra_outputs,
         )
         if value
@@ -1149,6 +1150,10 @@ def _load_checkpoint_versioned_artifacts(
         policyengine_native_scores=_resolve_saved_artifact_path(
             artifact_root,
             artifacts.get("policyengine_native_scores"),
+        ),
+        policyengine_native_audit=_resolve_saved_artifact_path(
+            artifact_root,
+            artifacts.get("policyengine_native_audit"),
         ),
         run_registry=_resolve_saved_artifact_path(
             artifact_root,
@@ -1495,8 +1500,6 @@ def attach_policyengine_us_data_rebuild_checkpoint_evidence(
             else ()
         ),
     )
-    _write_json_atomically(manifest_path, manifest)
-
     resolved_program = program or default_policyengine_us_data_rebuild_program()
     parity_path = write_policyengine_us_data_rebuild_parity_artifact(
         artifact_root,
@@ -1519,11 +1522,16 @@ def attach_policyengine_us_data_rebuild_checkpoint_evidence(
         )
         native_audit_path = artifact_root / "pe_us_data_rebuild_native_audit.json"
         _write_json_atomically(native_audit_path, native_audit_payload)
+        artifacts["policyengine_native_audit"] = native_audit_path.name
+        manifest["policyengine_native_audit"] = dict(
+            native_audit_payload.get("verdictHints", {})
+        )
     _refresh_checkpoint_data_flow_snapshot(
         artifact_root,
         manifest,
         extra_outputs=(native_audit_path.name,) if native_audit_path is not None else (),
     )
+    _write_json_atomically(manifest_path, manifest)
     return PEUSDataRebuildCheckpointEvidenceResult(
         artifact_dir=artifact_root,
         manifest_path=manifest_path,

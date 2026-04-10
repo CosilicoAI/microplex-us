@@ -251,9 +251,24 @@ class USMicroplexExperimentResult:
                     if self.artifact_paths.policyengine_dataset is not None
                     else None
                 ),
+                "data_flow_snapshot": (
+                    str(self.artifact_paths.data_flow_snapshot)
+                    if self.artifact_paths.data_flow_snapshot is not None
+                    else None
+                ),
                 "policyengine_harness": (
                     str(self.artifact_paths.policyengine_harness)
                     if self.artifact_paths.policyengine_harness is not None
+                    else None
+                ),
+                "policyengine_native_scores": (
+                    str(self.artifact_paths.policyengine_native_scores)
+                    if self.artifact_paths.policyengine_native_scores is not None
+                    else None
+                ),
+                "policyengine_native_audit": (
+                    str(self.artifact_paths.policyengine_native_audit)
+                    if self.artifact_paths.policyengine_native_audit is not None
                     else None
                 ),
                 "run_registry": (
@@ -304,9 +319,24 @@ class USMicroplexExperimentResult:
                     if artifact_paths.get("policyengine_dataset") is not None
                     else None
                 ),
+                data_flow_snapshot=(
+                    Path(artifact_paths["data_flow_snapshot"])
+                    if artifact_paths.get("data_flow_snapshot") is not None
+                    else None
+                ),
                 policyengine_harness=(
                     Path(artifact_paths["policyengine_harness"])
                     if artifact_paths.get("policyengine_harness") is not None
+                    else None
+                ),
+                policyengine_native_scores=(
+                    Path(artifact_paths["policyengine_native_scores"])
+                    if artifact_paths.get("policyengine_native_scores") is not None
+                    else None
+                ),
+                policyengine_native_audit=(
+                    Path(artifact_paths["policyengine_native_audit"])
+                    if artifact_paths.get("policyengine_native_audit") is not None
                     else None
                 ),
                 run_registry=(

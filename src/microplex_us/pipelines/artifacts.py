@@ -68,6 +68,7 @@ class USMicroplexArtifactPaths:
     data_flow_snapshot: Path | None = None
     policyengine_harness: Path | None = None
     policyengine_native_scores: Path | None = None
+    policyengine_native_audit: Path | None = None
     run_registry: Path | None = None
     run_index_db: Path | None = None
 
@@ -507,6 +508,7 @@ def save_us_microplex_artifacts(
         data_flow_snapshot=data_flow_snapshot_path,
         policyengine_harness=policyengine_harness_path,
         policyengine_native_scores=policyengine_native_scores_path,
+        policyengine_native_audit=None,
         run_registry=resolved_run_registry_path,
         run_index_db=resolved_run_index_path,
     )
@@ -573,6 +575,7 @@ def save_versioned_us_microplex_artifacts(
         data_flow_snapshot=paths.data_flow_snapshot,
         policyengine_harness=paths.policyengine_harness,
         policyengine_native_scores=paths.policyengine_native_scores,
+        policyengine_native_audit=paths.policyengine_native_audit,
         run_registry=paths.run_registry,
         run_index_db=paths.run_index_db,
     )

@@ -37,8 +37,12 @@ def _artifact_paths(root: Path, name: str) -> USMicroplexArtifactPaths:
         manifest=output_dir / "manifest.json",
         synthesizer=None,
         policyengine_dataset=output_dir / "policyengine.h5",
+        data_flow_snapshot=output_dir / "data_flow_snapshot.json",
         policyengine_harness=output_dir / "policyengine_harness.json",
+        policyengine_native_scores=output_dir / "policyengine_native_scores.json",
+        policyengine_native_audit=output_dir / "pe_us_data_rebuild_native_audit.json",
         run_registry=root / "run_registry.jsonl",
+        run_index_db=root / "run_index.duckdb",
     )
 
 
@@ -147,6 +151,10 @@ def test_run_us_microplex_source_experiments_saves_report_and_sorts(monkeypatch,
     assert loaded.best_result.name == "cps+puf"
     assert loaded.leaderboard[0].current_entry is not None
     assert loaded.leaderboard[0].current_entry.candidate_composite_parity_loss == 0.35
+    assert loaded.leaderboard[0].artifact_paths.data_flow_snapshot is not None
+    assert loaded.leaderboard[0].artifact_paths.policyengine_native_scores is not None
+    assert loaded.leaderboard[0].artifact_paths.policyengine_native_audit is not None
+    assert loaded.leaderboard[0].artifact_paths.run_index_db is not None
 
 
 def test_run_us_microplex_source_experiments_requires_at_least_one_experiment(tmp_path):

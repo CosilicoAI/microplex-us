@@ -442,6 +442,15 @@ def test_run_policyengine_us_data_rebuild_checkpoint_builds_bundle_and_parity(
             (artifact_root / "imputation_ablation.json").write_text(
                 json.dumps(kwargs["precomputed_imputation_ablation_payload"])
             )
+        manifest["artifacts"]["policyengine_native_audit"] = (
+            "pe_us_data_rebuild_native_audit.json"
+        )
+        manifest["policyengine_native_audit"] = {
+            "largestRegressingFamily": None,
+        }
+        (artifact_root / "pe_us_data_rebuild_native_audit.json").write_text(
+            json.dumps({"verdictHints": {"largestRegressingFamily": None}})
+        )
         manifest_path.write_text(json.dumps(manifest))
         return SimpleNamespace(
             artifact_dir=artifact_root,
@@ -527,6 +536,10 @@ def test_run_policyengine_us_data_rebuild_checkpoint_builds_bundle_and_parity(
     assert (
         result.artifacts.artifact_paths.run_index_db
         == tmp_path / "artifacts" / "run_index.duckdb"
+    )
+    assert (
+        result.artifacts.artifact_paths.policyengine_native_audit
+        == artifact_dir / "pe_us_data_rebuild_native_audit.json"
     )
     assert result.artifacts.current_entry is not None
     assert result.artifacts.current_entry.artifact_id == "run-1"
@@ -827,6 +840,10 @@ def test_attach_policyengine_us_data_rebuild_checkpoint_evidence_updates_manifes
         == "policyengine_native_scores.json"
     )
     assert (
+        written_manifest["artifacts"]["policyengine_native_audit"]
+        == "pe_us_data_rebuild_native_audit.json"
+    )
+    assert (
         written_manifest["artifacts"]["imputation_ablation"]
         == "imputation_ablation.json"
     )
@@ -840,6 +857,12 @@ def test_attach_policyengine_us_data_rebuild_checkpoint_evidence_updates_manifes
     )
     assert (
         written_manifest["imputation_ablation"]["production_mean_weighted_mae"] == 0.21
+    )
+    assert (
+        written_manifest["policyengine_native_audit"][
+            "productionImputationVariantIsMaeWinner"
+        ]
+        is True
     )
     assert written_native_audit["verdictHints"]["productionImputationVariantIsMaeWinner"] is True
     assert written_manifest["run_registry"]["artifact_id"] == "artifact"
@@ -1010,6 +1033,16 @@ def test_attach_policyengine_us_data_rebuild_checkpoint_evidence_computes_imputa
     assert result.native_audit_payload == native_audit_payload
     assert result.native_audit_path == artifact_dir / "pe_us_data_rebuild_native_audit.json"
     assert result.imputation_ablation_path == artifact_dir / "imputation_ablation.json"
+    assert (
+        written_manifest["artifacts"]["policyengine_native_audit"]
+        == "pe_us_data_rebuild_native_audit.json"
+    )
+    assert (
+        written_manifest["policyengine_native_audit"][
+            "productionImputationVariantIsSupportWinner"
+        ]
+        is True
+    )
     assert (
         written_manifest["artifacts"]["imputation_ablation"]
         == "imputation_ablation.json"
