@@ -9,6 +9,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import h5py
+import pandas as pd
 from microplex.core import SourceQuery
 
 from microplex_us.pipelines.artifacts import (
@@ -27,7 +28,9 @@ from microplex_us.pipelines.pe_us_data_rebuild_checkpoint import (
 from microplex_us.pipelines.registry import load_us_microplex_run_registry
 
 
-def test_default_policyengine_us_data_rebuild_checkpoint_config_sets_pe_context() -> None:
+def test_default_policyengine_us_data_rebuild_checkpoint_config_sets_pe_context() -> (
+    None
+):
     config = default_policyengine_us_data_rebuild_checkpoint_config(
         policyengine_baseline_dataset="/tmp/enhanced_cps_2024.h5",
         policyengine_targets_db="/tmp/policy_data.db",
@@ -64,7 +67,9 @@ def test_default_policyengine_us_data_rebuild_checkpoint_config_sets_pe_context(
     assert config.random_seed == 123
 
 
-def test_default_policyengine_us_data_rebuild_checkpoint_config_preserves_explicit_calibration_scope() -> None:
+def test_default_policyengine_us_data_rebuild_checkpoint_config_preserves_explicit_calibration_scope() -> (
+    None
+):
     config = default_policyengine_us_data_rebuild_checkpoint_config(
         policyengine_baseline_dataset="/tmp/enhanced_cps_2024.h5",
         policyengine_targets_db="/tmp/policy_data.db",
@@ -174,7 +179,9 @@ def test_infer_policyengine_baseline_household_weight_sum_returns_none_when_weig
     assert inferred is None
 
 
-def test_default_policyengine_us_data_rebuild_queries_assign_sample_sizes_by_provider_type() -> None:
+def test_default_policyengine_us_data_rebuild_queries_assign_sample_sizes_by_provider_type() -> (
+    None
+):
     providers = default_policyengine_us_data_rebuild_source_providers(
         include_donor_surveys=True,
         cps_download=False,
@@ -203,7 +210,9 @@ def test_default_policyengine_us_data_rebuild_queries_assign_sample_sizes_by_pro
         }
 
 
-def test_default_policyengine_us_data_rebuild_queries_derive_donor_sample_size_from_sampled_sources() -> None:
+def test_default_policyengine_us_data_rebuild_queries_derive_donor_sample_size_from_sampled_sources() -> (
+    None
+):
     providers = default_policyengine_us_data_rebuild_source_providers(
         include_donor_surveys=True,
         cps_download=False,
@@ -296,7 +305,11 @@ def test_run_policyengine_us_data_rebuild_checkpoint_builds_bundle_and_parity(
                 "donor_integrated_variables": [],
                 "state_program_support_proxies": {"available": [], "missing": []},
             },
-            "calibration": {"converged": True, "n_loaded_targets": 1, "n_supported_targets": 1},
+            "calibration": {
+                "converged": True,
+                "n_loaded_targets": 1,
+                "n_supported_targets": 1,
+            },
             "artifacts": {
                 "seed_data": "seed_data.parquet",
                 "synthetic_data": "synthetic_data.parquet",
@@ -369,10 +382,12 @@ def test_run_policyengine_us_data_rebuild_checkpoint_builds_bundle_and_parity(
         f"{module_name}.build_and_save_versioned_us_microplex_from_source_providers",
         fake_build_and_save_versioned_us_microplex_from_source_providers,
     )
+
     def fake_attach_policyengine_us_data_rebuild_checkpoint_evidence(
         artifact_dir_arg,
         **kwargs,
     ):
+        captured["attach_kwargs"] = kwargs
         artifact_root = Path(artifact_dir_arg)
         registry_path = tmp_path / "artifacts" / "run_registry.jsonl"
         run_index_path = tmp_path / "artifacts" / "run_index.duckdb"
@@ -419,6 +434,14 @@ def test_run_policyengine_us_data_rebuild_checkpoint_builds_bundle_and_parity(
             "path": "artifacts/run_index.duckdb",
             "artifact_id": "run-1",
         }
+        if kwargs.get("precomputed_imputation_ablation_payload") is not None:
+            manifest["artifacts"]["imputation_ablation"] = "imputation_ablation.json"
+            manifest["imputation_ablation"] = dict(
+                kwargs["precomputed_imputation_ablation_payload"].get("summary", {})
+            )
+            (artifact_root / "imputation_ablation.json").write_text(
+                json.dumps(kwargs["precomputed_imputation_ablation_payload"])
+            )
         manifest_path.write_text(json.dumps(manifest))
         return SimpleNamespace(
             artifact_dir=artifact_root,
@@ -432,6 +455,14 @@ def test_run_policyengine_us_data_rebuild_checkpoint_builds_bundle_and_parity(
             parity_payload=fake_build_policyengine_us_data_rebuild_parity_artifact(
                 artifact_dir_arg,
                 program=kwargs.get("program"),
+            ),
+            imputation_ablation_path=(
+                artifact_root / "imputation_ablation.json"
+                if kwargs.get("precomputed_imputation_ablation_payload") is not None
+                else None
+            ),
+            imputation_ablation_payload=kwargs.get(
+                "precomputed_imputation_ablation_payload"
             ),
         )
 
@@ -457,13 +488,18 @@ def test_run_policyengine_us_data_rebuild_checkpoint_builds_bundle_and_parity(
     assert captured["queries"] == {"fake_source": query}
     assert captured["version_id"] == "run-1"
     assert captured["frontier_metric"] == "enhanced_cps_native_loss_delta"
-    assert (
-        captured["policyengine_baseline_dataset"] == "/tmp/enhanced_cps_2024.h5"
-    )
+    assert captured["policyengine_baseline_dataset"] == "/tmp/enhanced_cps_2024.h5"
     assert captured["config"].policyengine_targets_db == "/tmp/policy_data.db"
-    assert captured["config"].policyengine_calibration_target_total_weight == 150_000_000.0
-    assert captured["config"].policyengine_calibration_rescale_to_target_total_weight is True
-    assert captured["config"].policyengine_selection_target_total_weight == 150_000_000.0
+    assert (
+        captured["config"].policyengine_calibration_target_total_weight == 150_000_000.0
+    )
+    assert (
+        captured["config"].policyengine_calibration_rescale_to_target_total_weight
+        is True
+    )
+    assert (
+        captured["config"].policyengine_selection_target_total_weight == 150_000_000.0
+    )
     assert captured["defer_policyengine_harness"] is True
     assert captured["defer_policyengine_native_score"] is True
     assert captured["policyengine_harness_metadata"]["rebuild_checkpoint"] is True
@@ -474,17 +510,28 @@ def test_run_policyengine_us_data_rebuild_checkpoint_builds_bundle_and_parity(
         "fake_source"
     ]
     assert captured["run_registry_metadata"]["rebuild_profile_expected"] is True
+    assert captured["attach_kwargs"]["build_result"].config == captured["config"]
+    assert captured["attach_kwargs"]["compute_imputation_ablation"] is True
+    assert captured["attach_kwargs"]["precomputed_imputation_ablation_payload"] is None
     assert (
         result.artifacts.artifact_paths.policyengine_harness
         == artifact_dir / "policyengine_harness.json"
     )
-    assert result.artifacts.artifact_paths.run_registry == tmp_path / "artifacts" / "run_registry.jsonl"
-    assert result.artifacts.artifact_paths.run_index_db == tmp_path / "artifacts" / "run_index.duckdb"
+    assert (
+        result.artifacts.artifact_paths.run_registry
+        == tmp_path / "artifacts" / "run_registry.jsonl"
+    )
+    assert (
+        result.artifacts.artifact_paths.run_index_db
+        == tmp_path / "artifacts" / "run_index.duckdb"
+    )
     assert result.artifacts.current_entry is not None
     assert result.artifacts.current_entry.artifact_id == "run-1"
     assert result.artifacts.frontier_entry is not None
     assert result.artifacts.frontier_entry.artifact_id == "run-1"
     assert result.artifacts.frontier_delta == 0.0
+    assert result.imputation_ablation_path is None
+    assert result.imputation_ablation_payload is None
 
 
 def test_run_policyengine_us_data_rebuild_checkpoint_rejects_empty_provider_sequence(
@@ -616,7 +663,11 @@ def test_attach_policyengine_us_data_rebuild_checkpoint_evidence_updates_manifes
             "donor_integrated_variables": [],
             "state_program_support_proxies": {"available": [], "missing": []},
         },
-        "calibration": {"converged": True, "n_loaded_targets": 1, "n_supported_targets": 1},
+        "calibration": {
+            "converged": True,
+            "n_loaded_targets": 1,
+            "n_supported_targets": 1,
+        },
         "artifacts": {
             "seed_data": "seed_data.parquet",
             "synthetic_data": "synthetic_data.parquet",
@@ -681,11 +732,37 @@ def test_attach_policyengine_us_data_rebuild_checkpoint_evidence_updates_manifes
             "candidate_beats_baseline": False,
         },
     }
+    imputation_ablation_payload = {
+        "schema_version": 1,
+        "artifact_id": "artifact",
+        "production_variant": "structured_pe_conditioning",
+        "summary": {
+            "source_count": 1,
+            "skipped_source_count": 0,
+            "target_count": 3,
+            "production_variant": "structured_pe_conditioning",
+            "production_mean_weighted_mae": 0.21,
+            "production_mean_support_f1": 0.88,
+            "best_mean_weighted_mae_variant": "structured_pe_conditioning",
+            "best_mean_support_f1_variant": "structured_pe_conditioning",
+            "variant_scorecard": {
+                "structured_pe_conditioning": {
+                    "source_count": 1,
+                    "mean_weighted_mae": 0.21,
+                    "mean_support_f1": 0.88,
+                }
+            },
+        },
+        "source_reports": {},
+        "skipped_sources": [],
+    }
 
     module_name = "microplex_us.pipelines.pe_us_data_rebuild_checkpoint"
     monkeypatch.setattr(
         f"{module_name}.write_policyengine_us_data_rebuild_parity_artifact",
-        lambda artifact_dir_arg, **kwargs: (Path(artifact_dir_arg) / "pe_us_data_rebuild_parity.json"),
+        lambda artifact_dir_arg, **kwargs: (
+            Path(artifact_dir_arg) / "pe_us_data_rebuild_parity.json"
+        ),
     )
     monkeypatch.setattr(
         f"{module_name}.build_policyengine_us_data_rebuild_parity_artifact",
@@ -701,28 +778,45 @@ def test_attach_policyengine_us_data_rebuild_checkpoint_evidence_updates_manifes
         compute_native_scores=False,
         precomputed_policyengine_harness_payload=harness_payload,
         precomputed_policyengine_native_scores=native_scores_payload,
+        precomputed_imputation_ablation_payload=imputation_ablation_payload,
         run_registry_path=tmp_path / "run_registry.jsonl",
         run_index_path=tmp_path,
         run_registry_metadata={"checkpoint_test": True},
     )
 
     written_manifest = json.loads((artifact_dir / "manifest.json").read_text())
-    refreshed_snapshot = json.loads((artifact_dir / "data_flow_snapshot.json").read_text())
+    refreshed_snapshot = json.loads(
+        (artifact_dir / "data_flow_snapshot.json").read_text()
+    )
     benchmark_stage = next(
         stage for stage in refreshed_snapshot["stages"] if stage["id"] == "benchmark"
     )
     registry_entries = load_us_microplex_run_registry(tmp_path / "run_registry.jsonl")
     assert result.harness_path == artifact_dir / "policyengine_harness.json"
     assert result.native_scores_path == artifact_dir / "policyengine_native_scores.json"
-    assert written_manifest["artifacts"]["policyengine_harness"] == "policyengine_harness.json"
+    assert result.imputation_ablation_path == artifact_dir / "imputation_ablation.json"
+    assert (
+        written_manifest["artifacts"]["policyengine_harness"]
+        == "policyengine_harness.json"
+    )
     assert (
         written_manifest["artifacts"]["policyengine_native_scores"]
         == "policyengine_native_scores.json"
     )
-    assert written_manifest["policyengine_harness"]["mean_abs_relative_error_delta"] == -0.02
+    assert (
+        written_manifest["artifacts"]["imputation_ablation"]
+        == "imputation_ablation.json"
+    )
+    assert (
+        written_manifest["policyengine_harness"]["mean_abs_relative_error_delta"]
+        == -0.02
+    )
     assert (
         written_manifest["policyengine_native_scores"]["enhanced_cps_native_loss_delta"]
         == 0.10
+    )
+    assert (
+        written_manifest["imputation_ablation"]["production_mean_weighted_mae"] == 0.21
     )
     assert written_manifest["run_registry"]["artifact_id"] == "artifact"
     assert written_manifest["run_index"]["artifact_id"] == "artifact"
@@ -734,4 +828,191 @@ def test_attach_policyengine_us_data_rebuild_checkpoint_evidence_updates_manifes
     assert benchmark_stage["outputs"] == [
         "policyengine_harness.json",
         "policyengine_native_scores.json",
+        "imputation_ablation.json",
     ]
+    assert {metric["label"]: metric["value"] for metric in benchmark_stage["metrics"]}[
+        "Imputation MAE"
+    ] == 0.21
+    assert {metric["label"]: metric["value"] for metric in benchmark_stage["metrics"]}[
+        "Imputation F1"
+    ] == 0.88
+
+
+def test_attach_policyengine_us_data_rebuild_checkpoint_evidence_computes_imputation_ablation_with_build_result(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    artifact_dir = tmp_path / "artifact"
+    artifact_dir.mkdir()
+    manifest = {
+        "created_at": "2026-04-06T00:00:00+00:00",
+        "config": default_policyengine_us_data_rebuild_checkpoint_config(
+            policyengine_baseline_dataset="/tmp/enhanced_cps_2024.h5",
+            policyengine_targets_db="/tmp/policy_data.db",
+            target_period=2024,
+        ).to_dict(),
+        "rows": {"seed": 10, "synthetic": 20, "calibrated": 20},
+        "weights": {"nonzero": 20, "total": 20.0},
+        "targets": {"n_marginal_groups": 1, "n_continuous": 0},
+        "synthesis": {
+            "scaffold_source": "cps_asec_2023",
+            "source_names": ["cps_asec_2023", "irs_soi_puf"],
+            "backend": "seed",
+            "condition_vars": [],
+            "target_vars": [],
+            "donor_integrated_variables": [],
+            "state_program_support_proxies": {"available": [], "missing": []},
+        },
+        "calibration": {
+            "converged": True,
+            "n_loaded_targets": 1,
+            "n_supported_targets": 1,
+        },
+        "artifacts": {
+            "seed_data": "seed_data.parquet",
+            "synthetic_data": "synthetic_data.parquet",
+            "calibrated_data": "calibrated_data.parquet",
+            "targets": "targets.json",
+            "policyengine_dataset": "policyengine_us.h5",
+        },
+    }
+    (artifact_dir / "manifest.json").write_text(json.dumps(manifest))
+    for name in (
+        "seed_data.parquet",
+        "synthetic_data.parquet",
+        "calibrated_data.parquet",
+        "targets.json",
+        "policyengine_us.h5",
+    ):
+        (artifact_dir / name).write_text("{}")
+
+    harness_payload = {
+        "summary": {
+            "candidate_mean_abs_relative_error": 0.08,
+            "baseline_mean_abs_relative_error": 0.10,
+            "mean_abs_relative_error_delta": -0.02,
+        }
+    }
+    native_scores_payload = {
+        "summary": {
+            "candidate_enhanced_cps_native_loss": 0.30,
+            "enhanced_cps_native_loss_delta": 0.10,
+        }
+    }
+    imputation_ablation_payload = {
+        "schema_version": 1,
+        "artifact_id": "artifact",
+        "production_variant": "structured_pe_conditioning",
+        "summary": {
+            "source_count": 1,
+            "production_mean_weighted_mae": 0.19,
+            "production_mean_support_f1": 0.91,
+        },
+        "source_reports": {},
+        "skipped_sources": [],
+    }
+    captured: dict[str, Any] = {}
+    build_result = SimpleNamespace(
+        config=SimpleNamespace(donor_imputer_condition_selection="pe_prespecified")
+    )
+
+    module_name = "microplex_us.pipelines.pe_us_data_rebuild_checkpoint"
+    monkeypatch.setattr(
+        f"{module_name}.write_policyengine_us_data_rebuild_parity_artifact",
+        lambda artifact_dir_arg, **kwargs: (
+            Path(artifact_dir_arg) / "pe_us_data_rebuild_parity.json"
+        ),
+    )
+    monkeypatch.setattr(
+        f"{module_name}.build_policyengine_us_data_rebuild_parity_artifact",
+        lambda artifact_dir_arg, **kwargs: {
+            "artifactId": Path(artifact_dir_arg).name,
+            "verdict": {"hasRealPolicyEngineComparison": True},
+        },
+    )
+
+    def fake_build_checkpoint_imputation_ablation_payload(
+        build_result_arg,
+        *,
+        artifact_id,
+        manifest,
+    ):
+        captured["build_result"] = build_result_arg
+        captured["artifact_id"] = artifact_id
+        captured["manifest"] = manifest
+        return imputation_ablation_payload
+
+    monkeypatch.setattr(
+        f"{module_name}._build_checkpoint_imputation_ablation_payload",
+        fake_build_checkpoint_imputation_ablation_payload,
+    )
+
+    result = attach_policyengine_us_data_rebuild_checkpoint_evidence(
+        artifact_dir,
+        build_result=build_result,
+        compute_harness=False,
+        compute_native_scores=False,
+        compute_imputation_ablation=True,
+        precomputed_policyengine_harness_payload=harness_payload,
+        precomputed_policyengine_native_scores=native_scores_payload,
+    )
+
+    written_manifest = json.loads((artifact_dir / "manifest.json").read_text())
+    assert captured["build_result"] is build_result
+    assert captured["artifact_id"] == "artifact"
+    assert (
+        captured["manifest"]["policyengine_harness"]["mean_abs_relative_error_delta"]
+        == -0.02
+    )
+    assert (
+        captured["manifest"]["policyengine_native_scores"][
+            "enhanced_cps_native_loss_delta"
+        ]
+        == 0.10
+    )
+    assert result.imputation_ablation_payload == imputation_ablation_payload
+    assert result.imputation_ablation_path == artifact_dir / "imputation_ablation.json"
+    assert (
+        written_manifest["artifacts"]["imputation_ablation"]
+        == "imputation_ablation.json"
+    )
+
+
+def test_build_checkpoint_imputation_ablation_payload_returns_none_when_no_donor_reports(
+    monkeypatch,
+) -> None:
+    from microplex_us.pipelines.pe_us_data_rebuild_checkpoint import (
+        _build_checkpoint_imputation_ablation_payload,
+    )
+
+    class FakePipeline:
+        def __init__(self, config):
+            self.config = config
+
+        def prepare_source_input(self, frame):
+            return SimpleNamespace(frame=frame)
+
+        def prepare_seed_data_from_source(self, source_input):
+            return pd.DataFrame(
+                {"household_id": [1], "person_id": [1], "hh_weight": [1.0]}
+            )
+
+    monkeypatch.setattr(
+        "microplex_us.pipelines.us.USMicroplexPipeline",
+        FakePipeline,
+    )
+    scaffold_frame = SimpleNamespace(source=SimpleNamespace(name="scaffold"))
+
+    payload = _build_checkpoint_imputation_ablation_payload(
+        SimpleNamespace(
+            config=SimpleNamespace(
+                donor_imputer_condition_selection="pe_prespecified",
+            ),
+            source_frame=scaffold_frame,
+            source_frames=(scaffold_frame,),
+        ),
+        artifact_id="artifact",
+        manifest={},
+    )
+
+    assert payload is None
