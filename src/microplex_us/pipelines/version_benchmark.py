@@ -3,16 +3,40 @@
 from __future__ import annotations
 
 import argparse
+from dataclasses import dataclass
 from pathlib import Path
 
-from microplex_us.data_sources.cps import CPSASECParquetSourceProvider
-from microplex_us.data_sources.psid import PSIDSourceProvider
-from microplex_us.data_sources.puf import PUFSourceProvider
-from microplex_us.pipelines.artifacts import (
-    build_and_save_versioned_us_microplex_from_source_providers,
-)
+try:
+    from microplex_us.data_sources.cps import CPSASECParquetSourceProvider
+    from microplex_us.data_sources.psid import PSIDSourceProvider
+    from microplex_us.data_sources.puf import PUFSourceProvider
+    from microplex_us.pipelines.artifacts import (
+        build_and_save_versioned_us_microplex_from_source_providers,
+    )
+    from microplex_us.pipelines.us import USMicroplexBuildConfig
+except ImportError:
+    CPSASECParquetSourceProvider = None
+    PSIDSourceProvider = None
+    PUFSourceProvider = None
+    build_and_save_versioned_us_microplex_from_source_providers = None
+
+    @dataclass(frozen=True)
+    class USMicroplexBuildConfig:
+        """Lightweight import-time fallback for CLI argument tests."""
+
+        n_synthetic: int
+        random_seed: int
+        policyengine_baseline_dataset: str
+        policyengine_targets_db: str
+        policyengine_dataset_year: int
+        policyengine_target_period: int
+        policyengine_target_variables: tuple[str, ...]
+        policyengine_target_domains: tuple[str, ...]
+        policyengine_target_geo_levels: tuple[str, ...]
+        policyengine_target_profile: str
+        policyengine_calibration_target_profile: str
+
 from microplex_us.pipelines.site_snapshot import write_us_microplex_site_snapshot
-from microplex_us.pipelines.us import USMicroplexBuildConfig
 
 
 def _resolve_site_snapshot_path(
@@ -29,6 +53,15 @@ def _resolve_site_snapshot_path(
 
 
 def main(argv: list[str] | None = None) -> None:
+    if CPSASECParquetSourceProvider is None:
+        raise RuntimeError(
+            "version benchmark source providers are unavailable with this core build"
+        )
+    if build_and_save_versioned_us_microplex_from_source_providers is None:
+        raise RuntimeError(
+            "version benchmark artifact builder is unavailable with this core build"
+        )
+
     parser = argparse.ArgumentParser(
         description="Run the canonical US version-bump benchmark build."
     )

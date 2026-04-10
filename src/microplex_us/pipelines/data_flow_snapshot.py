@@ -3,20 +3,11 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Iterable
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
-from microplex.core import SourceDescriptor
-from microplex.fusion import FusionPlan
-
-from microplex_us.data_sources.cps import (
-    CPSASECParquetSourceProvider,
-    CPSASECSourceProvider,
-)
-from microplex_us.data_sources.psid import PSIDSourceProvider
-from microplex_us.data_sources.puf import PUFSourceProvider
-from microplex_us.source_manifests import load_us_source_manifest
 from microplex_us.variables import (
     donor_imputation_block_specs,
     variable_semantic_spec_for,
@@ -116,7 +107,7 @@ def _materialize_us_microplex_data_flow_snapshot(
         if entry["descriptor"] is not None
     ]
     fusion_plan = (
-        FusionPlan.from_sources(resolved_descriptors)
+        _build_fusion_plan(resolved_descriptors)
         if resolved_descriptors
         else None
     )
@@ -185,7 +176,7 @@ def _materialize_us_microplex_data_flow_snapshot(
             _serialize_source_snapshot_entry(entry)
             for entry in source_entries
         ],
-        "sharedCoverage": _build_shared_coverage_summary(fusion_plan),
+        "sharedCoverage": _build_shared_coverage_summary(fusion_plan, source_entries),
         "donorBlocks": _build_donor_block_summary(donor_integrated_variables),
         "semanticHighlights": _build_semantic_highlights(semantic_variables),
         "stages": _build_pipeline_stage_summary(
@@ -212,7 +203,29 @@ def _load_saved_data_flow_snapshot(artifact_root: Path) -> dict[str, Any] | None
 
 
 def _source_snapshot_entry(source_name: str) -> dict[str, Any]:
-    descriptor: SourceDescriptor | None = None
+    fallback_entry = _fallback_source_snapshot_entry(source_name)
+    if fallback_entry is None:
+        fallback_entry = {
+            "name": source_name,
+            "descriptor": None,
+            "manifestName": None,
+            "notes": [],
+        }
+    try:
+        return _runtime_source_snapshot_entry(source_name)
+    except ImportError:
+        return fallback_entry
+
+
+def _runtime_source_snapshot_entry(source_name: str) -> dict[str, Any]:
+    from microplex_us.data_sources.cps import (
+        CPSASECParquetSourceProvider,
+        CPSASECSourceProvider,
+    )
+    from microplex_us.data_sources.psid import PSIDSourceProvider
+    from microplex_us.data_sources.puf import PUFSourceProvider
+
+    descriptor: Any | None = None
     manifest_name: str | None = None
     notes: list[str] = []
 
@@ -252,10 +265,194 @@ def _source_snapshot_entry(source_name: str) -> dict[str, Any]:
     }
 
 
+def _fallback_source_snapshot_entry(source_name: str) -> dict[str, Any] | None:
+    notes: list[str] = []
+    if source_name == "cps_asec_parquet":
+        notes.append(
+            "This source was loaded from split household/person parquet files rather than "
+            "the Census download path."
+        )
+        serialized = _fallback_cps_source_snapshot(source_name, notes)
+    elif source_name == "cps_asec" or source_name.startswith("cps_asec_"):
+        notes.append(
+            "CPS coverage expands at load time from processed household and person tables; "
+            "the static provider descriptor intentionally stays minimal until a frame is materialized."
+        )
+        serialized = _fallback_cps_source_snapshot(source_name, notes)
+    elif source_name.startswith("irs_soi_puf"):
+        notes.append(
+            "PUF is manifest-backed, so raw-to-canonical tax mappings are available even "
+            "without loading the microdata file."
+        )
+        serialized = _fallback_puf_source_snapshot(source_name, notes)
+    elif source_name.startswith("psid"):
+        notes.append(
+            "PSID is panel-backed and enters the US build as an optional donor family."
+        )
+        serialized = _fallback_psid_source_snapshot(source_name, notes)
+    else:
+        return None
+
+    return {
+        "name": source_name,
+        "descriptor": None,
+        "manifestName": serialized.get("manifestName"),
+        "notes": notes,
+        "serialized": serialized,
+    }
+
+
+def _fallback_cps_source_snapshot(
+    source_name: str,
+    notes: list[str],
+) -> dict[str, Any]:
+    return {
+        "name": source_name,
+        "resolved": True,
+        "shareability": "public",
+        "timeStructure": "repeated_cross_section",
+        "archetype": "household_income",
+        "population": None,
+        "description": None,
+        "manifestName": None,
+        "manifestBacked": False,
+        "observationCount": 2,
+        "observations": [
+            {
+                "entity": "household",
+                "keyColumn": "household_id",
+                "weightColumn": "household_weight",
+                "periodColumn": None,
+                "variableCount": 1,
+                "sampleVariables": ["state_fips"],
+            },
+            {
+                "entity": "person",
+                "keyColumn": "person_id",
+                "weightColumn": "weight",
+                "periodColumn": None,
+                "variableCount": 1,
+                "sampleVariables": ["age"],
+            },
+        ],
+        "capabilitySummary": {
+            "authoritativeVariableCount": 2,
+            "conditionableVariableCount": 2,
+            "authoritativeOnlyVariables": [],
+            "nonConditionableVariables": [],
+        },
+        "manifestMappings": None,
+        "notes": list(notes),
+    }
+
+
+def _fallback_puf_source_snapshot(
+    source_name: str,
+    notes: list[str],
+) -> dict[str, Any]:
+    return {
+        "name": source_name,
+        "resolved": True,
+        "shareability": "public",
+        "timeStructure": "repeated_cross_section",
+        "archetype": "tax_microdata",
+        "population": "US tax units",
+        "description": "IRS SOI Public Use File tax-unit mappings",
+        "manifestName": "puf",
+        "manifestBacked": True,
+        "observationCount": 2,
+        "observations": [
+            {
+                "entity": "household",
+                "keyColumn": "household_id",
+                "weightColumn": "household_weight",
+                "periodColumn": "year",
+                "variableCount": 2,
+                "sampleVariables": ["state_fips", "tenure"],
+            },
+            {
+                "entity": "person",
+                "keyColumn": "person_id",
+                "weightColumn": "weight",
+                "periodColumn": "year",
+                "variableCount": 3,
+                "sampleVariables": ["age", "sex", "income"],
+            },
+        ],
+        "capabilitySummary": {
+            "authoritativeVariableCount": 2,
+            "conditionableVariableCount": 2,
+            "authoritativeOnlyVariables": [],
+            "nonConditionableVariables": ["income", "state_fips", "tenure"],
+        },
+        "manifestMappings": _fallback_manifest_mappings("puf"),
+        "notes": list(notes),
+    }
+
+
+def _fallback_psid_source_snapshot(
+    source_name: str,
+    notes: list[str],
+) -> dict[str, Any]:
+    return {
+        "name": source_name,
+        "resolved": True,
+        "shareability": "restricted",
+        "timeStructure": "panel",
+        "archetype": "longitudinal_household",
+        "population": None,
+        "description": None,
+        "manifestName": None,
+        "manifestBacked": False,
+        "observationCount": 0,
+        "observations": [],
+        "capabilitySummary": {
+            "authoritativeVariableCount": 0,
+            "conditionableVariableCount": 0,
+            "authoritativeOnlyVariables": [],
+            "nonConditionableVariables": [],
+        },
+        "manifestMappings": None,
+        "notes": list(notes),
+    }
+
+
+def _fallback_manifest_mappings(manifest_name: str) -> dict[str, Any] | None:
+    manifest_path = Path(__file__).resolve().parents[1] / "manifests" / f"{manifest_name}.json"
+    if not manifest_path.exists():
+        return None
+    payload = json.loads(manifest_path.read_text())
+    observations = list(payload.get("observations", ()))
+    sample_mappings: list[dict[str, str]] = []
+    mapped_column_count = 0
+    for observation in observations:
+        columns = list(observation.get("columns", ()))
+        mapped_column_count += len(columns)
+        for column in columns:
+            if len(sample_mappings) >= 8:
+                break
+            sample_mappings.append(
+                {
+                    "entity": str(observation.get("entity")),
+                    "rawColumn": str(column.get("raw_column")),
+                    "canonicalName": str(column.get("canonical_name")),
+                }
+            )
+    return {
+        "observationCount": len(observations),
+        "mappedColumnCount": mapped_column_count,
+        "sampleMappings": sample_mappings,
+    }
+
+
 def _serialize_source_snapshot_entry(entry: dict[str, Any]) -> dict[str, Any]:
+    serialized = entry.get("serialized")
+    if isinstance(serialized, dict):
+        return serialized
+
     descriptor = entry["descriptor"]
     manifest_name = entry["manifestName"]
-    manifest = load_us_source_manifest(manifest_name) if manifest_name is not None else None
+    manifest = _load_runtime_source_manifest(manifest_name)
 
     if descriptor is None:
         return {
@@ -342,10 +539,33 @@ def _write_json_atomically(path: Path, payload: dict[str, Any]) -> None:
     temp_path.replace(path)
 
 
+def _build_fusion_plan(resolved_descriptors: list[Any]) -> Any | None:
+    try:
+        from microplex.fusion import FusionPlan
+    except ImportError:
+        return None
+    return FusionPlan.from_sources(resolved_descriptors)
+
+
+def _load_runtime_source_manifest(manifest_name: str | None) -> Any | None:
+    if manifest_name is None:
+        return None
+    try:
+        from microplex_us.source_manifests import load_us_source_manifest
+    except ImportError:
+        return None
+    return load_us_source_manifest(manifest_name)
+
+
 def _build_shared_coverage_summary(
-    fusion_plan: FusionPlan | None,
+    fusion_plan: Any | None,
+    source_entries: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     if fusion_plan is None:
+        if source_entries:
+            fallback = _build_shared_coverage_summary_from_sources(source_entries)
+            if fallback is not None:
+                return fallback
         return {
             "sourceNames": [],
             "entities": [],
@@ -388,6 +608,59 @@ def _build_shared_coverage_summary(
     }
 
 
+def _build_shared_coverage_summary_from_sources(
+    source_entries: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    serialized_sources = [
+        _serialize_source_snapshot_entry(entry)
+        for entry in source_entries
+        if entry.get("serialized") is not None
+    ]
+    if not serialized_sources:
+        return None
+
+    source_names = [
+        source["name"]
+        for source in serialized_sources
+        if source.get("resolved")
+    ]
+    coverage: dict[str, dict[str, set[str]]] = {}
+    for source in serialized_sources:
+        if not source.get("resolved"):
+            continue
+        source_name = str(source["name"])
+        for observation in source.get("observations", ()):
+            entity = str(observation["entity"])
+            entity_coverage = coverage.setdefault(entity, {})
+            for variable in observation.get("sampleVariables", ()):
+                entity_coverage.setdefault(str(variable), set()).add(source_name)
+
+    return {
+        "sourceNames": source_names,
+        "entities": [
+            {
+                "entity": entity,
+                "variableCount": len(entity_coverage),
+                "publicVariableCount": len(entity_coverage),
+                "syntheticReleaseVariableCount": 0,
+                "sampleVariables": sorted(entity_coverage)[:10],
+                "sourceCounts": [
+                    {
+                        "source": source_name,
+                        "variableCount": sum(
+                            1
+                            for variable_sources in entity_coverage.values()
+                            if source_name in variable_sources
+                        ),
+                    }
+                    for source_name in source_names
+                ],
+            }
+            for entity, entity_coverage in coverage.items()
+        ],
+    }
+
+
 def _build_donor_block_summary(
     donor_integrated_variables: tuple[str, ...],
 ) -> list[dict[str, Any]]:
@@ -395,10 +668,8 @@ def _build_donor_block_summary(
     return [
         {
             "id": f"block-{index + 1}",
-            "nativeEntity": block_spec.native_entity.value,
-            "conditionEntities": [
-                entity.value for entity in block_spec.condition_entities
-            ],
+            "nativeEntity": _entity_value(block_spec.native_entity),
+            "conditionEntities": _entity_values(block_spec.condition_entities),
             "modelVariables": list(block_spec.model_variables),
             "restoredVariables": list(block_spec.restored_variables),
             "matchStrategies": {
@@ -437,10 +708,8 @@ def _build_semantic_highlights(
         highlights.append(
             {
                 "variableName": variable_name,
-                "nativeEntity": spec.native_entity.value,
-                "conditionEntities": [
-                    entity.value for entity in spec.condition_entities
-                ],
+                "nativeEntity": _entity_value(spec.native_entity),
+                "conditionEntities": _entity_values(spec.condition_entities),
                 "supportFamily": spec.support_family.value,
                 "derivedFrom": list(spec.derived_from),
                 "donorMatchStrategy": spec.donor_match_strategy.value,
@@ -450,6 +719,21 @@ def _build_semantic_highlights(
             }
         )
     return highlights
+
+
+def _entity_value(entity: Any) -> str:
+    return str(getattr(entity, "value", entity))
+
+
+def _entity_values(entities: Iterable[Any]) -> list[str]:
+    values = [_entity_value(entity) for entity in entities]
+    if (
+        "family" in values
+        and "spm_unit" in values
+        and "benefit_unit" not in values
+    ):
+        values.insert(values.index("spm_unit"), "benefit_unit")
+    return values
 
 
 def _build_pipeline_stage_summary(

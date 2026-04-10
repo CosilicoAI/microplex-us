@@ -8,7 +8,7 @@ from enum import Enum
 
 import numpy as np
 import pandas as pd
-from microplex.core import EntityType, SourceVariableCapability
+from microplex.core import EntityType
 from microplex.core.semantics import (
     FrameSemanticCheck,
     FrameSemanticCheckReport,
@@ -17,6 +17,18 @@ from microplex.core.semantics import (
     apply_frame_semantic_transforms,
     evaluate_frame_semantic_checks,
 )
+
+try:
+    from microplex.core import SourceVariableCapability
+except ImportError:
+
+    @dataclass(frozen=True)
+    class SourceVariableCapability:
+        """Compatibility shim for older core branches."""
+
+        authoritative: bool = True
+        usable_as_condition: bool = True
+        notes: str | None = None
 
 
 class DonorMatchStrategy(Enum):
@@ -119,8 +131,9 @@ class VariableSemanticSpec:
         if self.condition_entities:
             return self.condition_entities
         if self.native_entity is EntityType.PERSON:
+            record_entity = getattr(EntityType, "RECORD", None)
             return tuple(
-                entity for entity in EntityType if entity is not EntityType.RECORD
+                entity for entity in EntityType if entity is not record_entity
             )
         return (EntityType.HOUSEHOLD, self.native_entity)
 
@@ -787,10 +800,11 @@ def is_projected_condition_var_compatible(
 ) -> bool:
     """Return whether a condition variable remains compatible after projection."""
     condition_entity = variable_semantic_spec_for(condition_variable).native_entity
+    record_entity = getattr(EntityType, "RECORD", None)
     allowed_entities = {
         entity
         for entity in allowed_condition_entities
-        if entity is not EntityType.RECORD
+        if entity is not record_entity
     }
     if condition_entity in allowed_entities:
         return True

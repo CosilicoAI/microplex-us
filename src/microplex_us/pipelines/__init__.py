@@ -1,330 +1,267 @@
-"""US production pipeline APIs."""
+"""US production pipeline APIs.
 
-from microplex_us.pipelines.calibration_stage_parity import (
-    build_us_calibration_stage_parity_audit,
-    write_us_calibration_stage_parity_audit,
-)
+The package root intentionally resolves exports lazily so importing one pipeline
+submodule does not require every optional core/data dependency used by all other
+pipelines.
+"""
 
-try:
-    from microplex_us.pipelines.artifacts import (
-        USMicroplexArtifactPaths,
-        USMicroplexVersionedBuildArtifacts,
-        build_and_save_versioned_us_microplex,
-        build_and_save_versioned_us_microplex_from_data_dir,
-        build_and_save_versioned_us_microplex_from_source_provider,
-        build_and_save_versioned_us_microplex_from_source_providers,
-        replay_and_save_versioned_us_microplex_policyengine_stage,
-        replay_us_microplex_policyengine_stage_from_artifact,
-        save_us_microplex_artifacts,
-        save_versioned_us_microplex_artifacts,
-        save_versioned_us_microplex_build_result,
-    )
-    from microplex_us.pipelines.experiments import (
-        USMicroplexExperimentReport,
-        USMicroplexExperimentResult,
-        USMicroplexSourceExperimentSpec,
-        build_us_n_synthetic_sweep_experiments,
-        default_us_source_mix_experiments,
-        run_us_microplex_n_synthetic_sweep,
-        run_us_microplex_source_experiments,
-    )
-    from microplex_us.pipelines.index_db import (
-        append_us_microplex_run_index_entry,
-        compare_us_microplex_target_delta_rows,
-        list_us_microplex_target_delta_rows,
-        rebuild_us_microplex_run_index,
-        resolve_us_microplex_run_index_path,
-        select_us_microplex_frontier_index_row,
-    )
-    from microplex_us.pipelines.pe_us_data_rebuild_checkpoint import (
-        PEUSDataRebuildCheckpointEvidenceResult,
-        PEUSDataRebuildCheckpointResult,
-        attach_policyengine_us_data_rebuild_checkpoint_evidence,
-        default_policyengine_us_data_rebuild_checkpoint_config,
-        default_policyengine_us_data_rebuild_queries,
-        run_policyengine_us_data_rebuild_checkpoint,
-    )
-except ModuleNotFoundError as exc:
-    if exc.name != "duckdb" and "duckdb" not in str(exc):
-        raise
-    USMicroplexArtifactPaths = None
-    USMicroplexVersionedBuildArtifacts = None
-    build_and_save_versioned_us_microplex = None
-    build_and_save_versioned_us_microplex_from_data_dir = None
-    build_and_save_versioned_us_microplex_from_source_provider = None
-    build_and_save_versioned_us_microplex_from_source_providers = None
-    replay_and_save_versioned_us_microplex_policyengine_stage = None
-    replay_us_microplex_policyengine_stage_from_artifact = None
-    save_us_microplex_artifacts = None
-    save_versioned_us_microplex_artifacts = None
-    save_versioned_us_microplex_build_result = None
-    USMicroplexExperimentReport = None
-    USMicroplexExperimentResult = None
-    USMicroplexSourceExperimentSpec = None
-    build_us_n_synthetic_sweep_experiments = None
-    default_us_source_mix_experiments = None
-    run_us_microplex_n_synthetic_sweep = None
-    run_us_microplex_source_experiments = None
-    append_us_microplex_run_index_entry = None
-    compare_us_microplex_target_delta_rows = None
-    list_us_microplex_target_delta_rows = None
-    rebuild_us_microplex_run_index = None
-    resolve_us_microplex_run_index_path = None
-    select_us_microplex_frontier_index_row = None
-    PEUSDataRebuildCheckpointEvidenceResult = None
-    PEUSDataRebuildCheckpointResult = None
-    attach_policyengine_us_data_rebuild_checkpoint_evidence = None
-    default_policyengine_us_data_rebuild_checkpoint_config = None
-    default_policyengine_us_data_rebuild_queries = None
-    run_policyengine_us_data_rebuild_checkpoint = None
-from microplex_us.pipelines.local_reweighting import (
-    USHouseholdTargetReweightingResult,
-    reweight_us_household_targets,
-)
-from microplex_us.pipelines.pe_native_optimization import (
-    PolicyEngineUSNativeWeightOptimizationResult,
-    optimize_pe_native_loss_weights,
-    optimize_policyengine_us_native_loss_dataset,
-    rewrite_policyengine_us_dataset_weights,
-)
-from microplex_us.pipelines.pe_native_scores import (
-    PolicyEngineUSEnhancedCPSNativeScores,
-    compare_us_pe_native_target_deltas,
-    compute_batch_us_pe_native_scores,
-    compute_policyengine_us_enhanced_cps_native_scores,
-    compute_us_pe_native_scores,
-    resolve_policyengine_us_data_python,
-    resolve_policyengine_us_data_repo_root,
-    score_policyengine_us_native_broad_loss,
-    write_us_pe_native_scores,
-)
-from microplex_us.pipelines.pe_us_data_rebuild import (
-    PEUSDataRebuildProgram,
-    PEUSDataRebuildStage,
-    PEUSDataRebuildStatus,
-    build_policyengine_us_data_rebuild_markdown,
-    build_policyengine_us_data_rebuild_pipeline,
-    default_policyengine_us_data_rebuild_config,
-    default_policyengine_us_data_rebuild_program,
-    default_policyengine_us_data_rebuild_source_providers,
-)
-from microplex_us.pipelines.pe_us_data_rebuild_audit import (
-    build_policyengine_us_data_rebuild_native_audit,
-    write_policyengine_us_data_rebuild_native_audit,
-)
-from microplex_us.pipelines.pe_us_data_rebuild_parity import (
-    build_policyengine_us_data_rebuild_parity_artifact,
-    write_policyengine_us_data_rebuild_parity_artifact,
-)
-from microplex_us.pipelines.performance import (
-    USMicroplexPerformanceHarnessConfig,
-    USMicroplexPerformanceHarnessRequest,
-    USMicroplexPerformanceHarnessResult,
-    USMicroplexPerformanceSession,
-    run_us_microplex_performance_harness,
-    warm_us_microplex_parity_cache,
-)
-from microplex_us.pipelines.pre_sim_parity import (
-    DEFAULT_PRE_SIM_FOCUS_VARIABLES,
-    PreSimParityVariableSpec,
-    build_us_pre_sim_parity_audit,
-    write_us_pre_sim_parity_audit,
-)
-from microplex_us.pipelines.reduced_benchmark import (
-    DEFAULT_ATOMIC_AGE_BINS,
-    DEFAULT_ATOMIC_AGE_LABELS,
-    DEFAULT_ATOMIC_EMPLOYMENT_INCOME_BINS,
-    DEFAULT_ATOMIC_EMPLOYMENT_INCOME_LABELS,
-    USMicroplexReducedBenchmarkHarnessConfig,
-    USMicroplexReducedBenchmarkHarnessResult,
-    USMicroplexReducedBenchmarkReport,
-    USMicroplexReducedBenchmarkSpec,
-    USMicroplexReducedCalibrationReport,
-    USMicroplexReducedDimensionSpec,
-    USMicroplexReducedMeasureSpec,
-    USMicroplexReducedMultiCalibrationReport,
-    calibrate_and_evaluate_us_reduced_benchmark_specs,
-    calibrate_and_evaluate_us_reduced_benchmarks,
-    default_us_atomic_rung0_benchmarks,
-    default_us_atomic_rung1_benchmarks,
-    default_us_atomic_rung2_calibration,
-    default_us_atomic_rung3_calibration,
-    default_us_atomic_rung4_calibration,
-    default_us_atomic_rung5_calibration,
-    evaluate_us_reduced_benchmark,
-    reduced_benchmark_specs_to_calibration_targets,
-    reduced_benchmark_to_calibration_targets,
-    run_us_microplex_reduced_benchmark_harness,
-)
-from microplex_us.pipelines.registry import (
-    FrontierMetric,
-    USMicroplexRunRegistryEntry,
-    append_us_microplex_run_registry_entry,
-    build_us_microplex_run_registry_entry,
-    load_us_microplex_run_registry,
-    resolve_us_microplex_frontier_artifact_dir,
-    select_us_microplex_frontier_entry,
-)
-from microplex_us.pipelines.seed_stage_parity import (
-    DEFAULT_SEED_STAGE_BOOLEAN_LANDING_FEATURES,
-    DEFAULT_SEED_STAGE_CANDIDATE_ONLY_LANDING_FEATURES,
-    DEFAULT_SEED_STAGE_CATEGORICAL_LANDING_FEATURES,
-    DEFAULT_SEED_STAGE_FOCUS_VARIABLES,
-    SeedStageBooleanLandingFeatureSpec,
-    SeedStageCategoricalLandingFeatureSpec,
-    SeedStageFocusVariableSpec,
-    build_us_seed_stage_parity_audit,
-    write_us_seed_stage_parity_audit,
-)
-from microplex_us.pipelines.site_snapshot import (
-    build_us_microplex_site_snapshot,
-    write_us_microplex_site_snapshot,
-)
-from microplex_us.pipelines.source_stage_parity import (
-    DEFAULT_CPS_SOURCE_STAGE_FOCUS_VARIABLES,
-    DEFAULT_PUF_SOURCE_STAGE_FOCUS_VARIABLES,
-    SourceStageParityVariableSpec,
-    build_us_cps_source_stage_parity_audit,
-    build_us_puf_source_stage_parity_audit,
-    build_us_source_stage_parity_audit,
-    observation_frame_to_policyengine_entity_bundle,
-    write_us_cps_source_stage_parity_audit,
-    write_us_puf_source_stage_parity_audit,
-    write_us_source_stage_parity_audit,
-)
-from microplex_us.pipelines.us import (
-    USMicroplexBuildConfig,
-    USMicroplexBuildResult,
-    USMicroplexPipeline,
-    USMicroplexTargets,
-    build_us_microplex,
-)
+from __future__ import annotations
 
-__all__ = [
-    "USMicroplexArtifactPaths",
-    "USMicroplexVersionedBuildArtifacts",
-    "append_us_microplex_run_index_entry",
-    "compare_us_microplex_target_delta_rows",
-    "USMicroplexExperimentReport",
-    "USMicroplexExperimentResult",
-    "USMicroplexSourceExperimentSpec",
-    "build_us_n_synthetic_sweep_experiments",
-    "USMicroplexPerformanceHarnessConfig",
-    "USMicroplexPerformanceHarnessRequest",
-    "USMicroplexPerformanceHarnessResult",
-    "USMicroplexPerformanceSession",
-    "USMicroplexReducedCalibrationReport",
-    "USMicroplexReducedMultiCalibrationReport",
-    "USMicroplexReducedBenchmarkHarnessConfig",
-    "USMicroplexReducedBenchmarkHarnessResult",
-    "USMicroplexReducedBenchmarkReport",
-    "USMicroplexReducedBenchmarkSpec",
-    "USMicroplexReducedDimensionSpec",
-    "USMicroplexReducedMeasureSpec",
-    "USHouseholdTargetReweightingResult",
-    "default_us_source_mix_experiments",
-    "default_us_atomic_rung0_benchmarks",
-    "default_us_atomic_rung1_benchmarks",
-    "default_us_atomic_rung2_calibration",
-    "default_us_atomic_rung3_calibration",
-    "default_us_atomic_rung4_calibration",
-    "default_us_atomic_rung5_calibration",
-    "build_and_save_versioned_us_microplex",
-    "build_and_save_versioned_us_microplex_from_data_dir",
-    "build_and_save_versioned_us_microplex_from_source_provider",
-    "build_and_save_versioned_us_microplex_from_source_providers",
-    "replay_and_save_versioned_us_microplex_policyengine_stage",
-    "replay_us_microplex_policyengine_stage_from_artifact",
-    "save_versioned_us_microplex_build_result",
-    "reweight_us_household_targets",
-    "run_us_microplex_performance_harness",
-    "warm_us_microplex_parity_cache",
-    "run_us_microplex_n_synthetic_sweep",
-    "run_us_microplex_source_experiments",
-    "list_us_microplex_target_delta_rows",
-    "save_us_microplex_artifacts",
-    "save_versioned_us_microplex_artifacts",
-    "rebuild_us_microplex_run_index",
-    "resolve_us_microplex_run_index_path",
-    "FrontierMetric",
-    "USMicroplexRunRegistryEntry",
-    "append_us_microplex_run_registry_entry",
-    "build_us_microplex_run_registry_entry",
-    "PolicyEngineUSEnhancedCPSNativeScores",
-    "PolicyEngineUSNativeWeightOptimizationResult",
-    "compare_us_pe_native_target_deltas",
-    "compute_batch_us_pe_native_scores",
-    "compute_policyengine_us_enhanced_cps_native_scores",
-    "compute_us_pe_native_scores",
-    "PEUSDataRebuildCheckpointEvidenceResult",
-    "PEUSDataRebuildCheckpointResult",
-    "PEUSDataRebuildProgram",
-    "PEUSDataRebuildStage",
-    "PEUSDataRebuildStatus",
-    "build_policyengine_us_data_rebuild_pipeline",
-    "build_policyengine_us_data_rebuild_native_audit",
-    "build_policyengine_us_data_rebuild_parity_artifact",
-    "build_policyengine_us_data_rebuild_markdown",
-    "attach_policyengine_us_data_rebuild_checkpoint_evidence",
-    "default_policyengine_us_data_rebuild_checkpoint_config",
-    "default_policyengine_us_data_rebuild_config",
-    "default_policyengine_us_data_rebuild_program",
-    "default_policyengine_us_data_rebuild_queries",
-    "default_policyengine_us_data_rebuild_source_providers",
-    "build_us_calibration_stage_parity_audit",
-    "DEFAULT_SEED_STAGE_BOOLEAN_LANDING_FEATURES",
-    "DEFAULT_SEED_STAGE_CANDIDATE_ONLY_LANDING_FEATURES",
-    "DEFAULT_SEED_STAGE_CATEGORICAL_LANDING_FEATURES",
-    "DEFAULT_SEED_STAGE_FOCUS_VARIABLES",
-    "DEFAULT_PRE_SIM_FOCUS_VARIABLES",
-    "PreSimParityVariableSpec",
-    "SeedStageBooleanLandingFeatureSpec",
-    "SeedStageCategoricalLandingFeatureSpec",
-    "SeedStageFocusVariableSpec",
-    "build_us_pre_sim_parity_audit",
-    "build_us_seed_stage_parity_audit",
-    "build_us_source_stage_parity_audit",
-    "build_us_cps_source_stage_parity_audit",
-    "build_us_puf_source_stage_parity_audit",
-    "write_us_source_stage_parity_audit",
-    "write_us_cps_source_stage_parity_audit",
-    "write_us_puf_source_stage_parity_audit",
-    "write_us_seed_stage_parity_audit",
-    "observation_frame_to_policyengine_entity_bundle",
-    "SourceStageParityVariableSpec",
-    "DEFAULT_CPS_SOURCE_STAGE_FOCUS_VARIABLES",
-    "DEFAULT_PUF_SOURCE_STAGE_FOCUS_VARIABLES",
-    "DEFAULT_ATOMIC_AGE_BINS",
-    "DEFAULT_ATOMIC_AGE_LABELS",
-    "DEFAULT_ATOMIC_EMPLOYMENT_INCOME_BINS",
-    "DEFAULT_ATOMIC_EMPLOYMENT_INCOME_LABELS",
-    "load_us_microplex_run_registry",
-    "resolve_policyengine_us_data_python",
-    "resolve_policyengine_us_data_repo_root",
-    "resolve_us_microplex_frontier_artifact_dir",
-    "run_policyengine_us_data_rebuild_checkpoint",
-    "write_policyengine_us_data_rebuild_native_audit",
-    "score_policyengine_us_native_broad_loss",
-    "select_us_microplex_frontier_index_row",
-    "select_us_microplex_frontier_entry",
-    "build_us_microplex_site_snapshot",
-    "optimize_pe_native_loss_weights",
-    "optimize_policyengine_us_native_loss_dataset",
-    "rewrite_policyengine_us_dataset_weights",
-    "calibrate_and_evaluate_us_reduced_benchmark_specs",
-    "calibrate_and_evaluate_us_reduced_benchmarks",
-    "evaluate_us_reduced_benchmark",
-    "reduced_benchmark_to_calibration_targets",
-    "reduced_benchmark_specs_to_calibration_targets",
-    "run_us_microplex_reduced_benchmark_harness",
-    "write_us_pe_native_scores",
-    "write_policyengine_us_data_rebuild_parity_artifact",
-    "write_us_calibration_stage_parity_audit",
-    "write_us_pre_sim_parity_audit",
-    "write_us_microplex_site_snapshot",
-    "USMicroplexBuildConfig",
-    "USMicroplexBuildResult",
-    "USMicroplexPipeline",
-    "USMicroplexTargets",
-    "build_us_microplex",
-]
+from importlib import import_module
+from typing import Any
+
+
+def _exports(module: str, names: tuple[str, ...]) -> dict[str, str]:
+    return {name: module for name in names}
+
+
+_EXPORT_MODULES: dict[str, str] = {
+    **_exports(
+        "microplex_us.pipelines.artifacts",
+        (
+            "USMicroplexArtifactPaths",
+            "USMicroplexVersionedBuildArtifacts",
+            "build_and_save_versioned_us_microplex",
+            "build_and_save_versioned_us_microplex_from_data_dir",
+            "build_and_save_versioned_us_microplex_from_source_provider",
+            "build_and_save_versioned_us_microplex_from_source_providers",
+            "replay_and_save_versioned_us_microplex_policyengine_stage",
+            "replay_us_microplex_policyengine_stage_from_artifact",
+            "save_us_microplex_artifacts",
+            "save_versioned_us_microplex_artifacts",
+            "save_versioned_us_microplex_build_result",
+        ),
+    ),
+    **_exports(
+        "microplex_us.pipelines.calibration_stage_parity",
+        (
+            "build_us_calibration_stage_parity_audit",
+            "write_us_calibration_stage_parity_audit",
+        ),
+    ),
+    **_exports(
+        "microplex_us.pipelines.experiments",
+        (
+            "USMicroplexExperimentReport",
+            "USMicroplexExperimentResult",
+            "USMicroplexSourceExperimentSpec",
+            "build_us_n_synthetic_sweep_experiments",
+            "default_us_source_mix_experiments",
+            "run_us_microplex_n_synthetic_sweep",
+            "run_us_microplex_source_experiments",
+        ),
+    ),
+    **_exports(
+        "microplex_us.pipelines.index_db",
+        (
+            "append_us_microplex_run_index_entry",
+            "compare_us_microplex_target_delta_rows",
+            "list_us_microplex_target_delta_rows",
+            "rebuild_us_microplex_run_index",
+            "resolve_us_microplex_run_index_path",
+            "select_us_microplex_frontier_index_row",
+        ),
+    ),
+    **_exports(
+        "microplex_us.pipelines.imputation_ablation",
+        (
+            "ImputationAblationReport",
+            "ImputationAblationSliceSpec",
+            "ImputationAblationVariant",
+            "ImputationAblationVariantScore",
+            "ImputationSliceScore",
+            "ImputationTargetScore",
+            "default_imputation_ablation_variants",
+            "score_imputation_ablation_variants",
+        ),
+    ),
+    **_exports(
+        "microplex_us.pipelines.local_reweighting",
+        (
+            "USHouseholdTargetReweightingResult",
+            "reweight_us_household_targets",
+        ),
+    ),
+    **_exports(
+        "microplex_us.pipelines.pe_native_optimization",
+        (
+            "PolicyEngineUSNativeWeightOptimizationResult",
+            "optimize_pe_native_loss_weights",
+            "optimize_policyengine_us_native_loss_dataset",
+            "rewrite_policyengine_us_dataset_weights",
+        ),
+    ),
+    **_exports(
+        "microplex_us.pipelines.pe_native_scores",
+        (
+            "PolicyEngineUSEnhancedCPSNativeScores",
+            "compare_us_pe_native_target_deltas",
+            "compute_batch_us_pe_native_scores",
+            "compute_policyengine_us_enhanced_cps_native_scores",
+            "compute_us_pe_native_scores",
+            "resolve_policyengine_us_data_python",
+            "resolve_policyengine_us_data_repo_root",
+            "score_policyengine_us_native_broad_loss",
+            "write_us_pe_native_scores",
+        ),
+    ),
+    **_exports(
+        "microplex_us.pipelines.pe_us_data_rebuild",
+        (
+            "PEUSDataRebuildProgram",
+            "PEUSDataRebuildStage",
+            "PEUSDataRebuildStatus",
+            "build_policyengine_us_data_rebuild_markdown",
+            "build_policyengine_us_data_rebuild_pipeline",
+            "default_policyengine_us_data_rebuild_config",
+            "default_policyengine_us_data_rebuild_program",
+            "default_policyengine_us_data_rebuild_source_providers",
+        ),
+    ),
+    **_exports(
+        "microplex_us.pipelines.pe_us_data_rebuild_audit",
+        (
+            "build_policyengine_us_data_rebuild_native_audit",
+            "write_policyengine_us_data_rebuild_native_audit",
+        ),
+    ),
+    **_exports(
+        "microplex_us.pipelines.pe_us_data_rebuild_checkpoint",
+        (
+            "PEUSDataRebuildCheckpointEvidenceResult",
+            "PEUSDataRebuildCheckpointResult",
+            "attach_policyengine_us_data_rebuild_checkpoint_evidence",
+            "default_policyengine_us_data_rebuild_checkpoint_config",
+            "default_policyengine_us_data_rebuild_queries",
+            "run_policyengine_us_data_rebuild_checkpoint",
+        ),
+    ),
+    **_exports(
+        "microplex_us.pipelines.pe_us_data_rebuild_parity",
+        (
+            "build_policyengine_us_data_rebuild_parity_artifact",
+            "write_policyengine_us_data_rebuild_parity_artifact",
+        ),
+    ),
+    **_exports(
+        "microplex_us.pipelines.performance",
+        (
+            "USMicroplexPerformanceHarnessConfig",
+            "USMicroplexPerformanceHarnessRequest",
+            "USMicroplexPerformanceHarnessResult",
+            "USMicroplexPerformanceSession",
+            "run_us_microplex_performance_harness",
+            "warm_us_microplex_parity_cache",
+        ),
+    ),
+    **_exports(
+        "microplex_us.pipelines.pre_sim_parity",
+        (
+            "DEFAULT_PRE_SIM_FOCUS_VARIABLES",
+            "PreSimParityVariableSpec",
+            "build_us_pre_sim_parity_audit",
+            "write_us_pre_sim_parity_audit",
+        ),
+    ),
+    **_exports(
+        "microplex_us.pipelines.reduced_benchmark",
+        (
+            "DEFAULT_ATOMIC_AGE_BINS",
+            "DEFAULT_ATOMIC_AGE_LABELS",
+            "DEFAULT_ATOMIC_EMPLOYMENT_INCOME_BINS",
+            "DEFAULT_ATOMIC_EMPLOYMENT_INCOME_LABELS",
+            "USMicroplexReducedBenchmarkHarnessConfig",
+            "USMicroplexReducedBenchmarkHarnessResult",
+            "USMicroplexReducedBenchmarkReport",
+            "USMicroplexReducedBenchmarkSpec",
+            "USMicroplexReducedCalibrationReport",
+            "USMicroplexReducedDimensionSpec",
+            "USMicroplexReducedMeasureSpec",
+            "USMicroplexReducedMultiCalibrationReport",
+            "calibrate_and_evaluate_us_reduced_benchmark_specs",
+            "calibrate_and_evaluate_us_reduced_benchmarks",
+            "default_us_atomic_rung0_benchmarks",
+            "default_us_atomic_rung1_benchmarks",
+            "default_us_atomic_rung2_calibration",
+            "default_us_atomic_rung3_calibration",
+            "default_us_atomic_rung4_calibration",
+            "default_us_atomic_rung5_calibration",
+            "evaluate_us_reduced_benchmark",
+            "reduced_benchmark_specs_to_calibration_targets",
+            "reduced_benchmark_to_calibration_targets",
+            "run_us_microplex_reduced_benchmark_harness",
+        ),
+    ),
+    **_exports(
+        "microplex_us.pipelines.registry",
+        (
+            "FrontierMetric",
+            "USMicroplexRunRegistryEntry",
+            "append_us_microplex_run_registry_entry",
+            "build_us_microplex_run_registry_entry",
+            "load_us_microplex_run_registry",
+            "resolve_us_microplex_frontier_artifact_dir",
+            "select_us_microplex_frontier_entry",
+        ),
+    ),
+    **_exports(
+        "microplex_us.pipelines.seed_stage_parity",
+        (
+            "DEFAULT_SEED_STAGE_BOOLEAN_LANDING_FEATURES",
+            "DEFAULT_SEED_STAGE_CANDIDATE_ONLY_LANDING_FEATURES",
+            "DEFAULT_SEED_STAGE_CATEGORICAL_LANDING_FEATURES",
+            "DEFAULT_SEED_STAGE_FOCUS_VARIABLES",
+            "SeedStageBooleanLandingFeatureSpec",
+            "SeedStageCategoricalLandingFeatureSpec",
+            "SeedStageFocusVariableSpec",
+            "build_us_seed_stage_parity_audit",
+            "build_us_seed_tax_unit_support_audit",
+            "write_us_seed_stage_parity_audit",
+            "write_us_seed_tax_unit_support_audit",
+        ),
+    ),
+    **_exports(
+        "microplex_us.pipelines.site_snapshot",
+        (
+            "build_us_microplex_site_snapshot",
+            "write_us_microplex_site_snapshot",
+        ),
+    ),
+    **_exports(
+        "microplex_us.pipelines.source_stage_parity",
+        (
+            "DEFAULT_CPS_SOURCE_STAGE_FOCUS_VARIABLES",
+            "DEFAULT_PUF_SOURCE_STAGE_FOCUS_VARIABLES",
+            "SourceStageParityVariableSpec",
+            "build_us_cps_source_stage_parity_audit",
+            "build_us_puf_source_stage_parity_audit",
+            "build_us_source_stage_parity_audit",
+            "observation_frame_to_policyengine_entity_bundle",
+            "write_us_cps_source_stage_parity_audit",
+            "write_us_puf_source_stage_parity_audit",
+            "write_us_source_stage_parity_audit",
+        ),
+    ),
+    **_exports(
+        "microplex_us.pipelines.us",
+        (
+            "USMicroplexBuildConfig",
+            "USMicroplexBuildResult",
+            "USMicroplexPipeline",
+            "USMicroplexTargets",
+            "build_us_microplex",
+        ),
+    ),
+}
+
+__all__ = list(_EXPORT_MODULES)
+
+
+def __getattr__(name: str) -> Any:
+    """Resolve pipeline convenience exports on first access."""
+    module_name = _EXPORT_MODULES.get(name)
+    if module_name is None:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    value = getattr(import_module(module_name), name)
+    globals()[name] = value
+    return value
