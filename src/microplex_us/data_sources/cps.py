@@ -133,6 +133,21 @@ HOUSEHOLD_OBSERVATION_EXCLUDED_COLUMNS = (
     "year",
 )
 
+CPS_INCOME_ALIAS_COMPONENT_GROUPS = (
+    ("wage_income",),
+    ("self_employment_income",),
+    ("interest_income",),
+    ("dividend_income",),
+    ("rental_income",),
+    ("social_security",),
+    ("pension_income", "taxable_pension_income"),
+    ("unemployment_compensation",),
+    ("alimony_income",),
+)
+CPS_INCOME_ALIAS_COMPONENTS = tuple(
+    column for group in CPS_INCOME_ALIAS_COMPONENT_GROUPS for column in group
+)
+
 PERSON_NONNEGATIVE_VALUE_COLUMNS = (
     "wage_income",
     "self_employment_income",
@@ -318,6 +333,37 @@ def _ensure_person_ids(persons: pd.DataFrame) -> pd.DataFrame:
     return result
 
 
+def _add_cps_income_aliases(persons: pd.DataFrame) -> pd.DataFrame:
+    """Derive canonical income from CPS components for PE-style donor matching."""
+    if "income" in persons.columns:
+        return persons
+    component_groups = [
+        tuple(column for column in group if column in persons.columns)
+        for group in CPS_INCOME_ALIAS_COMPONENT_GROUPS
+    ]
+    component_groups = [group for group in component_groups if group]
+    if not component_groups:
+        if "total_person_income" not in persons.columns:
+            return persons
+        result = persons.copy()
+        result["income"] = (
+            pd.to_numeric(result["total_person_income"], errors="coerce")
+            .fillna(0.0)
+            .astype(float)
+        )
+        return result
+
+    result = persons.copy()
+    income = pd.Series(0.0, index=result.index, dtype=float)
+    for group in component_groups:
+        column = group[0]
+        income = income + (
+            pd.to_numeric(result[column], errors="coerce").fillna(0.0).astype(float)
+        )
+    result["income"] = income.astype(float)
+    return result
+
+
 def _build_observation_frame(
     *,
     households: pd.DataFrame,
@@ -325,7 +371,7 @@ def _build_observation_frame(
     source_name: str,
 ) -> ObservationFrame:
     normalized_households = households.copy()
-    normalized_persons = _ensure_person_ids(persons)
+    normalized_persons = _add_cps_income_aliases(_ensure_person_ids(persons))
     descriptor = _descriptor_from_tables(
         households=normalized_households,
         persons=normalized_persons,

@@ -5786,6 +5786,33 @@ class TestUSMicroplexPipeline:
         assert result["is_tax_unit_spouse"].tolist() == [0.0, 1.0, 0.0]
         assert result["is_tax_unit_dependent"].tolist() == [0.0, 0.0, 1.0]
 
+    def test_resolve_preferred_donor_condition_vars_uses_available_block_predictors(
+        self,
+    ):
+        pipeline = USMicroplexPipeline(USMicroplexBuildConfig())
+        donor_frame = pd.DataFrame(
+            {
+                "age": [30, 45, 70],
+                "is_male": [1.0, 0.0, 1.0],
+                "income": [20_000.0, 80_000.0, 250_000.0],
+                "tax_unit_is_joint": [0.0, 1.0, 1.0],
+            }
+        )
+        current_frame = pd.DataFrame(
+            {
+                "age": [28, 50, 72],
+                "is_male": [0.0, 1.0, 1.0],
+                "income": [25_000.0, 90_000.0, 300_000.0],
+                "tax_unit_is_joint": [0.0, 0.0, 1.0],
+            }
+        )
+
+        assert pipeline._resolve_preferred_donor_condition_vars(
+            donor_frame=donor_frame,
+            current_frame=current_frame,
+            donor_block=("dividend_income", "qualified_dividend_share"),
+        ) == ["age", "is_male", "tax_unit_is_joint"]
+
     def test_integrate_donor_sources_uses_pe_style_puf_predictors_for_generic_irs_vars(
         self,
         monkeypatch,

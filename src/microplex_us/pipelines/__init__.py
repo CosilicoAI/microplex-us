@@ -13,6 +13,8 @@ try:
         build_and_save_versioned_us_microplex_from_data_dir,
         build_and_save_versioned_us_microplex_from_source_provider,
         build_and_save_versioned_us_microplex_from_source_providers,
+        replay_and_save_versioned_us_microplex_policyengine_stage,
+        replay_us_microplex_policyengine_stage_from_artifact,
         save_us_microplex_artifacts,
         save_versioned_us_microplex_artifacts,
         save_versioned_us_microplex_build_result,
@@ -51,6 +53,8 @@ except ModuleNotFoundError as exc:
     build_and_save_versioned_us_microplex_from_data_dir = None
     build_and_save_versioned_us_microplex_from_source_provider = None
     build_and_save_versioned_us_microplex_from_source_providers = None
+    replay_and_save_versioned_us_microplex_policyengine_stage = None
+    replay_us_microplex_policyengine_stage_from_artifact = None
     save_us_microplex_artifacts = None
     save_versioned_us_microplex_artifacts = None
     save_versioned_us_microplex_build_result = None
@@ -229,6 +233,8 @@ __all__ = [
     "build_and_save_versioned_us_microplex_from_data_dir",
     "build_and_save_versioned_us_microplex_from_source_provider",
     "build_and_save_versioned_us_microplex_from_source_providers",
+    "replay_and_save_versioned_us_microplex_policyengine_stage",
+    "replay_us_microplex_policyengine_stage_from_artifact",
     "save_versioned_us_microplex_build_result",
     "reweight_us_household_targets",
     "run_us_microplex_performance_harness",

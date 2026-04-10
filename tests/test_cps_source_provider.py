@@ -45,6 +45,40 @@ def test_cps_parquet_source_provider_loads_observation_frame(tmp_path):
     assert frame.source.archetype is SourceArchetype.HOUSEHOLD_INCOME
 
 
+def test_cps_parquet_source_provider_derives_canonical_income_alias(tmp_path):
+    households = pd.DataFrame(
+        {
+            "household_id": [1],
+            "state_fips": [6],
+            "household_weight": [1.0],
+        }
+    )
+    persons = pd.DataFrame(
+        {
+            "household_id": [1, 1],
+            "person_number": [1, 2],
+            "age": [44, 41],
+            "weight": [1.0, 1.0],
+            "wage_income": [50_000.0, 10_000.0],
+            "self_employment_income": [5_000.0, 0.0],
+            "interest_income": [100.0, 20.0],
+            "dividend_income": [50.0, 10.0],
+            "social_security": [0.0, 3_000.0],
+            "pension_income": [1_000.0, 4_000.0],
+            "taxable_pension_income": [800.0, 3_000.0],
+            "ssi": [1_000.0, 2_000.0],
+        }
+    )
+    households.to_parquet(tmp_path / "cps_asec_households.parquet", index=False)
+    persons.to_parquet(tmp_path / "cps_asec_persons.parquet", index=False)
+
+    provider = CPSASECParquetSourceProvider(data_dir=tmp_path, year=2024)
+    frame = provider.load_frame(SourceQuery(period=2024))
+
+    assert "income" in frame.source.observations[1].variable_names
+    assert frame.tables[EntityType.PERSON]["income"].tolist() == [56_150.0, 17_030.0]
+
+
 def test_cps_parquet_source_provider_supports_household_sampling(tmp_path):
     households = pd.DataFrame(
         {

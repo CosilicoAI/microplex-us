@@ -327,23 +327,31 @@ def test_partnership_income_semantics_remain_person_native():
     assert spec.condition_score_mode is ConditionScoreMode.VALUE_AND_SUPPORT
 
 
-def test_only_taxable_interest_uses_pe_style_puf_irs_predictors():
+def test_sparse_irs_tax_variables_use_puf_irs_predictors():
     from microplex_us.variables import (
-        PE_STYLE_PUF_IRS_DEMOGRAPHIC_PREDICTORS,
+        PUF_IRS_TAX_PREFERRED_CONDITION_VARS,
         variable_semantic_spec_for,
     )
 
-    assert (
-        variable_semantic_spec_for("taxable_interest_income").preferred_condition_vars
-        == PE_STYLE_PUF_IRS_DEMOGRAPHIC_PREDICTORS
-    )
     for variable_name in (
+        "dividend_income",
+        "qualified_dividend_income",
+        "non_qualified_dividend_income",
+        "taxable_interest_income",
+        "tax_exempt_interest_income",
+        "taxable_pension_income",
+        "taxable_social_security",
+        "student_loan_interest",
         "health_savings_account_ald",
         "self_employed_health_insurance_ald",
         "self_employed_pension_contribution_ald",
+        "tax_unit_partnership_s_corp_income",
         "partnership_s_corp_income",
     ):
-        assert variable_semantic_spec_for(variable_name).preferred_condition_vars == ()
+        assert (
+            variable_semantic_spec_for(variable_name).preferred_condition_vars
+            == PUF_IRS_TAX_PREFERRED_CONDITION_VARS
+        )
 
 
 def test_person_native_irs_semantics_match_current_policyengine_entities():

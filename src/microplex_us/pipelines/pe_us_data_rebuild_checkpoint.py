@@ -47,6 +47,21 @@ if TYPE_CHECKING:
     )
 
 
+DEFAULT_POLICYENGINE_REBUILD_CALIBRATION_TARGET_VARIABLES = (
+    "person_count",
+    "household_count",
+)
+
+
+def _resolve_checkpoint_calibration_target_variables(
+    calibration_target_variables: tuple[str, ...],
+) -> tuple[str, ...]:
+    return (
+        tuple(calibration_target_variables)
+        or DEFAULT_POLICYENGINE_REBUILD_CALIBRATION_TARGET_VARIABLES
+    )
+
+
 @dataclass(frozen=True)
 class PEUSDataRebuildCheckpointResult:
     """Saved artifact bundle plus parity sidecar for one rebuild checkpoint."""
@@ -106,8 +121,10 @@ def _validate_checkpoint_config_context(
         "policyengine_target_variables": tuple(target_variables),
         "policyengine_target_domains": tuple(target_domains),
         "policyengine_target_geo_levels": tuple(target_geo_levels),
-        "policyengine_calibration_target_variables": tuple(
-            calibration_target_variables
+        "policyengine_calibration_target_variables": (
+            _resolve_checkpoint_calibration_target_variables(
+                calibration_target_variables
+            )
         ),
         "policyengine_calibration_target_domains": tuple(
             calibration_target_domains
@@ -768,7 +785,11 @@ def default_policyengine_us_data_rebuild_checkpoint_config(
         policyengine_target_variables=tuple(target_variables),
         policyengine_target_domains=tuple(target_domains),
         policyengine_target_geo_levels=tuple(target_geo_levels),
-        policyengine_calibration_target_variables=tuple(calibration_target_variables),
+        policyengine_calibration_target_variables=(
+            _resolve_checkpoint_calibration_target_variables(
+                calibration_target_variables
+            )
+        ),
         policyengine_calibration_target_domains=tuple(calibration_target_domains),
         policyengine_calibration_target_geo_levels=tuple(
             calibration_target_geo_levels

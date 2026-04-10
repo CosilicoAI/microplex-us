@@ -59,6 +59,15 @@ PE_STYLE_PUF_IRS_DEMOGRAPHIC_PREDICTORS = (
     "is_tax_unit_spouse",
     "is_tax_unit_dependent",
 )
+PUF_IRS_TAX_PREFERRED_CONDITION_VARS = (
+    "age",
+    "is_male",
+    "tax_unit_is_joint",
+    "tax_unit_count_dependents",
+    "is_tax_unit_head",
+    "is_tax_unit_spouse",
+    "is_tax_unit_dependent",
+)
 
 
 @dataclass(frozen=True)
@@ -207,6 +216,7 @@ VARIABLE_SEMANTIC_SPECS: dict[str, VariableSemanticSpec] = {
             "non_qualified_dividend_income",
         ),
         donor_match_strategy=DonorMatchStrategy.ZERO_INFLATED_POSITIVE,
+        preferred_condition_vars=PUF_IRS_TAX_PREFERRED_CONDITION_VARS,
         notes="Dividend totals are derived from the qualified and non-qualified atomic basis.",
     ),
     "ordinary_dividend_income": VariableSemanticSpec(
@@ -233,6 +243,7 @@ VARIABLE_SEMANTIC_SPECS: dict[str, VariableSemanticSpec] = {
         ),
         support_family=VariableSupportFamily.ZERO_INFLATED_POSITIVE,
         donor_match_strategy=DonorMatchStrategy.ZERO_INFLATED_POSITIVE,
+        preferred_condition_vars=PUF_IRS_TAX_PREFERRED_CONDITION_VARS,
     ),
     "non_qualified_dividend_income": VariableSemanticSpec(
         native_entity=EntityType.PERSON,
@@ -243,6 +254,7 @@ VARIABLE_SEMANTIC_SPECS: dict[str, VariableSemanticSpec] = {
         ),
         support_family=VariableSupportFamily.ZERO_INFLATED_POSITIVE,
         donor_match_strategy=DonorMatchStrategy.ZERO_INFLATED_POSITIVE,
+        preferred_condition_vars=PUF_IRS_TAX_PREFERRED_CONDITION_VARS,
     ),
     "taxable_interest_income": VariableSemanticSpec(
         native_entity=EntityType.PERSON,
@@ -253,7 +265,7 @@ VARIABLE_SEMANTIC_SPECS: dict[str, VariableSemanticSpec] = {
         ),
         support_family=VariableSupportFamily.ZERO_INFLATED_POSITIVE,
         donor_match_strategy=DonorMatchStrategy.ZERO_INFLATED_POSITIVE,
-        preferred_condition_vars=PE_STYLE_PUF_IRS_DEMOGRAPHIC_PREDICTORS,
+        preferred_condition_vars=PUF_IRS_TAX_PREFERRED_CONDITION_VARS,
     ),
     "tax_exempt_interest_income": VariableSemanticSpec(
         native_entity=EntityType.PERSON,
@@ -264,6 +276,7 @@ VARIABLE_SEMANTIC_SPECS: dict[str, VariableSemanticSpec] = {
         ),
         support_family=VariableSupportFamily.ZERO_INFLATED_POSITIVE,
         donor_match_strategy=DonorMatchStrategy.ZERO_INFLATED_POSITIVE,
+        preferred_condition_vars=PUF_IRS_TAX_PREFERRED_CONDITION_VARS,
     ),
     "taxable_pension_income": VariableSemanticSpec(
         native_entity=EntityType.PERSON,
@@ -274,6 +287,7 @@ VARIABLE_SEMANTIC_SPECS: dict[str, VariableSemanticSpec] = {
         ),
         support_family=VariableSupportFamily.ZERO_INFLATED_POSITIVE,
         donor_match_strategy=DonorMatchStrategy.ZERO_INFLATED_POSITIVE,
+        preferred_condition_vars=PUF_IRS_TAX_PREFERRED_CONDITION_VARS,
     ),
     "taxable_social_security": VariableSemanticSpec(
         native_entity=EntityType.PERSON,
@@ -284,6 +298,7 @@ VARIABLE_SEMANTIC_SPECS: dict[str, VariableSemanticSpec] = {
         ),
         support_family=VariableSupportFamily.ZERO_INFLATED_POSITIVE,
         donor_match_strategy=DonorMatchStrategy.ZERO_INFLATED_POSITIVE,
+        preferred_condition_vars=PUF_IRS_TAX_PREFERRED_CONDITION_VARS,
     ),
     "state_income_tax_paid": VariableSemanticSpec(
         native_entity=EntityType.TAX_UNIT,
@@ -324,6 +339,7 @@ VARIABLE_SEMANTIC_SPECS: dict[str, VariableSemanticSpec] = {
         ),
         support_family=VariableSupportFamily.ZERO_INFLATED_POSITIVE,
         donor_match_strategy=DonorMatchStrategy.ZERO_INFLATED_POSITIVE,
+        preferred_condition_vars=PUF_IRS_TAX_PREFERRED_CONDITION_VARS,
     ),
     "ira_deduction": VariableSemanticSpec(
         native_entity=EntityType.TAX_UNIT,
@@ -340,6 +356,7 @@ VARIABLE_SEMANTIC_SPECS: dict[str, VariableSemanticSpec] = {
         ),
         support_family=VariableSupportFamily.ZERO_INFLATED_POSITIVE,
         donor_match_strategy=DonorMatchStrategy.ZERO_INFLATED_POSITIVE,
+        preferred_condition_vars=PUF_IRS_TAX_PREFERRED_CONDITION_VARS,
     ),
     "self_employed_health_insurance_ald": VariableSemanticSpec(
         native_entity=EntityType.PERSON,
@@ -350,6 +367,7 @@ VARIABLE_SEMANTIC_SPECS: dict[str, VariableSemanticSpec] = {
         ),
         support_family=VariableSupportFamily.ZERO_INFLATED_POSITIVE,
         donor_match_strategy=DonorMatchStrategy.ZERO_INFLATED_POSITIVE,
+        preferred_condition_vars=PUF_IRS_TAX_PREFERRED_CONDITION_VARS,
     ),
     "self_employed_pension_contribution_ald": VariableSemanticSpec(
         native_entity=EntityType.PERSON,
@@ -360,6 +378,7 @@ VARIABLE_SEMANTIC_SPECS: dict[str, VariableSemanticSpec] = {
         ),
         support_family=VariableSupportFamily.ZERO_INFLATED_POSITIVE,
         donor_match_strategy=DonorMatchStrategy.ZERO_INFLATED_POSITIVE,
+        preferred_condition_vars=PUF_IRS_TAX_PREFERRED_CONDITION_VARS,
     ),
     "qualified_dividend_share": VariableSemanticSpec(
         native_entity=EntityType.TAX_UNIT,
@@ -375,6 +394,7 @@ VARIABLE_SEMANTIC_SPECS: dict[str, VariableSemanticSpec] = {
         ),
         support_family=VariableSupportFamily.ZERO_INFLATED_POSITIVE,
         donor_match_strategy=DonorMatchStrategy.ZERO_INFLATED_POSITIVE,
+        preferred_condition_vars=PUF_IRS_TAX_PREFERRED_CONDITION_VARS,
     ),
     "employment_income": VariableSemanticSpec(
         native_entity=EntityType.PERSON,
@@ -424,6 +444,7 @@ VARIABLE_SEMANTIC_SPECS: dict[str, VariableSemanticSpec] = {
         ),
         support_family=VariableSupportFamily.ZERO_INFLATED_POSITIVE,
         donor_match_strategy=DonorMatchStrategy.ZERO_INFLATED_POSITIVE,
+        preferred_condition_vars=PUF_IRS_TAX_PREFERRED_CONDITION_VARS,
     ),
     "has_medicaid": VariableSemanticSpec(
         projection_aggregation=ProjectionAggregation.MAX,

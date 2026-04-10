@@ -48,6 +48,10 @@ def test_default_policyengine_us_data_rebuild_checkpoint_config_sets_pe_context(
     assert config.policyengine_target_period == 2024
     assert config.policyengine_target_profile == "pe_native_broad"
     assert config.policyengine_calibration_target_profile == "pe_native_broad"
+    assert config.policyengine_calibration_target_variables == (
+        "person_count",
+        "household_count",
+    )
     assert config.policyengine_direct_override_variables == (
         "health_savings_account_ald",
         "non_sch_d_capital_gains",
@@ -58,6 +62,16 @@ def test_default_policyengine_us_data_rebuild_checkpoint_config_sets_pe_context(
     assert config.policyengine_prefer_existing_tax_unit_ids is False
     assert config.n_synthetic == 500
     assert config.random_seed == 123
+
+
+def test_default_policyengine_us_data_rebuild_checkpoint_config_preserves_explicit_calibration_scope() -> None:
+    config = default_policyengine_us_data_rebuild_checkpoint_config(
+        policyengine_baseline_dataset="/tmp/enhanced_cps_2024.h5",
+        policyengine_targets_db="/tmp/policy_data.db",
+        calibration_target_variables=("snap",),
+    )
+
+    assert config.policyengine_calibration_target_variables == ("snap",)
 
 
 def test_default_policyengine_us_data_rebuild_checkpoint_config_infers_total_weight_targets(
@@ -532,6 +546,30 @@ def test_run_policyengine_us_data_rebuild_checkpoint_rejects_mismatched_explicit
         assert "policyengine_baseline_dataset" in str(exc)
     else:
         raise AssertionError("Expected mismatched explicit config to fail")
+
+
+def test_run_policyengine_us_data_rebuild_checkpoint_accepts_matching_explicit_config_default_calibration_scope(
+    tmp_path,
+) -> None:
+    config = default_policyengine_us_data_rebuild_checkpoint_config(
+        policyengine_baseline_dataset="/tmp/enhanced_cps_2024.h5",
+        policyengine_targets_db="/tmp/policy_data.db",
+        target_period=2024,
+    )
+
+    try:
+        run_policyengine_us_data_rebuild_checkpoint(
+            output_root=tmp_path / "artifacts",
+            policyengine_baseline_dataset="/tmp/enhanced_cps_2024.h5",
+            policyengine_targets_db="/tmp/policy_data.db",
+            config=config,
+            providers=(),
+        )
+    except ValueError as exc:
+        assert "non-empty provider sequence" in str(exc)
+        assert "requested PE rebuild context" not in str(exc)
+    else:
+        raise AssertionError("Expected empty providers to fail after validation")
 
 
 def test_run_policyengine_us_data_rebuild_checkpoint_rejects_custom_python_without_native_defer(

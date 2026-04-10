@@ -9,7 +9,10 @@ import pandas as pd
 from microplex.core import EntityType
 from microplex.targets import StaticTargetProvider, TargetQuery, TargetSet, TargetSpec
 
-from microplex_us.pipelines.artifacts import save_us_microplex_artifacts
+from microplex_us.pipelines.artifacts import (
+    replay_us_microplex_policyengine_stage_from_artifact,
+    save_us_microplex_artifacts,
+)
 from microplex_us.pipelines.registry import load_us_microplex_run_registry
 from microplex_us.pipelines.us import (
     USMicroplexBuildConfig,
@@ -23,6 +26,101 @@ from microplex_us.policyengine import (
     compute_policyengine_us_definition_hash,
     write_policyengine_us_time_period_dataset,
 )
+
+
+def test_replay_policyengine_stage_from_artifact_uses_saved_synthetic(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    artifact_dir = tmp_path / "artifact"
+    artifact_dir.mkdir()
+    config = USMicroplexBuildConfig(
+        policyengine_targets_db=str(tmp_path / "policy_data.db"),
+        calibration_backend="entropy",
+    )
+    seed_data = pd.DataFrame(
+        {
+            "person_id": [1],
+            "household_id": [10],
+            "weight": [10.0],
+        }
+    )
+    synthetic_data = pd.DataFrame(
+        {
+            "person_id": [2],
+            "household_id": [20],
+            "weight": [20.0],
+        }
+    )
+    stale_calibrated_data = pd.DataFrame(
+        {
+            "person_id": [3],
+            "household_id": [30],
+            "weight": [999.0],
+        }
+    )
+    seed_data.to_parquet(artifact_dir / "seed_data.parquet", index=False)
+    synthetic_data.to_parquet(artifact_dir / "synthetic_data.parquet", index=False)
+    stale_calibrated_data.to_parquet(
+        artifact_dir / "calibrated_data.parquet",
+        index=False,
+    )
+    (artifact_dir / "targets.json").write_text(
+        json.dumps({"marginal": {}, "continuous": {}})
+    )
+    (artifact_dir / "manifest.json").write_text(
+        json.dumps(
+            {
+                "config": config.to_dict(),
+                "artifacts": {
+                    "seed_data": "seed_data.parquet",
+                    "synthetic_data": "synthetic_data.parquet",
+                    "calibrated_data": "calibrated_data.parquet",
+                    "targets": "targets.json",
+                },
+                "synthesis": {"source_names": ["test_source"]},
+            }
+        )
+    )
+
+    captured: dict[str, object] = {}
+
+    class FakePipeline:
+        def __init__(self, config):
+            captured["config"] = config
+
+        def build_policyengine_entity_tables(self, frame):
+            captured["table_input"] = frame.copy()
+            return "synthetic_tables"
+
+        def calibrate_policyengine_tables(self, tables):
+            captured["tables"] = tables
+            calibrated = captured["table_input"].copy()
+            calibrated["weight"] = calibrated["weight"] * 2.0
+            return "policyengine_tables", calibrated, {"backend": "policyengine_db_none"}
+
+    monkeypatch.setattr(
+        "microplex_us.pipelines.artifacts.USMicroplexPipeline",
+        FakePipeline,
+    )
+
+    result = replay_us_microplex_policyengine_stage_from_artifact(
+        artifact_dir,
+        config_overrides={"calibration_backend": "none"},
+    )
+
+    assert captured["config"].calibration_backend == "none"
+    assert captured["tables"] == "synthetic_tables"
+    pd.testing.assert_frame_equal(captured["table_input"], synthetic_data)
+    pd.testing.assert_frame_equal(result.seed_data, seed_data)
+    pd.testing.assert_frame_equal(result.synthetic_data, synthetic_data)
+    assert result.calibrated_data["person_id"].tolist() == [2]
+    assert result.calibrated_data["weight"].tolist() == [40.0]
+    assert result.policyengine_tables == "policyengine_tables"
+    assert result.calibration_summary == {"backend": "policyengine_db_none"}
+    assert result.synthesis_metadata["policyengine_stage_replay"][
+        "config_override_keys"
+    ] == ["calibration_backend"]
 
 
 def _write_baseline_dataset(
@@ -203,7 +301,7 @@ class TestSaveUSMicroplexArtifacts:
             assert "person_household_id" in handle
             assert "tax_unit_id" in handle
             assert "taxable_interest_income" in handle
-            assert "filing_status" in handle
+            assert "filing_status" not in handle
 
     def test_writes_model_when_present(self, tmp_path):
         class FakeSynthesizer:
@@ -664,7 +762,11 @@ class TestSaveUSMicroplexArtifacts:
             ),
         )
 
-        paths = save_us_microplex_artifacts(result, tmp_path / "bundle")
+        paths = save_us_microplex_artifacts(
+            result,
+            tmp_path / "bundle",
+            defer_policyengine_native_score=True,
+        )
 
         assert paths.policyengine_harness is not None
         assert paths.policyengine_harness.exists()

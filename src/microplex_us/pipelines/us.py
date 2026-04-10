@@ -2687,26 +2687,30 @@ class USMicroplexPipeline:
         current_frame: pd.DataFrame,
         donor_block: tuple[str, ...],
     ) -> list[str]:
-        if len(donor_block) != 1:
-            return []
-        preferred_condition_vars = variable_semantic_spec_for(
-            donor_block[0]
-        ).preferred_condition_vars
+        preferred_condition_vars = tuple(
+            dict.fromkeys(
+                variable
+                for target_variable in donor_block
+                for variable in variable_semantic_spec_for(
+                    target_variable
+                ).preferred_condition_vars
+            )
+        )
         if not preferred_condition_vars:
             return []
         resolved: list[str] = []
         for variable in preferred_condition_vars:
             if variable not in donor_frame.columns or variable not in current_frame.columns:
-                return []
+                continue
             if not pd.api.types.is_numeric_dtype(donor_frame[variable]):
-                return []
+                continue
             if not pd.api.types.is_numeric_dtype(current_frame[variable]):
-                return []
+                continue
             if not self._is_compatible_donor_condition(
                 current_frame[variable],
                 donor_frame[variable],
             ):
-                return []
+                continue
             resolved.append(variable)
         return resolved
 
