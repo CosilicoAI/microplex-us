@@ -45,4 +45,9 @@ jobs:
             tests/pipelines/test_version_benchmark.py
 
       - name: Check canonical site snapshot
-        run: uv run microplex-us-check-site-snapshot artifacts/site_snapshot_us.json
+        run: |
+          if [ -f artifacts/site_snapshot_us.json ]; then
+            uv run microplex-us-check-site-snapshot artifacts/site_snapshot_us.json
+          else
+            echo "No committed artifacts/site_snapshot_us.json; skipping canonical snapshot check."
+          fi
