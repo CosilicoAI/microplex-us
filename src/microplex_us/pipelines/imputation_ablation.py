@@ -247,8 +247,12 @@ def _score_target(
     return ImputationTargetScore(
         target=target,
         row_count=len(observed_numeric),
-        observed_positive_rate=_safe_ratio(observed_positive_weight, float(weights.sum())),
-        imputed_positive_rate=_safe_ratio(imputed_positive_weight, float(weights.sum())),
+        observed_positive_rate=_safe_ratio(
+            observed_positive_weight, float(weights.sum())
+        ),
+        imputed_positive_rate=_safe_ratio(
+            imputed_positive_weight, float(weights.sum())
+        ),
         support_precision=precision,
         support_recall=recall,
         support_f1=_safe_f1(precision, recall),
@@ -270,9 +274,7 @@ def _score_slice(
     slice_spec: ImputationAblationSliceSpec,
 ) -> ImputationSliceScore:
     missing = [
-        column
-        for column in slice_spec.columns
-        if column not in observed_frame.columns
+        column for column in slice_spec.columns if column not in observed_frame.columns
     ]
     if missing:
         return ImputationSliceScore(
@@ -321,7 +323,9 @@ def _score_slice(
         columns=slice_spec.columns,
         cell_count=len(observed_totals),
         total_js_divergence=_jensen_shannon_divergence(observed_totals, imputed_totals),
-        support_js_divergence=_jensen_shannon_divergence(observed_support, imputed_support),
+        support_js_divergence=_jensen_shannon_divergence(
+            observed_support, imputed_support
+        ),
         mean_abs_positive_rate_delta=(
             float(np.mean(positive_rate_deltas)) if positive_rate_deltas else None
         ),
@@ -362,6 +366,8 @@ def _validate_frame_pair(
 ) -> None:
     if len(imputed_frame) != len(observed_frame):
         raise ValueError("observed_frame and imputed_frames must have the same length")
+    if not imputed_frame.index.equals(observed_frame.index):
+        raise ValueError("observed_frame and imputed_frames must have matching indexes")
     _require_columns(imputed_frame, targets)
 
 
@@ -372,7 +378,12 @@ def _require_columns(frame: pd.DataFrame, columns: Sequence[str]) -> None:
 
 
 def _numeric_series(series: pd.Series) -> pd.Series:
-    return pd.to_numeric(series, errors="coerce").replace([np.inf, -np.inf], np.nan).fillna(0.0).astype(float)
+    return (
+        pd.to_numeric(series, errors="coerce")
+        .replace([np.inf, -np.inf], np.nan)
+        .fillna(0.0)
+        .astype(float)
+    )
 
 
 def _weight_series(frame: pd.DataFrame, weight_column: str | None) -> pd.Series:
@@ -438,4 +449,6 @@ def _jensen_shannon_divergence(
 
 def _kl_divergence(probabilities: np.ndarray, reference: np.ndarray) -> float:
     mask = probabilities > 0.0
-    return float(np.sum(probabilities[mask] * np.log2(probabilities[mask] / reference[mask])))
+    return float(
+        np.sum(probabilities[mask] * np.log2(probabilities[mask] / reference[mask]))
+    )

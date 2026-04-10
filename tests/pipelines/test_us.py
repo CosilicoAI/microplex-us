@@ -1,6 +1,5 @@
 """Tests for the US microplex pipeline library."""
 
-
 import sqlite3
 from types import SimpleNamespace
 
@@ -42,9 +41,7 @@ from microplex_us.policyengine.us import (
 
 def _create_policyengine_calibration_db(path) -> None:
     national_constraints: tuple[PolicyEngineUSConstraint, ...] = ()
-    california_constraints = (
-        PolicyEngineUSConstraint("state_fips", "==", "6"),
-    )
+    california_constraints = (PolicyEngineUSConstraint("state_fips", "==", "6"),)
     conn = sqlite3.connect(path)
     conn.executescript(
         """
@@ -132,9 +129,7 @@ def _create_policyengine_calibration_db(path) -> None:
 
 
 def _create_policyengine_calibration_db_with_unsupported_target(path) -> None:
-    unsupported_constraints = (
-        PolicyEngineUSConstraint("age", ">=", "18"),
-    )
+    unsupported_constraints = (PolicyEngineUSConstraint("age", ">=", "18"),)
     conn = sqlite3.connect(path)
     conn.executescript(
         """
@@ -202,7 +197,18 @@ def _create_policyengine_calibration_db_with_unsupported_target(path) -> None:
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         [
-            (10, "household_count", 2024, 1, 0, 450.0, 1, 0.0, "test", "All households"),
+            (
+                10,
+                "household_count",
+                2024,
+                1,
+                0,
+                450.0,
+                1,
+                0.0,
+                "test",
+                "All households",
+            ),
             (
                 11,
                 "tax_unit_count",
@@ -560,14 +566,23 @@ class TestUSMicroplexPipeline:
         tables = pipeline.build_policyengine_entity_tables(population)
         person_rows = tables.persons.sort_values("person_id").reset_index(drop=True)
 
-        assert person_rows["employment_income_before_lsr"].tolist() == [50_000.0, 10_000.0]
-        assert person_rows["self_employment_income_before_lsr"].tolist() == [5_000.0, 0.0]
+        assert person_rows["employment_income_before_lsr"].tolist() == [
+            50_000.0,
+            10_000.0,
+        ]
+        assert person_rows["self_employment_income_before_lsr"].tolist() == [
+            5_000.0,
+            0.0,
+        ]
         assert person_rows["taxable_interest_income"].tolist() == [100.0, 20.0]
         assert person_rows["dividend_income"].tolist() == [80.0, 30.0]
         assert person_rows["qualified_dividend_income"].tolist() == [30.0, 5.0]
         assert person_rows["non_qualified_dividend_income"].tolist() == [50.0, 25.0]
         assert person_rows["short_term_capital_gains"].tolist() == [10.0, 0.0]
-        assert person_rows["long_term_capital_gains_before_response"].tolist() == [40.0, 5.0]
+        assert person_rows["long_term_capital_gains_before_response"].tolist() == [
+            40.0,
+            5.0,
+        ]
         assert person_rows["social_security_retirement"].tolist() == [0.0, 800.0]
         assert person_rows["ssi"].tolist() == [0.0, 600.0]
         assert person_rows["taxable_private_pension_income"].tolist() == [0.0, 300.0]
@@ -579,7 +594,9 @@ class TestUSMicroplexPipeline:
         assert person_rows["medicaid_enrolled"].tolist() == [False, True]
         assert person_rows["state_income_tax_reported"].tolist() == [400.0, 50.0]
 
-    def test_build_policyengine_entity_tables_fallback_employment_excludes_transfer_income(self):
+    def test_build_policyengine_entity_tables_fallback_employment_excludes_transfer_income(
+        self,
+    ):
         pipeline = USMicroplexPipeline(USMicroplexBuildConfig())
         population = pd.DataFrame(
             {
@@ -606,7 +623,9 @@ class TestUSMicroplexPipeline:
         assert person_row["ssi"] == 9_000.0
         assert person_row["social_security_retirement"] == 2_000.0
 
-    def test_build_policyengine_entity_tables_allocates_social_security_residual_to_retirement(self):
+    def test_build_policyengine_entity_tables_allocates_social_security_residual_to_retirement(
+        self,
+    ):
         pipeline = USMicroplexPipeline(USMicroplexBuildConfig())
         population = pd.DataFrame(
             {
@@ -631,7 +650,9 @@ class TestUSMicroplexPipeline:
         assert person_row["social_security_retirement"] == 1_500.0
         assert person_row["social_security_disability"] == 500.0
 
-    def test_build_policyengine_entity_tables_derives_dividend_totals_from_atomic_components(self):
+    def test_build_policyengine_entity_tables_derives_dividend_totals_from_atomic_components(
+        self,
+    ):
         pipeline = USMicroplexPipeline(USMicroplexBuildConfig())
         population = pd.DataFrame(
             {
@@ -660,7 +681,9 @@ class TestUSMicroplexPipeline:
         assert person_row["ordinary_dividend_income"] == 42.0
         assert person_row["dividend_income"] == 42.0
 
-    def test_build_policyengine_entity_tables_derives_relationships_from_family_relationship(self):
+    def test_build_policyengine_entity_tables_derives_relationships_from_family_relationship(
+        self,
+    ):
         pipeline = USMicroplexPipeline(USMicroplexBuildConfig())
         population = pd.DataFrame(
             {
@@ -685,7 +708,9 @@ class TestUSMicroplexPipeline:
         assert tax_units.iloc[0]["filing_status"] == "JOINT"
         assert tax_units.iloc[0]["n_dependents"] == 1
 
-    def test_build_policyengine_entity_tables_derives_relationships_from_one_based_family_relationship(self):
+    def test_build_policyengine_entity_tables_derives_relationships_from_one_based_family_relationship(
+        self,
+    ):
         pipeline = USMicroplexPipeline(USMicroplexBuildConfig())
         population = pd.DataFrame(
             {
@@ -710,7 +735,9 @@ class TestUSMicroplexPipeline:
         assert tax_units.iloc[0]["filing_status"] == "JOINT"
         assert tax_units.iloc[0]["n_dependents"] == 1
 
-    def test_build_policyengine_entity_tables_uses_spouse_and_dependent_flags_when_relationship_missing(self):
+    def test_build_policyengine_entity_tables_uses_spouse_and_dependent_flags_when_relationship_missing(
+        self,
+    ):
         pipeline = USMicroplexPipeline(USMicroplexBuildConfig())
         population = pd.DataFrame(
             {
@@ -735,7 +762,9 @@ class TestUSMicroplexPipeline:
         assert tax_units.iloc[0]["filing_status"] == "JOINT"
         assert tax_units.iloc[0]["n_dependents"] == 1
 
-    def test_build_policyengine_entity_tables_prefers_richer_family_relationship_over_collapsed_relationship_to_head(self):
+    def test_build_policyengine_entity_tables_prefers_richer_family_relationship_over_collapsed_relationship_to_head(
+        self,
+    ):
         pipeline = USMicroplexPipeline(USMicroplexBuildConfig())
         population = pd.DataFrame(
             {
@@ -809,7 +838,9 @@ class TestUSMicroplexPipeline:
         assert tax_units.iloc[0]["filing_status"] == "SEPARATE"
         assert tax_units.iloc[0]["n_dependents"] == 1
 
-    def test_build_policyengine_entity_tables_splits_separated_spouses_into_two_units(self):
+    def test_build_policyengine_entity_tables_splits_separated_spouses_into_two_units(
+        self,
+    ):
         pipeline = USMicroplexPipeline(USMicroplexBuildConfig())
         population = pd.DataFrame(
             {
@@ -833,7 +864,9 @@ class TestUSMicroplexPipeline:
         assert tax_units["filing_status"].tolist() == ["SEPARATE", "SEPARATE"]
         assert person_rows["tax_unit_id"].nunique() == 2
 
-    def test_build_policyengine_entity_tables_splits_separated_spouses_and_keeps_dependents_with_head(self):
+    def test_build_policyengine_entity_tables_splits_separated_spouses_and_keeps_dependents_with_head(
+        self,
+    ):
         pipeline = USMicroplexPipeline(USMicroplexBuildConfig())
         population = pd.DataFrame(
             {
@@ -863,7 +896,9 @@ class TestUSMicroplexPipeline:
         )
         assert dependent_tax_unit_id == int(tax_units.iloc[0]["tax_unit_id"])
 
-    def test_build_policyengine_entity_tables_splits_spouse_coded_pair_without_marriage_evidence(self):
+    def test_build_policyengine_entity_tables_splits_spouse_coded_pair_without_marriage_evidence(
+        self,
+    ):
         pipeline = USMicroplexPipeline(USMicroplexBuildConfig())
         population = pd.DataFrame(
             {
@@ -887,7 +922,9 @@ class TestUSMicroplexPipeline:
         assert tax_units["filing_status"].tolist() == ["SINGLE", "SINGLE"]
         assert person_rows["tax_unit_id"].nunique() == 2
 
-    def test_build_policyengine_entity_tables_marks_widowed_head_with_child_as_surviving_spouse(self):
+    def test_build_policyengine_entity_tables_marks_widowed_head_with_child_as_surviving_spouse(
+        self,
+    ):
         pipeline = USMicroplexPipeline(USMicroplexBuildConfig())
         population = pd.DataFrame(
             {
@@ -910,7 +947,9 @@ class TestUSMicroplexPipeline:
         assert tax_units.iloc[0]["filing_status"] == "SURVIVING_SPOUSE"
         assert tax_units.iloc[0]["n_dependents"] == 1
 
-    def test_build_policyengine_entity_tables_prefers_explicit_head_of_household_code(self):
+    def test_build_policyengine_entity_tables_prefers_explicit_head_of_household_code(
+        self,
+    ):
         pipeline = USMicroplexPipeline(USMicroplexBuildConfig())
         population = pd.DataFrame(
             {
@@ -934,7 +973,9 @@ class TestUSMicroplexPipeline:
         assert tax_units.iloc[0]["filing_status"] == "HEAD_OF_HOUSEHOLD"
         assert tax_units.iloc[0]["n_dependents"] == 1
 
-    def test_build_policyengine_entity_tables_does_not_infer_head_of_household_from_marital_status_alone(self):
+    def test_build_policyengine_entity_tables_does_not_infer_head_of_household_from_marital_status_alone(
+        self,
+    ):
         pipeline = USMicroplexPipeline(USMicroplexBuildConfig())
         population = pd.DataFrame(
             {
@@ -1012,7 +1053,9 @@ class TestUSMicroplexPipeline:
         assert tax_units["self_employed_health_insurance_ald"].tolist() == [25.0]
         assert tax_units["self_employed_pension_contribution_ald"].tolist() == [40.0]
 
-    def test_build_policyengine_entity_tables_deduplicates_repeated_tax_unit_ald_values(self):
+    def test_build_policyengine_entity_tables_deduplicates_repeated_tax_unit_ald_values(
+        self,
+    ):
         pipeline = USMicroplexPipeline(
             USMicroplexBuildConfig(policyengine_prefer_existing_tax_unit_ids=True)
         )
@@ -1035,7 +1078,9 @@ class TestUSMicroplexPipeline:
 
         assert tax_units["self_employed_pension_contribution_ald"].tolist() == [30.0]
 
-    def test_build_policyengine_entity_tables_preserved_tax_units_require_reciprocal_spouse_pointer_for_joint(self):
+    def test_build_policyengine_entity_tables_preserved_tax_units_require_reciprocal_spouse_pointer_for_joint(
+        self,
+    ):
         pipeline = USMicroplexPipeline(
             USMicroplexBuildConfig(policyengine_prefer_existing_tax_unit_ids=True)
         )
@@ -1063,7 +1108,9 @@ class TestUSMicroplexPipeline:
         assert tax_units["filing_status"].tolist() == ["SINGLE"]
         assert tax_units["n_dependents"].tolist() == [1]
 
-    def test_build_policyengine_entity_tables_preserved_tax_units_keep_joint_for_reciprocal_spouse_pointer(self):
+    def test_build_policyengine_entity_tables_preserved_tax_units_keep_joint_for_reciprocal_spouse_pointer(
+        self,
+    ):
         pipeline = USMicroplexPipeline(
             USMicroplexBuildConfig(policyengine_prefer_existing_tax_unit_ids=True)
         )
@@ -1091,7 +1138,9 @@ class TestUSMicroplexPipeline:
         assert tax_units["filing_status"].tolist() == ["JOINT"]
         assert tax_units["n_dependents"].tolist() == [0]
 
-    def test_build_policyengine_entity_tables_falls_back_when_existing_tax_unit_ids_cross_households(self):
+    def test_build_policyengine_entity_tables_falls_back_when_existing_tax_unit_ids_cross_households(
+        self,
+    ):
         pipeline = USMicroplexPipeline(
             USMicroplexBuildConfig(policyengine_prefer_existing_tax_unit_ids=True)
         )
@@ -1155,7 +1204,13 @@ class TestUSMicroplexPipeline:
                 EntityObservation(
                     entity=EntityType.PERSON,
                     key_column="person_id",
-                    variable_names=("age", "sex", "education", "employment_status", "income"),
+                    variable_names=(
+                        "age",
+                        "sex",
+                        "education",
+                        "employment_status",
+                        "income",
+                    ),
                     weight_column="weight",
                     period_column="year",
                 ),
@@ -1399,15 +1454,21 @@ class TestUSMicroplexPipeline:
             "non_qualified_dividend_income",
             "qualified_dividend_income",
         ]
-        assert integration["seed_data"]["qualified_dividend_income"].round(6).tolist() == [
+        assert integration["seed_data"]["qualified_dividend_income"].round(
+            6
+        ).tolist() == [
             20.0,
             7.0,
         ]
-        assert integration["seed_data"]["non_qualified_dividend_income"].round(6).tolist() == [
+        assert integration["seed_data"]["non_qualified_dividend_income"].round(
+            6
+        ).tolist() == [
             8.0,
             3.0,
         ]
-        assert integration["seed_data"]["ordinary_dividend_income"].round(6).tolist() == [
+        assert integration["seed_data"]["ordinary_dividend_income"].round(
+            6
+        ).tolist() == [
             28.0,
             10.0,
         ]
@@ -1597,15 +1658,21 @@ class TestUSMicroplexPipeline:
             ("dividend_income", "qualified_dividend_share"),
             ("partnership_s_corp_income",),
         ]
-        assert integration["seed_data"]["qualified_dividend_income"].round(6).tolist() == [
+        assert integration["seed_data"]["qualified_dividend_income"].round(
+            6
+        ).tolist() == [
             20.0,
             7.0,
         ]
-        assert integration["seed_data"]["non_qualified_dividend_income"].round(6).tolist() == [
+        assert integration["seed_data"]["non_qualified_dividend_income"].round(
+            6
+        ).tolist() == [
             8.0,
             3.0,
         ]
-        assert integration["seed_data"]["partnership_s_corp_income"].round(6).tolist() == [
+        assert integration["seed_data"]["partnership_s_corp_income"].round(
+            6
+        ).tolist() == [
             1_000.0,
             200.0,
         ]
@@ -1780,9 +1847,14 @@ class TestUSMicroplexPipeline:
         assert captured["init_kwargs"]["nonnegative_vars"] == {"public_assistance"}
         assert "weight" in captured["fit_columns"]
         assert captured["fit_kwargs"]["weight_col"] == "weight"
-        assert set(integration["seed_data"]["public_assistance"].tolist()) <= {0.0, 200.0}
+        assert set(integration["seed_data"]["public_assistance"].tolist()) <= {
+            0.0,
+            200.0,
+        }
 
-    def test_integrate_donor_sources_preserves_informative_scaffold_values(self, monkeypatch):
+    def test_integrate_donor_sources_preserves_informative_scaffold_values(
+        self, monkeypatch
+    ):
         cps_households = pd.DataFrame(
             {
                 "household_id": [1],
@@ -2326,7 +2398,9 @@ class TestUSMicroplexPipeline:
                 _ = seed
                 result = frame.copy()
                 if self.target_vars == ("employment_income",):
-                    result["employment_income"] = np.linspace(70_000.0, 90_000.0, len(result))
+                    result["employment_income"] = np.linspace(
+                        70_000.0, 90_000.0, len(result)
+                    )
                 return result
 
         monkeypatch.setattr("microplex_us.pipelines.us.Synthesizer", FakeSynthesizer)
@@ -2671,7 +2745,10 @@ class TestUSMicroplexPipeline:
             donor_inputs=[donor_input],
         )
 
-        assert integration["seed_data"]["social_security_retirement"].tolist() == [0.0, 0.0]
+        assert integration["seed_data"]["social_security_retirement"].tolist() == [
+            0.0,
+            0.0,
+        ]
         assert integration["seed_data"]["social_security_unclassified"].tolist() == [
             18_000.0,
             0.0,
@@ -2688,7 +2765,9 @@ class TestUSMicroplexPipeline:
         result = build_us_microplex(persons, households, config)
         pipeline = USMicroplexPipeline(config)
 
-        output_path = pipeline.export_policyengine_dataset(result, tmp_path / "us_microplex.h5")
+        output_path = pipeline.export_policyengine_dataset(
+            result, tmp_path / "us_microplex.h5"
+        )
 
         assert output_path.exists()
         with h5py.File(output_path, "r") as handle:
@@ -2726,12 +2805,16 @@ class TestUSMicroplexPipeline:
         result = build_us_microplex(persons, households, config)
         pipeline = USMicroplexPipeline(config)
 
-        output_path = pipeline.export_policyengine_dataset(result, tmp_path / "us_microplex.h5")
+        output_path = pipeline.export_policyengine_dataset(
+            result, tmp_path / "us_microplex.h5"
+        )
 
         assert output_path.exists()
         assert captured == [("filing_status",)]
 
-    def test_augment_policyengine_person_inputs_materializes_non_sch_d_capital_gains(self):
+    def test_augment_policyengine_person_inputs_materializes_non_sch_d_capital_gains(
+        self,
+    ):
         pipeline = USMicroplexPipeline(USMicroplexBuildConfig())
         persons = pd.DataFrame(
             {
@@ -2769,7 +2852,9 @@ class TestUSMicroplexPipeline:
         assert augmented["self_employed_health_insurance_ald"].tolist() == [15.0]
         assert augmented["self_employed_pension_contribution_ald"].tolist() == [10.0]
 
-    def test_augment_policyengine_person_inputs_derives_marital_status_flags_from_cps_codes(self):
+    def test_augment_policyengine_person_inputs_derives_marital_status_flags_from_cps_codes(
+        self,
+    ):
         pipeline = USMicroplexPipeline(USMicroplexBuildConfig())
         persons = pd.DataFrame(
             {
@@ -2784,7 +2869,9 @@ class TestUSMicroplexPipeline:
         assert augmented["is_separated"].tolist() == [True, False, False]
         assert augmented["is_surviving_spouse"].tolist() == [False, True, False]
 
-    def test_augment_policyengine_person_inputs_derives_marital_status_flags_from_filing_status_code(self):
+    def test_augment_policyengine_person_inputs_derives_marital_status_flags_from_filing_status_code(
+        self,
+    ):
         pipeline = USMicroplexPipeline(USMicroplexBuildConfig())
         persons = pd.DataFrame(
             {
@@ -2835,9 +2922,10 @@ class TestUSMicroplexPipeline:
             450.0,
             rel=1e-6,
         )
-        assert summary["household_weight_diagnostics"]["positive_count"] == summary[
-            "household_weight_diagnostics"
-        ]["row_count"]
+        assert (
+            summary["household_weight_diagnostics"]["positive_count"]
+            == summary["household_weight_diagnostics"]["row_count"]
+        )
         assert household_weights.sum() == pytest.approx(450.0, rel=1e-6)
         assert california_weight == pytest.approx(225.0, rel=1e-6)
         assert calibrated_persons.loc[
@@ -2875,7 +2963,9 @@ class TestUSMicroplexPipeline:
         assert summary["max_error"] == 0.0
         assert summary["mean_error"] == 0.0
         assert summary["weight_collapse_suspected"] is False
-        calibrated_weights = calibrated_tables.households["household_weight"].astype(float)
+        calibrated_weights = calibrated_tables.households["household_weight"].astype(
+            float
+        )
         assert calibrated_weights.tolist() == pytest.approx(original_weights.tolist())
 
     def test_calibrate_policyengine_tables_from_db_with_sparse_backend(
@@ -3082,7 +3172,9 @@ class TestUSMicroplexPipeline:
         _create_policyengine_calibration_db(db_path)
 
         def _unexpected_optimize(**_kwargs):
-            raise AssertionError("PE-native optimizer should not run when state floor fills budget")
+            raise AssertionError(
+                "PE-native optimizer should not run when state floor fills budget"
+            )
 
         monkeypatch.setattr(
             "microplex_us.pipelines.us.optimize_policyengine_us_native_loss_dataset",
@@ -3143,8 +3235,8 @@ class TestUSMicroplexPipeline:
             ),
         )
 
-        calibrated_tables, calibrated_persons, summary = pipeline.calibrate_policyengine_tables(
-            tables
+        calibrated_tables, calibrated_persons, summary = (
+            pipeline.calibrate_policyengine_tables(tables)
         )
 
         assert set(calibrated_tables.households["household_id"]) == {1, 3}
@@ -3375,13 +3467,16 @@ class TestUSMicroplexPipeline:
         _, calibrated_persons, summary = pipeline.calibrate_policyengine_tables(tables)
 
         assert summary["weight_collapse_suspected"] is True
-        assert summary["household_weight_diagnostics"]["tiny_count"] == summary[
-            "household_weight_diagnostics"
-        ]["row_count"]
+        assert (
+            summary["household_weight_diagnostics"]["tiny_count"]
+            == summary["household_weight_diagnostics"]["row_count"]
+        )
         assert summary["household_weight_diagnostics"]["total_weight"] == pytest.approx(
             summary["household_weight_diagnostics"]["row_count"] * 1e-10
         )
-        assert summary["person_weight_diagnostics"]["tiny_count"] == len(calibrated_persons)
+        assert summary["person_weight_diagnostics"]["tiny_count"] == len(
+            calibrated_persons
+        )
 
     def test_calibrate_policyengine_tables_can_rescale_back_to_input_weight_sum(
         self,
@@ -3437,13 +3532,17 @@ class TestUSMicroplexPipeline:
         )
         tables = pipeline.build_policyengine_entity_tables(seed)
 
-        calibrated_tables, calibrated_persons, summary = pipeline.calibrate_policyengine_tables(
-            tables
+        calibrated_tables, calibrated_persons, summary = (
+            pipeline.calibrate_policyengine_tables(tables)
         )
 
         assert summary["input_household_weight_sum"] == pytest.approx(450.0, rel=1e-6)
-        assert summary["pre_rescale_household_weight_sum"] == pytest.approx(112.5, rel=1e-6)
-        assert summary["post_rescale_household_weight_sum"] == pytest.approx(450.0, rel=1e-6)
+        assert summary["pre_rescale_household_weight_sum"] == pytest.approx(
+            112.5, rel=1e-6
+        )
+        assert summary["post_rescale_household_weight_sum"] == pytest.approx(
+            450.0, rel=1e-6
+        )
         assert summary["weight_sum_rescaled"] is True
         assert summary["weight_sum_rescale_mode"] == "input_weight_sum"
         assert calibrated_tables.households["household_weight"].sum() == pytest.approx(
@@ -3507,13 +3606,17 @@ class TestUSMicroplexPipeline:
         )
         tables = pipeline.build_policyengine_entity_tables(seed)
 
-        calibrated_tables, calibrated_persons, summary = pipeline.calibrate_policyengine_tables(
-            tables
+        calibrated_tables, calibrated_persons, summary = (
+            pipeline.calibrate_policyengine_tables(tables)
         )
 
         assert summary["input_household_weight_sum"] == pytest.approx(450.0, rel=1e-6)
-        assert summary["pre_rescale_household_weight_sum"] == pytest.approx(112.5, rel=1e-6)
-        assert summary["post_rescale_household_weight_sum"] == pytest.approx(1_000.0, rel=1e-6)
+        assert summary["pre_rescale_household_weight_sum"] == pytest.approx(
+            112.5, rel=1e-6
+        )
+        assert summary["post_rescale_household_weight_sum"] == pytest.approx(
+            1_000.0, rel=1e-6
+        )
         assert summary["weight_sum_rescaled"] is True
         assert summary["weight_sum_rescale_mode"] == "target_total_weight"
         assert calibrated_tables.households["household_weight"].sum() == pytest.approx(
@@ -3587,7 +3690,9 @@ class TestUSMicroplexPipeline:
         assert summary["constraint_drop_share"] == pytest.approx(1 / 3)
         assert summary["warning_messages"]
 
-    def test_select_feasible_policyengine_calibration_constraints_drops_low_support_rows(self):
+    def test_select_feasible_policyengine_calibration_constraints_drops_low_support_rows(
+        self,
+    ):
         targets = [
             TargetSpec(
                 name="dense_state_count",
@@ -3611,13 +3716,15 @@ class TestUSMicroplexPipeline:
             SimpleNamespace(coefficients=np.array([0.0, 0.0, 0.0, 0.0, 1.0])),
         )
 
-        selected_targets, _, summary = _select_feasible_policyengine_calibration_constraints(
-            targets,
-            constraints,
-            household_count=5,
-            max_constraints=None,
-            max_constraints_per_household=None,
-            min_active_households=5,
+        selected_targets, _, summary = (
+            _select_feasible_policyengine_calibration_constraints(
+                targets,
+                constraints,
+                household_count=5,
+                max_constraints=None,
+                max_constraints_per_household=None,
+                min_active_households=5,
+            )
         )
 
         assert [target.name for target in selected_targets] == ["dense_state_count"]
@@ -3651,8 +3758,13 @@ class TestUSMicroplexPipeline:
         assert summary["n_constraints"] == 1
         assert summary["feasibility_filter"]["feasibility_filter_applied"] is True
         assert summary["feasibility_filter"]["requested_max_constraints"] == 1
-        assert summary["feasibility_filter"]["n_constraints_before_feasibility_filter"] == 2
-        assert summary["feasibility_filter"]["n_constraints_after_feasibility_filter"] == 1
+        assert (
+            summary["feasibility_filter"]["n_constraints_before_feasibility_filter"]
+            == 2
+        )
+        assert (
+            summary["feasibility_filter"]["n_constraints_after_feasibility_filter"] == 1
+        )
         assert calibrated_tables.households["household_weight"].sum() == pytest.approx(
             450.0,
             rel=1e-6,
@@ -3749,7 +3861,8 @@ class TestUSMicroplexPipeline:
                     "variables": ["household_count"],
                     "reform_id": 0,
                     "entity_overrides": {
-                        variable: binding.entity for variable, binding in bindings.items()
+                        variable: binding.entity
+                        for variable, binding in bindings.items()
                     },
                 },
             )
@@ -3764,9 +3877,7 @@ class TestUSMicroplexPipeline:
         db_path = tmp_path / "policyengine_targets.db"
         conn = sqlite3.connect(db_path)
         national_constraints: tuple[PolicyEngineUSConstraint, ...] = ()
-        snap_positive_constraints = (
-            PolicyEngineUSConstraint("snap", ">", "0"),
-        )
+        snap_positive_constraints = (PolicyEngineUSConstraint("snap", ">", "0"),)
         conn.executescript(
             """
             CREATE TABLE strata (
@@ -4368,7 +4479,9 @@ class TestUSMicroplexPipeline:
             chosen["provider"] = provider
             return "cached"
 
-        monkeypatch.setattr(pipeline, "build_from_source_provider", fake_build_from_source_provider)
+        monkeypatch.setattr(
+            pipeline, "build_from_source_provider", fake_build_from_source_provider
+        )
 
         result = pipeline.build_from_data_dir(tmp_path)
 
@@ -4775,7 +4888,9 @@ class TestUSMicroplexPipeline:
 
         assert result.source_frame is not None
         assert result.source_frame.source.name == "proxy_rich_cps"
-        assert result.synthesis_metadata["state_program_support_proxies"]["available"] == [
+        assert result.synthesis_metadata["state_program_support_proxies"][
+            "available"
+        ] == [
             "has_medicaid",
             "public_assistance",
             "social_security",
@@ -4795,7 +4910,9 @@ class TestUSMicroplexPipeline:
         assert "ssi" in result.synthesis_metadata["target_vars"]
         assert "social_security" in result.synthesis_metadata["target_vars"]
 
-    def test_build_from_source_provider_promotes_state_program_proxies_to_conditions(self):
+    def test_build_from_source_provider_promotes_state_program_proxies_to_conditions(
+        self,
+    ):
         households = pd.DataFrame(
             {
                 "household_key": [1, 2, 3],
@@ -5387,7 +5504,9 @@ class TestUSMicroplexPipeline:
         assert integration["integrated_variables"] == []
         assert "taxable_interest_income" not in integration["seed_data"].columns
 
-    def test_default_build_config_excludes_filing_status_code_from_donor_imputation(self):
+    def test_default_build_config_excludes_filing_status_code_from_donor_imputation(
+        self,
+    ):
         config = USMicroplexBuildConfig()
 
         assert "filing_status_code" in config.donor_imputer_excluded_variables
@@ -5813,6 +5932,36 @@ class TestUSMicroplexPipeline:
             donor_block=("dividend_income", "qualified_dividend_share"),
         ) == ["age", "is_male", "tax_unit_is_joint"]
 
+    def test_select_donor_condition_vars_keeps_all_shared_distinct_from_pe_presets(
+        self,
+    ):
+        pipeline = USMicroplexPipeline(
+            USMicroplexBuildConfig(
+                donor_imputer_condition_selection="all_shared",
+                donor_imputer_max_condition_vars=1,
+            )
+        )
+        donor_frame = pd.DataFrame(
+            {
+                "age": [30, 45, 70],
+                "is_male": [1.0, 0.0, 1.0],
+                "tax_unit_is_joint": [0.0, 1.0, 1.0],
+                "education": [1.0, 2.0, 3.0],
+            }
+        )
+        current_frame = donor_frame.copy()
+        shared_vars = ["age", "is_male", "tax_unit_is_joint", "education"]
+
+        assert (
+            pipeline._select_donor_condition_vars(
+                donor_frame,
+                current_frame,
+                shared_vars,
+                ("taxable_interest_income",),
+            )
+            == shared_vars
+        )
+
     def test_integrate_donor_sources_uses_pe_style_puf_predictors_for_generic_irs_vars(
         self,
         monkeypatch,
@@ -5990,7 +6139,7 @@ class TestUSMicroplexPipeline:
                 n_synthetic=6,
                 synthesis_backend="bootstrap",
                 calibration_backend="entropy",
-                donor_imputer_condition_selection="top_correlated",
+                donor_imputer_condition_selection="pe_prespecified",
                 donor_imputer_max_condition_vars=1,
             )
         )
@@ -6557,7 +6706,11 @@ class TestUSMicroplexPipeline:
             set(captured_conditions[0])
         )
         assert captured_fit_rows == [3]
-        assert integration["seed_data"]["taxable_interest_income"].tolist() == [0.0, 0.0, 100.0]
+        assert integration["seed_data"]["taxable_interest_income"].tolist() == [
+            0.0,
+            0.0,
+            100.0,
+        ]
 
     def test_integrate_donor_sources_allows_person_conditions_for_labor_tax_unit_blocks(
         self,
@@ -7389,7 +7542,11 @@ class TestUSMicroplexPipeline:
             donor_inputs=[donor_input],
         )
 
-        assert integration["seed_data"]["taxable_interest_income"].tolist() == [100.0, 0.0, 0.0]
+        assert integration["seed_data"]["taxable_interest_income"].tolist() == [
+            100.0,
+            0.0,
+            0.0,
+        ]
 
     def test_rank_match_donor_values_preserves_zero_inflated_positive_support(self):
         pipeline = USMicroplexPipeline(

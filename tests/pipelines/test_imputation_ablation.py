@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 
 import pandas as pd
+import pytest
 
 from microplex_us.pipelines.imputation_ablation import (
     ImputationAblationSliceSpec,
@@ -45,18 +46,14 @@ def test_score_imputation_ablation_variants_ranks_structured_candidate() -> None
     )
 
     broad_metrics = report.variants["broad_common_qrf"].aggregate_metrics
-    structured_metrics = report.variants[
-        "structured_pe_conditioning"
-    ].aggregate_metrics
+    structured_metrics = report.variants["structured_pe_conditioning"].aggregate_metrics
     assert structured_metrics["mean_weighted_mae"] < broad_metrics["mean_weighted_mae"]
     assert structured_metrics["mean_support_f1"] > broad_metrics["mean_support_f1"]
     assert (
         structured_metrics["mean_slice_positive_rate_delta"]
         < broad_metrics["mean_slice_positive_rate_delta"]
     )
-    assert report.variants[
-        "structured_pe_conditioning"
-    ].variant.semantic_guards is True
+    assert report.variants["structured_pe_conditioning"].variant.semantic_guards is True
 
 
 def test_score_imputation_ablation_report_is_json_serializable() -> None:
@@ -99,8 +96,60 @@ def test_score_imputation_ablation_report_is_json_serializable() -> None:
     json.dumps(payload)
 
 
+def test_score_imputation_ablation_scores_matching_non_default_indexes() -> None:
+    observed = pd.DataFrame(
+        {
+            "slice": ["a", "b"],
+            "weight": [1.0, 1.0],
+            "rent": [100.0, 200.0],
+        },
+        index=[10, 11],
+    )
+    imputed = pd.DataFrame(
+        {
+            "rent": [100.0, 200.0],
+        },
+        index=[10, 11],
+    )
+
+    report = score_imputation_ablation_variants(
+        observed_frame=observed,
+        imputed_frames={"candidate": imputed},
+        target_variables=("rent",),
+        slice_specs=(ImputationAblationSliceSpec(name="slice", columns=("slice",)),),
+        weight_column="weight",
+    )
+
+    score = report.variants["candidate"].target_scores["rent"]
+    assert score.mean_absolute_error == 0.0
+    assert score.weighted_mean_absolute_error == 0.0
+    assert score.weighted_total_relative_error == 0.0
+    slice_score = report.variants["candidate"].slice_scores[0]
+    assert slice_score.total_js_divergence == 0.0
+
+
+def test_score_imputation_ablation_rejects_mismatched_indexes() -> None:
+    observed = pd.DataFrame({"weight": [1.0, 1.0], "rent": [100.0, 200.0]})
+    imputed = pd.DataFrame(
+        {
+            "rent": [100.0, 200.0],
+        },
+        index=[10, 11],
+    )
+
+    with pytest.raises(ValueError, match="matching indexes"):
+        score_imputation_ablation_variants(
+            observed_frame=observed,
+            imputed_frames={"candidate": imputed},
+            target_variables=("rent",),
+            weight_column="weight",
+        )
+
+
 def test_default_imputation_ablation_variants_encode_hypothesis() -> None:
-    variants = {variant.name: variant for variant in default_imputation_ablation_variants()}
+    variants = {
+        variant.name: variant for variant in default_imputation_ablation_variants()
+    }
 
     assert set(variants) == {
         "broad_common_qrf",

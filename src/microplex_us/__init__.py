@@ -2,6 +2,9 @@
 
 # ruff: noqa: E402, I001
 
+from importlib import import_module
+from typing import Any
+
 from microplex.targets import TargetSet, TargetSpec
 
 from microplex_us.calibration_harness import (
@@ -20,6 +23,7 @@ from microplex_us.data import (
     load_cps_asec,
     load_cps_for_synthesis,
 )
+
 try:
     from microplex_us.geography import (
         BLOCK_LEN,
@@ -132,95 +136,6 @@ _PIPELINE_EXPORTS = (
     "write_us_microplex_site_snapshot",
 )
 
-try:
-    from microplex_us.pipelines import (
-        DEFAULT_ATOMIC_AGE_BINS,
-        DEFAULT_ATOMIC_AGE_LABELS,
-        DEFAULT_ATOMIC_EMPLOYMENT_INCOME_BINS,
-        DEFAULT_ATOMIC_EMPLOYMENT_INCOME_LABELS,
-        FrontierMetric,
-        PEUSDataRebuildCheckpointEvidenceResult,
-        PEUSDataRebuildCheckpointResult,
-        PEUSDataRebuildProgram,
-        PEUSDataRebuildStage,
-        PEUSDataRebuildStatus,
-        USHouseholdTargetReweightingResult,
-        USMicroplexArtifactPaths,
-        USMicroplexBuildConfig,
-        USMicroplexBuildResult,
-        USMicroplexExperimentReport,
-        USMicroplexExperimentResult,
-        USMicroplexPerformanceHarnessConfig,
-        USMicroplexPerformanceHarnessRequest,
-        USMicroplexPerformanceHarnessResult,
-        USMicroplexPerformanceSession,
-        USMicroplexPipeline,
-        USMicroplexReducedBenchmarkHarnessConfig,
-        USMicroplexReducedBenchmarkHarnessResult,
-        USMicroplexReducedBenchmarkReport,
-        USMicroplexReducedBenchmarkSpec,
-        USMicroplexReducedCalibrationReport,
-        USMicroplexReducedDimensionSpec,
-        USMicroplexReducedMeasureSpec,
-        USMicroplexReducedMultiCalibrationReport,
-        USMicroplexRunRegistryEntry,
-        USMicroplexSourceExperimentSpec,
-        USMicroplexTargets,
-        USMicroplexVersionedBuildArtifacts,
-        append_us_microplex_run_index_entry,
-        append_us_microplex_run_registry_entry,
-        attach_policyengine_us_data_rebuild_checkpoint_evidence,
-        build_and_save_versioned_us_microplex,
-        build_and_save_versioned_us_microplex_from_data_dir,
-        build_and_save_versioned_us_microplex_from_source_provider,
-        build_and_save_versioned_us_microplex_from_source_providers,
-        build_policyengine_us_data_rebuild_markdown,
-        build_policyengine_us_data_rebuild_native_audit,
-        build_policyengine_us_data_rebuild_pipeline,
-        build_us_microplex,
-        build_us_microplex_run_registry_entry,
-        build_us_microplex_site_snapshot,
-        calibrate_and_evaluate_us_reduced_benchmark_specs,
-        calibrate_and_evaluate_us_reduced_benchmarks,
-        compare_us_microplex_target_delta_rows,
-        default_policyengine_us_data_rebuild_checkpoint_config,
-        default_policyengine_us_data_rebuild_config,
-        default_policyengine_us_data_rebuild_program,
-        default_policyengine_us_data_rebuild_queries,
-        default_policyengine_us_data_rebuild_source_providers,
-        default_us_atomic_rung0_benchmarks,
-        default_us_atomic_rung1_benchmarks,
-        default_us_atomic_rung2_calibration,
-        default_us_atomic_rung3_calibration,
-        default_us_atomic_rung4_calibration,
-        default_us_atomic_rung5_calibration,
-        default_us_source_mix_experiments,
-        evaluate_us_reduced_benchmark,
-        list_us_microplex_target_delta_rows,
-        load_us_microplex_run_registry,
-        rebuild_us_microplex_run_index,
-        reduced_benchmark_specs_to_calibration_targets,
-        reduced_benchmark_to_calibration_targets,
-        resolve_us_microplex_frontier_artifact_dir,
-        resolve_us_microplex_run_index_path,
-        reweight_us_household_targets,
-        run_policyengine_us_data_rebuild_checkpoint,
-        run_us_microplex_performance_harness,
-        run_us_microplex_reduced_benchmark_harness,
-        run_us_microplex_source_experiments,
-        save_us_microplex_artifacts,
-        save_versioned_us_microplex_artifacts,
-        save_versioned_us_microplex_build_result,
-        select_us_microplex_frontier_entry,
-        select_us_microplex_frontier_index_row,
-        warm_us_microplex_parity_cache,
-        write_policyengine_us_data_rebuild_native_audit,
-        write_us_microplex_site_snapshot,
-    )
-except ImportError:
-    # Keep package import light; direct pipeline imports still surface real failures.
-    globals().update(dict.fromkeys(_PIPELINE_EXPORTS))
-
 _POLICYENGINE_EXPORTS = (
     "PolicyEngineUSComparisonCache",
     "PolicyEngineUSConstraint",
@@ -248,36 +163,6 @@ _POLICYENGINE_EXPORTS = (
     "project_frame_to_time_period_arrays",
     "write_policyengine_us_time_period_dataset",
 )
-try:
-    from microplex_us.policyengine import (
-        PolicyEngineUSComparisonCache,
-        PolicyEngineUSConstraint,
-        PolicyEngineUSDBTarget,
-        PolicyEngineUSDBTargetProvider,
-        PolicyEngineUSEntityTableBundle,
-        PolicyEngineUSMicrosimulationAdapter,
-        PolicyEngineUSQuantityTarget,
-        PolicyEngineUSTargetComparisonReport,
-        PolicyEngineUSTargetEvaluation,
-        PolicyEngineUSTargetEvaluationReport,
-        PolicyEngineUSVariableBinding,
-        build_policyengine_us_time_period_arrays,
-        compare_policyengine_us_target_query_to_baseline,
-        compile_policyengine_us_household_linear_constraints,
-        compute_policyengine_us_definition_hash,
-        detect_policyengine_pseudo_inputs,
-        evaluate_policyengine_us_target_query,
-        evaluate_policyengine_us_target_set,
-        filter_supported_policyengine_us_targets,
-        infer_policyengine_us_variable_bindings,
-        load_policyengine_us_entity_tables,
-        materialize_policyengine_us_variables,
-        policyengine_us_variables_to_materialize,
-        project_frame_to_time_period_arrays,
-        write_policyengine_us_time_period_dataset,
-    )
-except ImportError:
-    globals().update(dict.fromkeys(_POLICYENGINE_EXPORTS))
 _SOURCE_REGISTRY_EXPORTS = (
     "DEFAULT_SOURCE_VARIABLE_POLICIES",
     "PUF_SOURCE_VARIABLE_POLICY",
@@ -285,16 +170,6 @@ _SOURCE_REGISTRY_EXPORTS = (
     "SourceVariablePolicySpec",
     "resolve_source_variable_capabilities",
 )
-try:
-    from microplex_us.source_registry import (
-        DEFAULT_SOURCE_VARIABLE_POLICIES,
-        PUF_SOURCE_VARIABLE_POLICY,
-        SourceVariablePolicy,
-        SourceVariablePolicySpec,
-        resolve_source_variable_capabilities,
-    )
-except ImportError:
-    globals().update(dict.fromkeys(_SOURCE_REGISTRY_EXPORTS))
 from microplex_us.target_registry import (
     TargetCategory,
     TargetGroup,
@@ -309,14 +184,6 @@ _TARGETS_EXPORTS = (
     "policyengine_db_target_to_canonical_spec",
     "policyengine_db_targets_to_canonical_set",
 )
-try:
-    from microplex_us.targets import (
-        POLICYENGINE_US_COUNT_ENTITIES,
-        policyengine_db_target_to_canonical_spec,
-        policyengine_db_targets_to_canonical_set,
-    )
-except ImportError:
-    globals().update(dict.fromkeys(_TARGETS_EXPORTS))
 from microplex_us.unified_calibration import (
     CalibrationTarget,
     UnifiedCalibrator,
@@ -351,6 +218,24 @@ except ImportError:
     get_soi_years = None
     load_soi_targets = None
     validate_against_soi = None
+
+_LAZY_EXPORT_MODULES: dict[str, str] = {
+    **dict.fromkeys(_PIPELINE_EXPORTS, "microplex_us.pipelines"),
+    **dict.fromkeys(_POLICYENGINE_EXPORTS, "microplex_us.policyengine"),
+    **dict.fromkeys(_SOURCE_REGISTRY_EXPORTS, "microplex_us.source_registry"),
+    **dict.fromkeys(_TARGETS_EXPORTS, "microplex_us.targets"),
+}
+
+
+def __getattr__(name: str) -> Any:
+    """Resolve optional heavyweight convenience exports on first access."""
+    module_name = _LAZY_EXPORT_MODULES.get(name)
+    if module_name is None:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    value = getattr(import_module(module_name), name)
+    globals()[name] = value
+    return value
+
 
 __all__ = [
     "CalibrationHarness",

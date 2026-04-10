@@ -173,7 +173,9 @@ class ColumnwiseQRFDonorImputer:
     ) -> ColumnwiseQRFDonorImputer:
         del weight_col, epochs, batch_size, learning_rate, verbose
         if importlib.util.find_spec("quantile_forest") is None:
-            raise ImportError("quantile-forest is required for donor_imputer_backend='qrf'")
+            raise ImportError(
+                "quantile-forest is required for donor_imputer_backend='qrf'"
+            )
         from quantile_forest import RandomForestQuantileRegressor
 
         self._models = {}
@@ -240,13 +242,17 @@ class ColumnwiseQRFDonorImputer:
                     x_values[target_rows],
                     quantiles=list(self.quantiles),
                 )
-                quantile_choices = rng.choice(len(self.quantiles), size=target_rows.sum())
+                quantile_choices = rng.choice(
+                    len(self.quantiles), size=target_rows.sum()
+                )
                 draws = predictions[np.arange(target_rows.sum()), quantile_choices]
                 if column in self.nonnegative_vars:
                     draws = np.maximum(draws, 0.0)
                 values[target_rows] = draws
             synthetic[column] = values
         return synthetic
+
+
 AGE_LABELS = ["0-17", "18-34", "35-54", "55-64", "65+"]
 INCOME_BINS = [-np.inf, 25_000, 50_000, 100_000, np.inf]
 INCOME_LABELS = ["<25k", "25-50k", "50-100k", "100k+"]
@@ -276,7 +282,9 @@ def _summarize_weight_diagnostics(
     tiny_threshold: float = TINY_WEIGHT_THRESHOLD,
 ) -> dict[str, Any]:
     """Summarize whether a calibrated weight vector looks numerically healthy."""
-    series = pd.to_numeric(pd.Series(weights), errors="coerce").fillna(0.0).astype(float)
+    series = (
+        pd.to_numeric(pd.Series(weights), errors="coerce").fillna(0.0).astype(float)
+    )
     row_count = int(len(series))
     if row_count == 0:
         return {
@@ -333,9 +341,13 @@ def _summarize_weight_diagnostics(
     }
 
 
-def _state_program_support_proxy_summary(available_columns: set[str]) -> dict[str, list[str]]:
+def _state_program_support_proxy_summary(
+    available_columns: set[str],
+) -> dict[str, list[str]]:
     available = sorted(
-        variable for variable in STATE_PROGRAM_SUPPORT_PROXY_VARIABLES if variable in available_columns
+        variable
+        for variable in STATE_PROGRAM_SUPPORT_PROXY_VARIABLES
+        if variable in available_columns
     )
     missing = sorted(
         variable
@@ -484,7 +496,10 @@ def _select_feasible_policyengine_calibration_constraints(
     )
 
     over_capacity_dropped = 0
-    if requested_max_constraints is not None and len(support_filtered) > requested_max_constraints:
+    if (
+        requested_max_constraints is not None
+        and len(support_filtered) > requested_max_constraints
+    ):
         over_capacity_dropped = len(support_filtered) - requested_max_constraints
         support_filtered = support_filtered[:requested_max_constraints]
 
@@ -625,10 +640,7 @@ def _normalize_config_value(value: Any) -> Any:
     if isinstance(value, Path):
         return str(value)
     if isinstance(value, dict):
-        return {
-            str(key): _normalize_config_value(item)
-            for key, item in value.items()
-        }
+        return {str(key): _normalize_config_value(item) for key, item in value.items()}
     if isinstance(value, (list, tuple)):
         return [_normalize_config_value(item) for item in value]
     if isinstance(value, type) or isinstance(value, FunctionType):
@@ -715,7 +727,8 @@ class USMicroplexPipeline:
                 else DEFAULT_CACHE_DIR
             )
             processed_path = (
-                cache_dir / f"cps_asec_{int(self.config.cps_asec_source_year)}_processed.parquet"
+                cache_dir
+                / f"cps_asec_{int(self.config.cps_asec_source_year)}_processed.parquet"
             )
             if processed_path.exists():
                 return self.build_from_source_provider(
@@ -744,7 +757,9 @@ class USMicroplexPipeline:
         queries: dict[str, SourceQuery] | None = None,
     ) -> USMicroplexBuildResult:
         if not providers:
-            raise ValueError("USMicroplexPipeline requires at least one source provider")
+            raise ValueError(
+                "USMicroplexPipeline requires at least one source provider"
+            )
 
         frames: list[ObservationFrame] = []
         for provider in providers:
@@ -762,7 +777,9 @@ class USMicroplexPipeline:
         frames: list[ObservationFrame],
     ) -> USMicroplexBuildResult:
         if not frames:
-            raise ValueError("USMicroplexPipeline requires at least one observation frame")
+            raise ValueError(
+                "USMicroplexPipeline requires at least one observation frame"
+            )
 
         source_inputs = [self.prepare_source_input(frame) for frame in frames]
         fusion_plan = FusionPlan.from_sources([frame.source for frame in frames])
@@ -771,7 +788,9 @@ class USMicroplexPipeline:
         donor_integration = self._integrate_donor_sources(
             seed_data,
             scaffold_input=scaffold_input,
-            donor_inputs=[source for source in source_inputs if source is not scaffold_input],
+            donor_inputs=[
+                source for source in source_inputs if source is not scaffold_input
+            ],
         )
         seed_data = donor_integration["seed_data"]
         seed_data = self._strip_generated_entity_ids(
@@ -797,7 +816,9 @@ class USMicroplexPipeline:
             "target_vars": list(synthesis_variables.target_vars),
             "scaffold_source": scaffold_input.frame.source.name,
             "donor_integrated_variables": donor_integration["integrated_variables"],
-            "donor_excluded_variables": list(self.config.donor_imputer_excluded_variables),
+            "donor_excluded_variables": list(
+                self.config.donor_imputer_excluded_variables
+            ),
             "donor_authoritative_override_variables": list(
                 self.config.donor_imputer_authoritative_override_variables
             ),
@@ -814,7 +835,9 @@ class USMicroplexPipeline:
                 calibration_summary,
             ) = self.calibrate_policyengine_tables(synthetic_tables)
         else:
-            calibrated_data, calibration_summary = self.calibrate(synthetic_data, targets)
+            calibrated_data, calibration_summary = self.calibrate(
+                synthetic_data, targets
+            )
             policyengine_tables = self.build_policyengine_entity_tables(calibrated_data)
 
         return USMicroplexBuildResult(
@@ -923,7 +946,9 @@ class USMicroplexPipeline:
         source_input: USMicroplexSourceInput,
     ) -> pd.DataFrame:
         """Project an observation frame into the canonical US seed schema."""
-        household_coverage = source_input.fusion_plan.variables_for(EntityType.HOUSEHOLD)
+        household_coverage = source_input.fusion_plan.variables_for(
+            EntityType.HOUSEHOLD
+        )
         person_coverage = source_input.fusion_plan.variables_for(EntityType.PERSON)
         relationship = source_input.household_person_relationship
 
@@ -934,7 +959,9 @@ class USMicroplexPipeline:
             relationship.parent_key: "household_id",
         }
         if source_input.household_observation.weight_column is not None:
-            household_renames[source_input.household_observation.weight_column] = "hh_weight"
+            household_renames[source_input.household_observation.weight_column] = (
+                "hh_weight"
+            )
         hh = hh.rename(columns=household_renames)
 
         person_renames = {
@@ -947,7 +974,10 @@ class USMicroplexPipeline:
             raise ValueError(
                 "USMicroplexPipeline could not resolve a canonical household_id from the source frame"
             )
-        if "household_id" not in persons_df.columns or "person_id" not in persons_df.columns:
+        if (
+            "household_id" not in persons_df.columns
+            or "person_id" not in persons_df.columns
+        ):
             raise ValueError(
                 "USMicroplexPipeline could not resolve canonical person/household linkage columns"
             )
@@ -993,7 +1023,9 @@ class USMicroplexPipeline:
         seed_data["tenure"] = seed_data["tenure"].fillna(0).astype(int)
         seed_data["state_fips"] = seed_data["state_fips"].fillna(0).astype(int)
         seed_data["county_fips"] = seed_data["county_fips"].fillna(0).astype(int)
-        seed_data["income"] = pd.to_numeric(seed_data["income"], errors="coerce").fillna(0.0)
+        seed_data["income"] = pd.to_numeric(
+            seed_data["income"], errors="coerce"
+        ).fillna(0.0)
         seed_data = normalize_social_security_columns(seed_data)
 
         seed_data["state"] = seed_data["state_fips"].map(STATE_FIPS).fillna("UNK")
@@ -1201,16 +1233,24 @@ class USMicroplexPipeline:
                 exemplar = exemplars.iloc[0]
                 row_idx = replace_idx % len(result)
                 for column_name, value in exemplar.items():
-                    if column_name in result.columns and column_name not in {"person_id", "household_id", "weight"}:
+                    if column_name in result.columns and column_name not in {
+                        "person_id",
+                        "household_id",
+                        "weight",
+                    }:
                         resolved_value = value
                         destination = result[column_name]
-                        if pd.api.types.is_bool_dtype(destination.dtype) and not isinstance(
+                        if pd.api.types.is_bool_dtype(
+                            destination.dtype
+                        ) and not isinstance(
                             resolved_value,
                             (bool, np.bool_),
                         ):
                             result[column_name] = destination.astype(float)
                             destination = result[column_name]
-                        if pd.api.types.is_numeric_dtype(destination.dtype) and isinstance(
+                        if pd.api.types.is_numeric_dtype(
+                            destination.dtype
+                        ) and isinstance(
                             value,
                             (bool, np.bool_),
                         ):
@@ -1218,7 +1258,9 @@ class USMicroplexPipeline:
                         result.at[row_idx, column_name] = resolved_value
                 replace_idx += 1
 
-        initial_weight = float(result["weight"].mean()) if "weight" in result.columns else 1.0
+        initial_weight = (
+            float(result["weight"].mean()) if "weight" in result.columns else 1.0
+        )
         base = result.drop(
             columns=["person_id", "state", "age_group", "income_bracket"],
             errors="ignore",
@@ -1268,10 +1310,14 @@ class USMicroplexPipeline:
                     .mean()
                 ),
             )
-            return synthetic, None, {
-                "backend": "seed",
-                "n_seed_records": int(len(seed_data)),
-            }
+            return (
+                synthetic,
+                None,
+                {
+                    "backend": "seed",
+                    "n_seed_records": int(len(seed_data)),
+                },
+            )
 
         if self.config.synthesis_backend == "bootstrap":
             bootstrap_strata_columns = self._resolve_bootstrap_strata_columns(seed_data)
@@ -1280,10 +1326,14 @@ class USMicroplexPipeline:
                 initial_weight=initial_weight,
                 strata_columns=bootstrap_strata_columns,
             )
-            return synthetic, None, {
-                "backend": "bootstrap",
-                "bootstrap_strata_columns": list(bootstrap_strata_columns),
-            }
+            return (
+                synthetic,
+                None,
+                {
+                    "backend": "bootstrap",
+                    "bootstrap_strata_columns": list(bootstrap_strata_columns),
+                },
+            )
 
         synthesizer = self._fit_synthesizer(seed_data, synthesis_variables)
         synthetic = synthesizer.sample(
@@ -1320,9 +1370,12 @@ class USMicroplexPipeline:
             validation = calibrator.validate(calibrated)
             all_errors = []
             for var_errors in validation["marginal_errors"].values():
-                all_errors.extend(item["relative_error"] for item in var_errors.values())
+                all_errors.extend(
+                    item["relative_error"] for item in var_errors.values()
+                )
             all_errors.extend(
-                item["relative_error"] for item in validation["continuous_errors"].values()
+                item["relative_error"]
+                for item in validation["continuous_errors"].values()
             )
             summary = {
                 "backend": self.config.calibration_backend,
@@ -1350,7 +1403,12 @@ class USMicroplexPipeline:
 
     def _build_weight_calibrator(
         self,
-    ) -> Calibrator | SparseCalibrator | HardConcreteCalibrator | PolicyEngineL0Calibrator:
+    ) -> (
+        Calibrator
+        | SparseCalibrator
+        | HardConcreteCalibrator
+        | PolicyEngineL0Calibrator
+    ):
         if self.config.calibration_backend in {"entropy", "ipf", "chi2"}:
             return Calibrator(
                 method=self.config.calibration_backend,
@@ -1427,7 +1485,9 @@ class USMicroplexPipeline:
         state_floor_positions = np.asarray([], dtype=np.int64)
         state_floor_summary = {
             "applied": False,
-            "requested_state_floor": int(max(self.config.policyengine_selection_state_floor, 0)),
+            "requested_state_floor": int(
+                max(self.config.policyengine_selection_state_floor, 0)
+            ),
         }
         if selection_backend == "sparse":
             selector = SparseCalibrator(
@@ -1448,9 +1508,7 @@ class USMicroplexPipeline:
                 .to_numpy(dtype=float)
             )
             selector_metadata = {
-                "selector_converged": bool(
-                    selector_validation.get("converged", False)
-                ),
+                "selector_converged": bool(selector_validation.get("converged", False)),
                 "selector_max_error": float(selector_validation.get("max_error", 0.0)),
                 "selector_mean_error": float(
                     selector_validation.get("mean_error", 0.0)
@@ -1485,10 +1543,14 @@ class USMicroplexPipeline:
                 else tables
             )
             remaining_household_ids = (
-                household_ids[~state_floor_mask] if state_floor_mask.any() else household_ids
+                household_ids[~state_floor_mask]
+                if state_floor_mask.any()
+                else household_ids
             )
             if remaining_budget == 0 or len(remaining_household_ids) == 0:
-                selector_weights = np.zeros(len(remaining_household_ids), dtype=np.float64)
+                selector_weights = np.zeros(
+                    len(remaining_household_ids), dtype=np.float64
+                )
                 optimization_summary = {
                     "metric": "enhanced_cps_native_loss_weight_optimization",
                     "initial_loss": 0.0,
@@ -1514,12 +1576,16 @@ class USMicroplexPipeline:
                 full_selector_weights = np.zeros(household_count, dtype=np.float64)
                 full_selector_weights[~state_floor_mask] = selector_weights
                 floor_priority = (
-                    float(selector_weights.max()) + 1.0 if selector_weights.size else 1.0
+                    float(selector_weights.max()) + 1.0
+                    if selector_weights.size
+                    else 1.0
                 )
                 full_selector_weights[state_floor_mask] = floor_priority
                 selector_weights = full_selector_weights
             selector_metadata = {
-                "selector_converged": bool(optimization_summary.get("converged", False)),
+                "selector_converged": bool(
+                    optimization_summary.get("converged", False)
+                ),
                 "selector_max_error": 0.0,
                 "selector_mean_error": 0.0,
                 "selector_sparsity": 0.0,
@@ -1581,7 +1647,9 @@ class USMicroplexPipeline:
                     "reason": "missing_state_fips",
                 },
             )
-        ranked = households.loc[:, ["household_id", "state_fips", "household_weight"]].copy()
+        ranked = households.loc[
+            :, ["household_id", "state_fips", "household_weight"]
+        ].copy()
         ranked["_position"] = np.arange(len(ranked), dtype=np.int64)
         ranked["state_fips"] = pd.to_numeric(ranked["state_fips"], errors="coerce")
         ranked["household_weight"] = pd.to_numeric(
@@ -1635,7 +1703,11 @@ class USMicroplexPipeline:
         requested_budget: int,
         household_ids: np.ndarray,
     ) -> tuple[np.ndarray, dict[str, Any]]:
-        period = self.config.policyengine_dataset_year or self.config.policyengine_target_period or 2024
+        period = (
+            self.config.policyengine_dataset_year
+            or self.config.policyengine_target_period
+            or 2024
+        )
         with TemporaryDirectory(prefix="microplex-us-pe-native-selection-") as temp_dir:
             temp_dir_path = Path(temp_dir)
             selection_build_result = USMicroplexBuildResult(
@@ -1668,7 +1740,9 @@ class USMicroplexPipeline:
                     np.int64,
                     copy=False,
                 )
-                optimized_household_weights = handle["household_weight"][period_key][:].astype(
+                optimized_household_weights = handle["household_weight"][period_key][
+                    :
+                ].astype(
                     np.float64,
                     copy=False,
                 )
@@ -1681,7 +1755,10 @@ class USMicroplexPipeline:
             )
         }
         selector_weights = np.asarray(
-            [weight_by_household_id[int(household_id)] for household_id in household_ids],
+            [
+                weight_by_household_id[int(household_id)]
+                for household_id in household_ids
+            ],
             dtype=np.float64,
         )
         optimization_summary = optimization_result.to_dict()
@@ -1735,7 +1812,9 @@ class USMicroplexPipeline:
             target_period=target_period,
         )
         if not supported_targets:
-            raise ValueError("No supported PolicyEngine DB targets matched current tables")
+            raise ValueError(
+                "No supported PolicyEngine DB targets matched current tables"
+            )
         selection_summary: dict[str, Any] | None = None
         if self.config.policyengine_selection_household_budget is not None:
             (
@@ -1786,7 +1865,9 @@ class USMicroplexPipeline:
                     LinearConstraint(
                         name="total_household_weight_sum",
                         coefficients=np.ones(n_hh, dtype=float),
-                        target=float(self.config.policyengine_calibration_target_total_weight),
+                        target=float(
+                            self.config.policyengine_calibration_target_total_weight
+                        ),
                     )
                 )
             calibrated_households = calibrator.fit_transform(
@@ -1795,7 +1876,9 @@ class USMicroplexPipeline:
                 weight_col="household_weight",
                 linear_constraints=tuple(calibration_constraints),
             )
-            pre_rescale_household_weight_sum = float(calibrated_households["household_weight"].sum())
+            pre_rescale_household_weight_sum = float(
+                calibrated_households["household_weight"].sum()
+            )
         weight_sum_rescaled = False
         weight_sum_rescale_mode: str | None = None
         if (
@@ -1807,23 +1890,25 @@ class USMicroplexPipeline:
                 float(self.config.policyengine_calibration_target_total_weight),
             )
         ):
-            calibrated_households["household_weight"] = (
-                calibrated_households["household_weight"].astype(float)
-                * (
-                    float(self.config.policyengine_calibration_target_total_weight)
-                    / pre_rescale_household_weight_sum
-                )
+            calibrated_households["household_weight"] = calibrated_households[
+                "household_weight"
+            ].astype(float) * (
+                float(self.config.policyengine_calibration_target_total_weight)
+                / pre_rescale_household_weight_sum
             )
             weight_sum_rescaled = True
             weight_sum_rescale_mode = "target_total_weight"
         elif (
             self.config.policyengine_calibration_rescale_to_input_weight_sum
             and pre_rescale_household_weight_sum > 0.0
-            and not np.isclose(pre_rescale_household_weight_sum, input_household_weight_sum)
+            and not np.isclose(
+                pre_rescale_household_weight_sum, input_household_weight_sum
+            )
         ):
-            calibrated_households["household_weight"] = (
-                calibrated_households["household_weight"].astype(float)
-                * (input_household_weight_sum / pre_rescale_household_weight_sum)
+            calibrated_households["household_weight"] = calibrated_households[
+                "household_weight"
+            ].astype(float) * (
+                input_household_weight_sum / pre_rescale_household_weight_sum
             )
             weight_sum_rescaled = True
             weight_sum_rescale_mode = "input_weight_sum"
@@ -1837,16 +1922,22 @@ class USMicroplexPipeline:
         else:
             validation = calibrator.validate(calibrated_households)
 
-        household_weights = calibrated_households.set_index("household_id")["household_weight"]
-        calibrated_persons = tables.persons.copy() if tables.persons is not None else pd.DataFrame()
+        household_weights = calibrated_households.set_index("household_id")[
+            "household_weight"
+        ]
+        calibrated_persons = (
+            tables.persons.copy() if tables.persons is not None else pd.DataFrame()
+        )
         if not calibrated_persons.empty:
-            calibrated_persons["weight"] = calibrated_persons["household_id"].map(
-                household_weights
-            ).astype(float)
+            calibrated_persons["weight"] = (
+                calibrated_persons["household_id"].map(household_weights).astype(float)
+            )
 
         updated_tables = PolicyEngineUSEntityTableBundle(
             households=calibrated_households,
-            persons=calibrated_persons if not calibrated_persons.empty else tables.persons,
+            persons=calibrated_persons
+            if not calibrated_persons.empty
+            else tables.persons,
             tax_units=tables.tax_units,
             spm_units=tables.spm_units,
             families=tables.families,
@@ -1869,11 +1960,19 @@ class USMicroplexPipeline:
             "n_unsupported_targets": len(unsupported_targets),
             "n_constraints": len(constraints),
             "feasibility_filter": feasibility_filter_summary,
-            "target_variables": list(self._policyengine_target_scope(for_calibration=True)[0]),
-            "target_domains": list(self._policyengine_target_scope(for_calibration=True)[1]),
-            "target_geo_levels": list(self._policyengine_target_scope(for_calibration=True)[2]),
+            "target_variables": list(
+                self._policyengine_target_scope(for_calibration=True)[0]
+            ),
+            "target_domains": list(
+                self._policyengine_target_scope(for_calibration=True)[1]
+            ),
+            "target_geo_levels": list(
+                self._policyengine_target_scope(for_calibration=True)[2]
+            ),
             "target_profile": self._policyengine_target_profile(for_calibration=True),
-            "target_cell_count": len(self._policyengine_target_cells(for_calibration=True)),
+            "target_cell_count": len(
+                self._policyengine_target_cells(for_calibration=True)
+            ),
             "materialized_variables": sorted(materialized_variables),
             "materialization_failures": materialization_failures,
             "max_error": float(validation["max_error"]),
@@ -2038,7 +2137,8 @@ class USMicroplexPipeline:
         )
         geo_levels = (
             self.config.policyengine_calibration_target_geo_levels
-            if for_calibration and self.config.policyengine_calibration_target_geo_levels
+            if for_calibration
+            and self.config.policyengine_calibration_target_geo_levels
             else self.config.policyengine_target_geo_levels
         )
         return variables, domain_variables, geo_levels
@@ -2059,7 +2159,9 @@ class USMicroplexPipeline:
         *,
         for_calibration: bool,
     ) -> tuple[PolicyEngineUSTargetCell, ...]:
-        profile_name = self._policyengine_target_profile(for_calibration=for_calibration)
+        profile_name = self._policyengine_target_profile(
+            for_calibration=for_calibration
+        )
         if profile_name is None:
             return ()
         return resolve_policyengine_us_target_profile(profile_name)
@@ -2074,7 +2176,9 @@ class USMicroplexPipeline:
         variables, domain_variables, geo_levels = self._policyengine_target_scope(
             for_calibration=for_calibration
         )
-        profile_name = self._policyengine_target_profile(for_calibration=for_calibration)
+        profile_name = self._policyengine_target_profile(
+            for_calibration=for_calibration
+        )
         target_cells = self._policyengine_target_cells(for_calibration=for_calibration)
         return TargetQuery(
             period=period,
@@ -2116,9 +2220,15 @@ class USMicroplexPipeline:
 
         persons["person_id"] = persons["person_id"].astype(np.int64)
         persons["household_id"] = persons["household_id"].astype(np.int64)
-        persons["weight"] = pd.to_numeric(persons["weight"], errors="coerce").fillna(0.0)
-        persons["income"] = pd.to_numeric(persons["income"], errors="coerce").fillna(0.0)
-        persons["age"] = pd.to_numeric(persons["age"], errors="coerce").fillna(0).astype(int)
+        persons["weight"] = pd.to_numeric(persons["weight"], errors="coerce").fillna(
+            0.0
+        )
+        persons["income"] = pd.to_numeric(persons["income"], errors="coerce").fillna(
+            0.0
+        )
+        persons["age"] = (
+            pd.to_numeric(persons["age"], errors="coerce").fillna(0).astype(int)
+        )
         persons = self._augment_policyengine_person_inputs(persons)
         persons["relationship_to_head"] = self._normalize_relationship_to_head(persons)
 
@@ -2206,7 +2316,9 @@ class USMicroplexPipeline:
         condition_vars = list(synthesis_variables.condition_vars)
         target_vars = list(synthesis_variables.target_vars)
         if not target_vars:
-            raise ValueError("USMicroplexPipeline requires at least one observed target variable")
+            raise ValueError(
+                "USMicroplexPipeline requires at least one observed target variable"
+            )
 
         synthesizer = Synthesizer(
             target_vars=target_vars,
@@ -2385,19 +2497,16 @@ class USMicroplexPipeline:
         def score(source: USMicroplexSourceInput) -> tuple[int, int, int, int]:
             public_score = int(source.frame.source.shareability == Shareability.PUBLIC)
             geography_score = self._household_geography_coverage(source)
-            observed_variables = (
-                source.fusion_plan.variables_for(EntityType.HOUSEHOLD)
-                | source.fusion_plan.variables_for(EntityType.PERSON)
-            )
+            observed_variables = source.fusion_plan.variables_for(
+                EntityType.HOUSEHOLD
+            ) | source.fusion_plan.variables_for(EntityType.PERSON)
             support_proxy_score = sum(
                 variable in observed_variables
                 for variable in STATE_PROGRAM_SUPPORT_PROXY_VARIABLES
             )
             observed_vars = len(observed_variables)
             household_rows = (
-                len(source.households)
-                if source.households is not None
-                else 0
+                len(source.households) if source.households is not None else 0
             )
             return (
                 public_score,
@@ -2498,7 +2607,8 @@ class USMicroplexPipeline:
                 for variable in scaffold_observed & donor_observed
                 if variable not in excluded
                 and variable not in self.config.donor_imputer_excluded_variables
-                and variable in self.config.donor_imputer_authoritative_override_variables
+                and variable
+                in self.config.donor_imputer_authoritative_override_variables
                 and variable in current.columns
                 and variable in donor_seed.columns
                 and variable in numeric_current
@@ -2534,7 +2644,8 @@ class USMicroplexPipeline:
                     donor_block_spec=donor_block_spec,
                     donor_source_name=donor_input.frame.source.name,
                     prepare_pe_surface=(
-                        self.config.donor_imputer_condition_selection == "pe_prespecified"
+                        self.config.donor_imputer_condition_selection
+                        == "pe_prespecified"
                     ),
                     can_project_to_entity=self._can_project_donor_block_to_entity,
                     project_frame_to_entity=self._project_frame_to_entity,
@@ -2572,9 +2683,11 @@ class USMicroplexPipeline:
                         current = result.updated_frame
                         integrated_variables.extend(result.integrated_variables)
                     continue
-                donor_condition_source = self._augment_donor_condition_frame_for_targets(
-                    donor_condition_source,
-                    donor_block_spec.model_variables,
+                donor_condition_source = (
+                    self._augment_donor_condition_frame_for_targets(
+                        donor_condition_source,
+                        donor_block_spec.model_variables,
+                    )
                 )
                 current_condition_source = (
                     self._augment_donor_condition_frame_for_targets(
@@ -2631,13 +2744,6 @@ class USMicroplexPipeline:
         shared_vars: list[str],
         donor_block: tuple[str, ...],
     ) -> list[str]:
-        preferred_condition_vars = self._resolve_preferred_donor_condition_vars(
-            donor_frame=donor_frame,
-            current_frame=current_frame,
-            donor_block=donor_block,
-        )
-        if preferred_condition_vars:
-            return preferred_condition_vars
         condition_vars = [
             variable for variable in shared_vars if variable in donor_frame.columns
         ]
@@ -2645,6 +2751,14 @@ class USMicroplexPipeline:
             return condition_vars
 
         max_condition_vars = self.config.donor_imputer_max_condition_vars
+        if self.config.donor_imputer_condition_selection == "pe_prespecified":
+            preferred_condition_vars = self._resolve_preferred_donor_condition_vars(
+                donor_frame=donor_frame,
+                current_frame=current_frame,
+                donor_block=donor_block,
+            )
+            if preferred_condition_vars:
+                return preferred_condition_vars
         if (
             self.config.donor_imputer_condition_selection == "all_shared"
             or max_condition_vars is None
@@ -2656,7 +2770,11 @@ class USMicroplexPipeline:
             (
                 score_donor_condition_var(
                     donor_frame[variable],
-                    [donor_frame[target] for target in donor_block if target in donor_frame.columns],
+                    [
+                        donor_frame[target]
+                        for target in donor_block
+                        if target in donor_frame.columns
+                    ],
                     score_modes={
                         variable_semantic_spec_for(target).condition_score_mode
                         for target in donor_block
@@ -2667,18 +2785,13 @@ class USMicroplexPipeline:
             for variable in condition_vars
         ]
         scored_conditions = [
-            (score, variable)
-            for score, variable in scored_conditions
-            if score > 0.0
+            (score, variable) for score, variable in scored_conditions if score > 0.0
         ]
         if not scored_conditions:
             return condition_vars[:max_condition_vars]
 
         scored_conditions.sort(key=lambda item: (-item[0], item[1]))
-        return [
-            variable
-            for _, variable in scored_conditions[:max_condition_vars]
-        ]
+        return [variable for _, variable in scored_conditions[:max_condition_vars]]
 
     def _resolve_preferred_donor_condition_vars(
         self,
@@ -2700,7 +2813,10 @@ class USMicroplexPipeline:
             return []
         resolved: list[str] = []
         for variable in preferred_condition_vars:
-            if variable not in donor_frame.columns or variable not in current_frame.columns:
+            if (
+                variable not in donor_frame.columns
+                or variable not in current_frame.columns
+            ):
                 continue
             if not pd.api.types.is_numeric_dtype(donor_frame[variable]):
                 continue
@@ -2728,7 +2844,9 @@ class USMicroplexPipeline:
         ]
         if not preferred_condition_vars:
             return frame
-        if not set(PE_STYLE_PUF_IRS_DEMOGRAPHIC_PREDICTORS) & set(preferred_condition_vars):
+        if not set(PE_STYLE_PUF_IRS_DEMOGRAPHIC_PREDICTORS) & set(
+            preferred_condition_vars
+        ):
             return frame
         predictor_frame = self._build_pe_style_puf_irs_condition_frame(frame)
         if predictor_frame.empty:
@@ -2797,9 +2915,9 @@ class USMicroplexPipeline:
         )
 
         tax_unit_ids = frame["tax_unit_id"]
-        valid_tax_unit_ids = tax_unit_ids.notna() & tax_unit_ids.astype(str).str.strip().ne(
-            ""
-        )
+        valid_tax_unit_ids = tax_unit_ids.notna() & tax_unit_ids.astype(
+            str
+        ).str.strip().ne("")
         for _, unit_persons in frame.loc[valid_tax_unit_ids].groupby(
             "tax_unit_id",
             sort=False,
@@ -2827,7 +2945,9 @@ class USMicroplexPipeline:
                 spouse_index.extend([int(idx), int(spouse_idx)])
             if not spouse_index:
                 spouse_index = (
-                    unit_relationship[unit_relationship.eq(1)].index.astype(int).tolist()
+                    unit_relationship[unit_relationship.eq(1)]
+                    .index.astype(int)
+                    .tolist()
                 )
             spouse_index = [
                 idx for idx in dict.fromkeys(spouse_index) if idx not in dependent_index
@@ -3032,7 +3152,9 @@ class USMicroplexPipeline:
         return True
 
     def _is_compatible_donor_target(self, series: pd.Series) -> bool:
-        values = pd.to_numeric(series, errors="coerce").replace([np.inf, -np.inf], np.nan)
+        values = pd.to_numeric(series, errors="coerce").replace(
+            [np.inf, -np.inf], np.nan
+        )
         values = values.dropna()
         if values.empty:
             return False
@@ -3059,12 +3181,9 @@ class USMicroplexPipeline:
             donor_weight_array = donor_weights.to_numpy(dtype=float)
             donor_weight_array = np.clip(donor_weight_array, a_min=0.0, a_max=None)
 
-        if (
-            strategy is DonorMatchStrategy.ZERO_INFLATED_POSITIVE
-            or (
-                strategy is DonorMatchStrategy.RANK
-                and self._is_zero_inflated_positive_distribution(donor_array)
-            )
+        if strategy is DonorMatchStrategy.ZERO_INFLATED_POSITIVE or (
+            strategy is DonorMatchStrategy.RANK
+            and self._is_zero_inflated_positive_distribution(donor_array)
         ):
             return self._rank_match_zero_inflated_positive_values(
                 scores,
@@ -3109,7 +3228,9 @@ class USMicroplexPipeline:
         if n_positive == 0:
             return pd.Series(matched, index=scores.index, dtype=float)
 
-        positive_weights = donor_weights[positive_mask] if donor_weights is not None else None
+        positive_weights = (
+            donor_weights[positive_mask] if donor_weights is not None else None
+        )
         sampled_positive = self._sample_donor_array(
             positive_values,
             size=n_positive,
@@ -3239,10 +3360,11 @@ class USMicroplexPipeline:
             requested_geo_levels.update(geo_levels)
 
         inferred_columns: list[str] = []
-        if (
-            {"state", "district", "county"} & requested_geo_levels
-            and "state_fips" in seed_data.columns
-        ):
+        if {
+            "state",
+            "district",
+            "county",
+        } & requested_geo_levels and "state_fips" in seed_data.columns:
             inferred_columns.append("state_fips")
         if "county" in requested_geo_levels and "county_fips" in seed_data.columns:
             inferred_columns.append("county_fips")
@@ -3436,7 +3558,9 @@ class USMicroplexPipeline:
             hh_persons = person_rows[person_rows["household_id"] == household_id].copy()
             if hh_persons.empty:
                 continue
-            optimized_units = optimizer.optimize_household(int(household_id), hh_persons)
+            optimized_units = optimizer.optimize_household(
+                int(household_id), hh_persons
+            )
             optimized_units = self._apply_tax_unit_filing_status_hints(
                 hh_persons,
                 optimized_units,
@@ -3482,7 +3606,9 @@ class USMicroplexPipeline:
                         "n_dependents": int(unit.get("n_dependents", 0)),
                         "total_income": float(unit.get("total_income", 0.0)),
                         "tax_liability": float(unit.get("tax_liability", 0.0)),
-                        **self._aggregate_policyengine_tax_unit_input_columns(unit_persons),
+                        **self._aggregate_policyengine_tax_unit_input_columns(
+                            unit_persons
+                        ),
                     }
                 )
 
@@ -3510,7 +3636,9 @@ class USMicroplexPipeline:
                             ].iloc[0]
                         ),
                         "tax_liability": 0.0,
-                        **self._aggregate_policyengine_tax_unit_input_columns(unit_persons),
+                        **self._aggregate_policyengine_tax_unit_input_columns(
+                            unit_persons
+                        ),
                     }
                 )
 
@@ -3546,8 +3674,9 @@ class USMicroplexPipeline:
         )
         if bool((households_per_tax_unit > 1).any()):
             normalized_tax_unit_id = (
-                pd.factorize(pd.MultiIndex.from_frame(tax_unit_key), sort=False)[0]
-                .astype(np.int64)
+                pd.factorize(pd.MultiIndex.from_frame(tax_unit_key), sort=False)[
+                    0
+                ].astype(np.int64)
                 + 1
             )
             person_rows["tax_unit_id"] = normalized_tax_unit_id
@@ -3578,7 +3707,9 @@ class USMicroplexPipeline:
                     "tax_unit_id": int(tax_unit_id),
                     "household_id": int(ordered.iloc[0]["household_id"]),
                     "filing_status": filing_status,
-                    "member_ids": [int(person_id) for person_id in ordered["person_id"]],
+                    "member_ids": [
+                        int(person_id) for person_id in ordered["person_id"]
+                    ],
                     "filer_ids": filer_ids,
                     "dependent_ids": dependent_ids,
                     "n_dependents": len(dependent_ids),
@@ -3640,13 +3771,19 @@ class USMicroplexPipeline:
                         if int(person_id) != head_id
                     ]
                 )
-            elif spouse_mask.any() and "spouse_person_number" not in unit_persons.columns:
-                filer_ids.append(int(unit_persons.loc[spouse_mask, "person_id"].iloc[0]))
+            elif (
+                spouse_mask.any() and "spouse_person_number" not in unit_persons.columns
+            ):
+                filer_ids.append(
+                    int(unit_persons.loc[spouse_mask, "person_id"].iloc[0])
+                )
         elif spouse_pair_ids:
             pair_rows = unit_persons.loc[
                 unit_persons["person_id"].astype(int).isin(spouse_pair_ids)
             ].copy()
-            pair_rows["age"] = pd.to_numeric(pair_rows.get("age"), errors="coerce").fillna(0.0)
+            pair_rows["age"] = pd.to_numeric(
+                pair_rows.get("age"), errors="coerce"
+            ).fillna(0.0)
             filer_ids.extend(
                 pair_rows.sort_values(["age", "person_id"], ascending=[False, True])[
                     "person_id"
@@ -3657,10 +3794,14 @@ class USMicroplexPipeline:
         elif spouse_mask.any() and "spouse_person_number" not in unit_persons.columns:
             filer_ids.append(int(unit_persons.loc[spouse_mask, "person_id"].iloc[0]))
         if not filer_ids:
-            adult_mask = pd.to_numeric(
-                unit_persons.get("age"),
-                errors="coerce",
-            ).fillna(0).ge(18)
+            adult_mask = (
+                pd.to_numeric(
+                    unit_persons.get("age"),
+                    errors="coerce",
+                )
+                .fillna(0)
+                .ge(18)
+            )
             if adult_mask.any():
                 filer_ids.append(int(unit_persons.loc[adult_mask, "person_id"].iloc[0]))
             else:
@@ -3697,7 +3838,9 @@ class USMicroplexPipeline:
                 ["person_number", "spouse_person_number", "person_id", "age"]
             ]
             .assign(
-                age=lambda frame: pd.to_numeric(frame["age"], errors="coerce").fillna(0.0),
+                age=lambda frame: pd.to_numeric(frame["age"], errors="coerce").fillna(
+                    0.0
+                ),
                 spouse_person_number=lambda frame: pd.to_numeric(
                     frame["spouse_person_number"], errors="coerce"
                 ).fillna(0),
@@ -3722,7 +3865,9 @@ class USMicroplexPipeline:
             return list(next(iter(pairs)))
 
         head_candidates = unit_persons.loc[
-            pd.to_numeric(unit_persons.get("relationship_to_head"), errors="coerce").fillna(3).eq(0),
+            pd.to_numeric(unit_persons.get("relationship_to_head"), errors="coerce")
+            .fillna(3)
+            .eq(0),
             "person_id",
         ].astype(int)
         if not head_candidates.empty:
@@ -3732,7 +3877,11 @@ class USMicroplexPipeline:
                     return list(pair)
         best_pair = max(
             pairs,
-            key=lambda pair: sum(by_number[number]["age"] for number in by_number if by_number[number]["person_id"] in pair),
+            key=lambda pair: sum(
+                by_number[number]["age"]
+                for number in by_number
+                if by_number[number]["person_id"] in pair
+            ),
         )
         return list(best_pair)
 
@@ -3745,10 +3894,7 @@ class USMicroplexPipeline:
     ) -> str:
         if "filing_status" in unit_persons.columns:
             filing_status_values = (
-                unit_persons["filing_status"]
-                .dropna()
-                .astype(str)
-                .str.strip()
+                unit_persons["filing_status"].dropna().astype(str).str.strip()
             )
             filing_status_values = filing_status_values[filing_status_values != ""]
             if not filing_status_values.empty:
@@ -3830,9 +3976,9 @@ class USMicroplexPipeline:
         separated_mask = filer_rows.apply(
             lambda row: self._has_explicit_separation_evidence(row), axis=1
         )
-        if not bool(separated_mask.any()) and self._has_marriage_compatible_joint_evidence(
-            filer_rows
-        ):
+        if not bool(
+            separated_mask.any()
+        ) and self._has_marriage_compatible_joint_evidence(filer_rows):
             return None
 
         primary_filer_id = self._select_primary_tax_unit_filer(
@@ -3864,7 +4010,9 @@ class USMicroplexPipeline:
             split_units.append(
                 {
                     "filer_ids": [int(filer_id)],
-                    "dependent_ids": [int(person_id) for person_id in unit_dependent_ids],
+                    "dependent_ids": [
+                        int(person_id) for person_id in unit_dependent_ids
+                    ],
                     "n_dependents": int(len(unit_dependent_ids)),
                     "total_income": total_income,
                     "tax_liability": 0.0,
@@ -4025,8 +4173,8 @@ class USMicroplexPipeline:
                 marital_unit_by_person[int(person_id)] = next_marital_unit_id
                 next_marital_unit_id += 1
 
-        result["marital_unit_id"] = result["person_id"].map(marital_unit_by_person).astype(
-            np.int64
+        result["marital_unit_id"] = (
+            result["person_id"].map(marital_unit_by_person).astype(np.int64)
         )
         return result
 
@@ -4059,7 +4207,9 @@ class USMicroplexPipeline:
                 )
                 for member_index in household_groups:
                     member_index = list(member_index)
-                    household_codes = set(family_relationship.loc[member_index].tolist())
+                    household_codes = set(
+                        family_relationship.loc[member_index].tolist()
+                    )
                     if 0 in household_codes:
                         # Some sources already use the optimizer's 0-based coding.
                         mapped = family_relationship.loc[member_index].map(
@@ -4115,7 +4265,9 @@ class USMicroplexPipeline:
             return self._repair_relationship_to_head(persons, relationship)
 
         if unique_values.issubset({1, 2, 3, 4}):
-            normalized = relationship.map({1: 0, 2: 1, 3: 3, 4: 2}).fillna(3).astype(int)
+            normalized = (
+                relationship.map({1: 0, 2: 1, 3: 3, 4: 2}).fillna(3).astype(int)
+            )
             return self._repair_relationship_to_head(persons, normalized)
 
         order = persons.groupby("household_id").cumcount()
@@ -4142,11 +4294,15 @@ class USMicroplexPipeline:
             household_relationship = normalized.loc[member_index].copy()
             household_ages = ages.loc[member_index]
 
-            head_index = household_relationship[household_relationship.eq(0)].index.tolist()
+            head_index = household_relationship[
+                household_relationship.eq(0)
+            ].index.tolist()
             if not head_index:
                 spouse_candidates = [
                     index
-                    for index in household_relationship[household_relationship.eq(1)].index.tolist()
+                    for index in household_relationship[
+                        household_relationship.eq(1)
+                    ].index.tolist()
                     if household_ages.loc[index] >= 18
                 ]
                 adult_candidates = [
@@ -4154,8 +4310,14 @@ class USMicroplexPipeline:
                     for index in household_relationship.index.tolist()
                     if household_ages.loc[index] >= 18
                 ]
-                candidate_pool = spouse_candidates or adult_candidates or household_relationship.index.tolist()
-                head_choice = max(candidate_pool, key=lambda index: household_ages.loc[index])
+                candidate_pool = (
+                    spouse_candidates
+                    or adult_candidates
+                    or household_relationship.index.tolist()
+                )
+                head_choice = max(
+                    candidate_pool, key=lambda index: household_ages.loc[index]
+                )
                 normalized.loc[head_choice] = 0
                 head_index = [head_choice]
             elif len(head_index) > 1:
@@ -4166,9 +4328,13 @@ class USMicroplexPipeline:
                     normalized.loc[index] = 3 if household_ages.loc[index] >= 19 else 2
                 head_index = [keep_head]
 
-            spouse_index = normalized.loc[member_index][normalized.loc[member_index].eq(1)].index.tolist()
+            spouse_index = normalized.loc[member_index][
+                normalized.loc[member_index].eq(1)
+            ].index.tolist()
             if len(spouse_index) > 1:
-                keep_spouse = max(spouse_index, key=lambda index: household_ages.loc[index])
+                keep_spouse = max(
+                    spouse_index, key=lambda index: household_ages.loc[index]
+                )
                 for index in spouse_index:
                     if index == keep_spouse:
                         continue
@@ -4238,10 +4404,14 @@ class USMicroplexPipeline:
         def first_present(*columns: str) -> pd.Series:
             for column in columns:
                 if column in result.columns:
-                    return pd.to_numeric(
-                        result[column],
-                        errors="coerce",
-                    ).fillna(0.0).astype(float)
+                    return (
+                        pd.to_numeric(
+                            result[column],
+                            errors="coerce",
+                        )
+                        .fillna(0.0)
+                        .astype(float)
+                    )
             return zero.copy()
 
         def has_any(*columns: str) -> bool:
@@ -4312,7 +4482,9 @@ class USMicroplexPipeline:
 
         if "medicaid" in result.columns:
             result["medicaid"] = (
-                pd.to_numeric(result["medicaid"], errors="coerce").fillna(0.0).astype(float)
+                pd.to_numeric(result["medicaid"], errors="coerce")
+                .fillna(0.0)
+                .astype(float)
             )
         if "medicaid_enrolled" in result.columns:
             result["medicaid_enrolled"] = (
@@ -4338,8 +4510,12 @@ class USMicroplexPipeline:
         ).clip(lower=0.0)
 
         result["employment_income_before_lsr"] = (
-            first_present("employment_income_before_lsr", "employment_income", "wage_income")
-            if has_any("employment_income_before_lsr", "employment_income", "wage_income")
+            first_present(
+                "employment_income_before_lsr", "employment_income", "wage_income"
+            )
+            if has_any(
+                "employment_income_before_lsr", "employment_income", "wage_income"
+            )
             else fallback_employment_income
         )
         result["self_employment_income_before_lsr"] = first_present(
@@ -4350,7 +4526,9 @@ class USMicroplexPipeline:
             "taxable_interest_income",
             "interest_income",
         )
-        result["tax_exempt_interest_income"] = first_present("tax_exempt_interest_income")
+        result["tax_exempt_interest_income"] = first_present(
+            "tax_exempt_interest_income"
+        )
         result["qualified_dividend_income"] = first_present(
             "qualified_dividend_income",
         ).clip(lower=0.0)
@@ -4394,7 +4572,9 @@ class USMicroplexPipeline:
         result["farm_operations_income"] = first_present("farm_operations_income")
         result["farm_rent_income"] = first_present("farm_rent_income")
         result["rental_income"] = first_present("rental_income")
-        result["health_savings_account_ald"] = first_present("health_savings_account_ald")
+        result["health_savings_account_ald"] = first_present(
+            "health_savings_account_ald"
+        )
         result["self_employed_health_insurance_ald"] = first_present(
             "self_employed_health_insurance_ald"
         )
@@ -4406,19 +4586,25 @@ class USMicroplexPipeline:
             "taxable_pension_income",
             "pension_income",
         )
-        result["taxable_public_pension_income"] = first_present("taxable_public_pension_income")
+        result["taxable_public_pension_income"] = first_present(
+            "taxable_public_pension_income"
+        )
         result["tax_exempt_private_pension_income"] = first_present(
             "tax_exempt_private_pension_income"
         )
         result["tax_exempt_public_pension_income"] = first_present(
             "tax_exempt_public_pension_income"
         )
-        result["social_security_retirement"] = social_security_retirement_compatible_amount(
-            result
+        result["social_security_retirement"] = (
+            social_security_retirement_compatible_amount(result)
         )
-        result["social_security_disability"] = first_present("social_security_disability")
+        result["social_security_disability"] = first_present(
+            "social_security_disability"
+        )
         result["social_security_survivors"] = first_present("social_security_survivors")
-        result["social_security_dependents"] = first_present("social_security_dependents")
+        result["social_security_dependents"] = first_present(
+            "social_security_dependents"
+        )
         result["unemployment_compensation"] = first_present("unemployment_compensation")
         result["state_income_tax_reported"] = first_present(
             "state_income_tax_reported",
