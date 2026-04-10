@@ -39,6 +39,7 @@ def test_default_policyengine_us_data_rebuild_checkpoint_config_sets_pe_context(
 
     assert config.synthesis_backend == "seed"
     assert config.calibration_backend == "entropy"
+    assert config.policyengine_calibration_min_active_households == 20
     assert config.donor_imputer_backend == "qrf"
     assert config.donor_imputer_condition_selection == "pe_prespecified"
     assert config.policyengine_baseline_dataset == "/tmp/enhanced_cps_2024.h5"
@@ -48,8 +49,11 @@ def test_default_policyengine_us_data_rebuild_checkpoint_config_sets_pe_context(
     assert config.policyengine_target_profile == "pe_native_broad"
     assert config.policyengine_calibration_target_profile == "pe_native_broad"
     assert config.policyengine_direct_override_variables == (
+        "health_savings_account_ald",
         "non_sch_d_capital_gains",
         "pre_tax_contributions",
+        "self_employed_health_insurance_ald",
+        "self_employed_pension_contribution_ald",
     )
     assert config.policyengine_prefer_existing_tax_unit_ids is False
     assert config.n_synthetic == 500

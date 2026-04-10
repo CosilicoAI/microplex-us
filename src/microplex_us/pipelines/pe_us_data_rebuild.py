@@ -62,7 +62,6 @@ class PEUSDataRebuildProgram:
             "stages": [stage.to_dict() for stage in self.stages],
         }
 
-
 def default_policyengine_us_data_rebuild_config(
     **overrides: Any,
 ) -> USMicroplexBuildConfig:
@@ -73,6 +72,7 @@ def default_policyengine_us_data_rebuild_config(
     defaults = USMicroplexBuildConfig(
         synthesis_backend="seed",
         calibration_backend="entropy",
+        policyengine_calibration_min_active_households=20,
         donor_imputer_backend="qrf",
         donor_imputer_condition_selection="pe_prespecified",
         donor_imputer_qrf_zero_threshold=0.05,

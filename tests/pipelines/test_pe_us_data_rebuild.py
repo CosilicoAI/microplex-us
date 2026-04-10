@@ -73,6 +73,7 @@ def test_default_policyengine_us_data_rebuild_config_uses_incumbent_defaults() -
     assert isinstance(config, USMicroplexBuildConfig)
     assert config.synthesis_backend == "seed"
     assert config.calibration_backend == "entropy"
+    assert config.policyengine_calibration_min_active_households == 20
     assert config.donor_imputer_backend == "qrf"
     assert config.donor_imputer_condition_selection == "pe_prespecified"
     assert config.donor_imputer_excluded_variables == ("filing_status_code",)
@@ -86,6 +87,14 @@ def test_default_policyengine_us_data_rebuild_config_uses_incumbent_defaults() -
     assert config.policyengine_prefer_existing_tax_unit_ids is False
     assert config.random_seed == 123
     assert config.cps_asec_source_year == 2022
+
+
+def test_default_policyengine_us_data_rebuild_config_respects_calibration_support_override() -> None:
+    config = default_policyengine_us_data_rebuild_config(
+        policyengine_calibration_min_active_households=5
+    )
+
+    assert config.policyengine_calibration_min_active_households == 5
 
 
 def test_default_policyengine_us_data_rebuild_source_providers_use_pe_style_bundle() -> None:
