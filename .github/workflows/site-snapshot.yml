@@ -38,7 +38,7 @@ jobs:
 
       - name: Verify snapshot tooling
         run: |
-          uv run --extra dev pytest -q \
+          uv run --extra dev --with-editable ../microplex pytest -q \
             tests/pipelines/test_check_site_snapshot.py \
             tests/pipelines/test_site_snapshot.py \
             tests/pipelines/test_version_benchmark.py
