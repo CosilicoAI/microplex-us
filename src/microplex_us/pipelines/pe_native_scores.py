@@ -572,6 +572,127 @@ payload = {
 print(json.dumps(payload, sort_keys=True))
 """.strip()
 
+_PE_NATIVE_TARGET_DELTA_BATCH_SCRIPT = """
+import json
+import sys
+from pathlib import Path
+
+import numpy as np
+from policyengine_core.data import Dataset
+
+REPO_ROOT = sys.argv[1]
+if REPO_ROOT not in sys.path:
+    sys.path.insert(0, REPO_ROOT)
+
+from policyengine_us import Microsimulation
+from policyengine_us_data.utils.loss import build_loss_matrix
+
+BAD_TARGETS = tuple(json.loads(sys.argv[2]))
+PERIOD = int(sys.argv[3])
+BASELINE_DATASET = sys.argv[4]
+CANDIDATE_DATASETS = json.loads(sys.argv[5])
+TOP_K = int(sys.argv[6])
+
+
+def dataset_from_path(dataset_path: str, dataset_name: str):
+    class LocalDataset(Dataset):
+        name = dataset_name
+        label = dataset_name
+        file_path = dataset_path
+        data_format = Dataset.TIME_PERIOD_ARRAYS
+        time_period = PERIOD
+
+    return LocalDataset
+
+
+def compute(dataset_path: str):
+    dataset_cls = dataset_from_path(
+        dataset_path,
+        Path(dataset_path).stem.replace("-", "_"),
+    )
+    loss_matrix, targets_array = build_loss_matrix(dataset_cls, PERIOD)
+    target_names = np.asarray(loss_matrix.columns)
+    zero_mask = np.isclose(targets_array, 0.0, atol=0.1)
+    bad_mask = np.isin(target_names, BAD_TARGETS)
+    keep_mask = ~(zero_mask | bad_mask)
+
+    filtered = loss_matrix.loc[:, keep_mask]
+    filtered_targets = np.asarray(targets_array[keep_mask], dtype=np.float64)
+    is_national = np.asarray(filtered.columns.str.startswith("nation/"), dtype=bool)
+    n_national = int(is_national.sum())
+    n_state = int((~is_national).sum())
+    if n_national == 0 or n_state == 0:
+        raise ValueError(
+            "PE-native broad loss requires both national and state targets after filtering"
+        )
+
+    normalisation_factor = np.where(
+        is_national,
+        1.0 / n_national,
+        1.0 / n_state,
+    ).astype(np.float64)
+    inv_mean_normalisation = 1.0 / float(np.mean(normalisation_factor))
+
+    sim = Microsimulation(dataset=dataset_cls)
+    sim.default_calculation_period = PERIOD
+    weights = sim.calculate(
+        "household_weight",
+        map_to="household",
+        period=PERIOD,
+    ).values.astype(np.float64)
+
+    estimate = weights @ filtered.to_numpy(dtype=np.float64)
+    rel_error = (((estimate - filtered_targets) + 1.0) / (filtered_targets + 1.0)) ** 2
+    weighted_terms = inv_mean_normalisation * rel_error * normalisation_factor
+    return {
+        "target_names": filtered.columns.tolist(),
+        "targets": filtered_targets.tolist(),
+        "estimate": estimate.tolist(),
+        "rel_error": rel_error.tolist(),
+        "weighted_terms": weighted_terms.tolist(),
+    }
+
+
+baseline_payload = compute(BASELINE_DATASET)
+results = []
+for candidate_dataset in CANDIDATE_DATASETS:
+    candidate_payload = compute(candidate_dataset)
+    if baseline_payload["target_names"] != candidate_payload["target_names"]:
+        raise ValueError("Datasets produced different target names after filtering")
+
+    rows = []
+    for idx, name in enumerate(baseline_payload["target_names"]):
+        from_term = float(baseline_payload["weighted_terms"][idx])
+        to_term = float(candidate_payload["weighted_terms"][idx])
+        rows.append(
+            {
+                "target_name": name,
+                "weighted_term_delta": to_term - from_term,
+                "from_weighted_term": from_term,
+                "to_weighted_term": to_term,
+                "target_value": float(baseline_payload["targets"][idx]),
+                "from_estimate": float(baseline_payload["estimate"][idx]),
+                "to_estimate": float(candidate_payload["estimate"][idx]),
+                "from_rel_error": float(baseline_payload["rel_error"][idx]),
+                "to_rel_error": float(candidate_payload["rel_error"][idx]),
+            }
+        )
+
+    rows.sort(key=lambda row: row["weighted_term_delta"], reverse=True)
+    results.append(
+        {
+            "metric": "enhanced_cps_native_loss_target_delta",
+            "period": PERIOD,
+            "from_dataset": BASELINE_DATASET,
+            "to_dataset": candidate_dataset,
+            "top_regressions": rows[:TOP_K],
+            "top_improvements": list(reversed(rows[-TOP_K:])),
+        }
+    )
+
+print(json.dumps(results, sort_keys=True))
+""".strip()
+
 _PE_NATIVE_SUPPORT_AUDIT_SCRIPT = """
 import json
 import sys
@@ -914,6 +1035,360 @@ payload = {
     "candidate": candidate,
     "baseline": baseline,
     "comparisons": compare_snapshots(candidate, baseline),
+}
+print(json.dumps(payload, sort_keys=True))
+""".strip()
+
+_PE_NATIVE_SUPPORT_AUDIT_BATCH_SCRIPT = """
+import json
+import sys
+from pathlib import Path
+
+import h5py
+import numpy as np
+from policyengine_core.data import Dataset
+
+REPO_ROOT = sys.argv[1]
+if REPO_ROOT not in sys.path:
+    sys.path.insert(0, REPO_ROOT)
+
+from policyengine_us import Microsimulation
+
+PERIOD = int(sys.argv[2])
+BASELINE_DATASET = sys.argv[3]
+CANDIDATE_DATASETS = json.loads(sys.argv[4])
+
+STATE_FIPS_TO_ABBR = {
+    1: "AL", 2: "AK", 4: "AZ", 5: "AR", 6: "CA", 8: "CO", 9: "CT", 10: "DE",
+    11: "DC", 12: "FL", 13: "GA", 15: "HI", 16: "ID", 17: "IL", 18: "IN",
+    19: "IA", 20: "KS", 21: "KY", 22: "LA", 23: "ME", 24: "MD", 25: "MA",
+    26: "MI", 27: "MN", 28: "MS", 29: "MO", 30: "MT", 31: "NE", 32: "NV",
+    33: "NH", 34: "NJ", 35: "NM", 36: "NY", 37: "NC", 38: "ND", 39: "OH",
+    40: "OK", 41: "OR", 42: "PA", 44: "RI", 45: "SC", 46: "SD", 47: "TN",
+    48: "TX", 49: "UT", 50: "VT", 51: "VA", 53: "WA", 54: "WV", 55: "WI",
+    56: "WY",
+}
+CRITICAL_PERSON_VARIABLES = (
+    "has_marketplace_health_coverage",
+    "has_esi",
+    "medicare_part_b_premiums",
+    "child_support_expense",
+    "self_employment_income_before_lsr",
+    "rental_income",
+    "non_sch_d_capital_gains",
+)
+HIGH_SIGNAL_MFS_AGI_BINS = (
+    ("75k_to_100k", 75_000.0, 100_000.0),
+    ("100k_to_200k", 100_000.0, 200_000.0),
+    ("200k_to_500k", 200_000.0, 500_000.0),
+    ("500k_plus", 500_000.0, np.inf),
+)
+AGE_BUCKETS = (
+    ("0_to_4", 0, 5),
+    ("5_to_17", 5, 18),
+    ("18_to_29", 18, 30),
+    ("30_to_44", 30, 45),
+    ("45_to_64", 45, 65),
+    ("65_plus", 65, np.inf),
+)
+
+
+def dataset_from_path(dataset_path: str, dataset_name: str):
+    class LocalDataset(Dataset):
+        name = dataset_name
+        label = dataset_name
+        file_path = dataset_path
+        data_format = Dataset.TIME_PERIOD_ARRAYS
+        time_period = PERIOD
+
+    return LocalDataset
+
+
+def stored_variables_for(dataset_path: str) -> set[str]:
+    with h5py.File(dataset_path, "r") as handle:
+        return set(handle.keys())
+
+
+def state_abbr(value) -> str:
+    if value is None:
+        return "NA"
+    try:
+        numeric = int(value)
+    except (TypeError, ValueError):
+        return str(value)
+    return STATE_FIPS_TO_ABBR.get(numeric, str(numeric))
+
+
+def normalize_status(value) -> str:
+    if hasattr(value, "name"):
+        return str(value.name)
+    text = str(value)
+    if "." in text:
+        text = text.rsplit(".", 1)[-1]
+    normalized = text.strip().upper().replace(" ", "_")
+    if normalized in {
+        "SINGLE",
+        "JOINT",
+        "SEPARATE",
+        "HEAD_OF_HOUSEHOLD",
+        "SURVIVING_SPOUSE",
+    }:
+        return normalized
+    return normalized
+
+
+def summarize_numeric(values, weights, *, stored: bool) -> dict[str, float | int | bool]:
+    arr = np.nan_to_num(np.asarray(values, dtype=np.float64), nan=0.0)
+    w = np.asarray(weights, dtype=np.float64)
+    positive = arr > 0.0
+    negative = arr < 0.0
+    nonzero = arr != 0.0
+    return {
+        "stored": bool(stored),
+        "nonzero_count": int(nonzero.sum()),
+        "positive_count": int(positive.sum()),
+        "negative_count": int(negative.sum()),
+        "weighted_nonzero": float(w[nonzero].sum()),
+        "weighted_positive": float(w[positive].sum()),
+        "weighted_negative": float(w[negative].sum()),
+        "value_sum": float((arr * w).sum()),
+    }
+
+
+def summarize_bool(values, weights, *, stored: bool) -> dict[str, float | int | bool]:
+    arr = np.asarray(values).astype(bool)
+    w = np.asarray(weights, dtype=np.float64)
+    return {
+        "stored": bool(stored),
+        "true_count": int(arr.sum()),
+        "false_count": int((~arr).sum()),
+        "weighted_true": float(w[arr].sum()),
+        "weighted_false": float(w[~arr].sum()),
+    }
+
+
+def build_snapshot(dataset_path: str) -> dict:
+    dataset_cls = dataset_from_path(
+        dataset_path,
+        Path(dataset_path).stem.replace("-", "_"),
+    )
+    stored_variables = stored_variables_for(dataset_path)
+    sim = Microsimulation(dataset=dataset_cls)
+    sim.default_calculation_period = PERIOD
+
+    person_weights = sim.calculate("person_weight", period=PERIOD).values.astype(np.float64)
+    tax_unit_weights = sim.calculate("tax_unit_weight", period=PERIOD).values.astype(np.float64)
+    person_state = sim.calculate("state_fips", map_to="person", period=PERIOD).values
+    person_age = sim.calculate("age", period=PERIOD).values.astype(np.float64)
+    marketplace = sim.calculate("has_marketplace_health_coverage", period=PERIOD).values
+    filing_status = sim.calculate("filing_status", period=PERIOD).values
+    adjusted_gross_income = sim.calculate("adjusted_gross_income", period=PERIOD).values.astype(np.float64)
+
+    critical_support = {}
+    for variable in CRITICAL_PERSON_VARIABLES:
+        values = sim.calculate(variable, period=PERIOD).values
+        if np.asarray(values).dtype == np.bool_:
+            critical_support[variable] = summarize_bool(
+                values,
+                person_weights,
+                stored=variable in stored_variables,
+            )
+        else:
+            critical_support[variable] = summarize_numeric(
+                values,
+                person_weights,
+                stored=variable in stored_variables,
+            )
+
+    filing_status_counts = {}
+    for status in ("SINGLE", "JOINT", "SEPARATE", "HEAD_OF_HOUSEHOLD", "SURVIVING_SPOUSE"):
+        mask = np.asarray([normalize_status(value) == status for value in filing_status], dtype=bool)
+        filing_status_counts[status] = {
+            "count": int(mask.sum()),
+            "weighted_count": float(tax_unit_weights[mask].sum()),
+        }
+
+    mfs_mask = np.asarray([normalize_status(value) == "SEPARATE" for value in filing_status], dtype=bool)
+    mfs_agi_support = []
+    for label, lower, upper in HIGH_SIGNAL_MFS_AGI_BINS:
+        mask = mfs_mask & (adjusted_gross_income >= lower) & (adjusted_gross_income < upper)
+        mfs_agi_support.append(
+            {
+                "agi_bin": label,
+                "count": int(mask.sum()),
+                "weighted_count": float(tax_unit_weights[mask].sum()),
+                "weighted_agi": float((adjusted_gross_income[mask] * tax_unit_weights[mask]).sum()),
+            }
+        )
+
+    states = sorted({state_abbr(value) for value in person_state})
+    state_marketplace = {}
+    state_age_bucket = {}
+    marketplace_bool = np.asarray(marketplace).astype(bool)
+    for state in states:
+        state_mask = np.asarray([state_abbr(value) == state for value in person_state], dtype=bool)
+        enrolled = state_mask & marketplace_bool
+        state_marketplace[state] = {
+            "weighted_people": float(person_weights[state_mask].sum()),
+            "weighted_marketplace_enrollment": float(person_weights[enrolled].sum()),
+        }
+        bucket_weights = {}
+        nonempty = 0
+        for label, lower, upper in AGE_BUCKETS:
+            mask = state_mask & (person_age >= lower) & (person_age < upper)
+            weight = float(person_weights[mask].sum())
+            bucket_weights[label] = weight
+            if weight > 0.0:
+                nonempty += 1
+        state_age_bucket[state] = {
+            "nonempty_buckets": int(nonempty),
+            "bucket_weights": bucket_weights,
+        }
+
+    return {
+        "dataset": dataset_path,
+        "stored_variable_count": int(len(stored_variables)),
+        "stored_variables": sorted(stored_variables),
+        "critical_input_support": critical_support,
+        "filing_status_weighted_counts": filing_status_counts,
+        "mfs_high_agi_support": mfs_agi_support,
+        "state_marketplace_enrollment": state_marketplace,
+        "state_age_bucket_support": state_age_bucket,
+    }
+
+
+def compare_snapshots(candidate: dict, baseline: dict) -> dict:
+    critical_rows = []
+    for variable in CRITICAL_PERSON_VARIABLES:
+        candidate_row = candidate["critical_input_support"][variable]
+        baseline_row = baseline["critical_input_support"][variable]
+        candidate_weighted = candidate_row.get("weighted_nonzero", candidate_row.get("weighted_true", 0.0))
+        baseline_weighted = baseline_row.get("weighted_nonzero", baseline_row.get("weighted_true", 0.0))
+        critical_rows.append(
+            {
+                "variable": variable,
+                "candidate_stored": bool(candidate_row.get("stored", False)),
+                "baseline_stored": bool(baseline_row.get("stored", False)),
+                "candidate_weighted_nonzero": float(candidate_weighted),
+                "baseline_weighted_nonzero": float(baseline_weighted),
+                "weighted_nonzero_delta": float(candidate_weighted - baseline_weighted),
+            }
+        )
+
+    filing_status_rows = []
+    for status in ("SINGLE", "JOINT", "SEPARATE", "HEAD_OF_HOUSEHOLD", "SURVIVING_SPOUSE"):
+        candidate_row = candidate["filing_status_weighted_counts"][status]
+        baseline_row = baseline["filing_status_weighted_counts"][status]
+        filing_status_rows.append(
+            {
+                "filing_status": status,
+                "candidate_weighted_count": float(candidate_row["weighted_count"]),
+                "baseline_weighted_count": float(baseline_row["weighted_count"]),
+                "weighted_count_delta": float(candidate_row["weighted_count"] - baseline_row["weighted_count"]),
+            }
+        )
+
+    baseline_bins = {row["agi_bin"]: row for row in baseline["mfs_high_agi_support"]}
+    mfs_rows = []
+    for row in candidate["mfs_high_agi_support"]:
+        other = baseline_bins[row["agi_bin"]]
+        mfs_rows.append(
+            {
+                "agi_bin": row["agi_bin"],
+                "candidate_weighted_count": float(row["weighted_count"]),
+                "baseline_weighted_count": float(other["weighted_count"]),
+                "weighted_count_delta": float(row["weighted_count"] - other["weighted_count"]),
+                "candidate_weighted_agi": float(row["weighted_agi"]),
+                "baseline_weighted_agi": float(other["weighted_agi"]),
+                "weighted_agi_delta": float(row["weighted_agi"] - other["weighted_agi"]),
+            }
+        )
+
+    all_states = sorted(
+        set(candidate["state_marketplace_enrollment"])
+        | set(baseline["state_marketplace_enrollment"])
+    )
+    state_marketplace_rows = []
+    for state in all_states:
+        candidate_row = candidate["state_marketplace_enrollment"].get(
+            state,
+            {"weighted_marketplace_enrollment": 0.0},
+        )
+        baseline_row = baseline["state_marketplace_enrollment"].get(
+            state,
+            {"weighted_marketplace_enrollment": 0.0},
+        )
+        state_marketplace_rows.append(
+            {
+                "state": state,
+                "candidate_weighted_marketplace_enrollment": float(candidate_row["weighted_marketplace_enrollment"]),
+                "baseline_weighted_marketplace_enrollment": float(baseline_row["weighted_marketplace_enrollment"]),
+                "weighted_marketplace_enrollment_delta": float(
+                    candidate_row["weighted_marketplace_enrollment"]
+                    - baseline_row["weighted_marketplace_enrollment"]
+                ),
+            }
+        )
+    state_marketplace_rows.sort(
+        key=lambda row: abs(row["weighted_marketplace_enrollment_delta"]),
+        reverse=True,
+    )
+
+    all_states = sorted(
+        set(candidate["state_age_bucket_support"])
+        | set(baseline["state_age_bucket_support"])
+    )
+    state_age_rows = []
+    for state in all_states:
+        candidate_row = candidate["state_age_bucket_support"].get(
+            state,
+            {"bucket_weights": {}},
+        )
+        baseline_row = baseline["state_age_bucket_support"].get(
+            state,
+            {"bucket_weights": {}},
+        )
+        for label, _lower, _upper in AGE_BUCKETS:
+            candidate_weight = float(candidate_row["bucket_weights"].get(label, 0.0))
+            baseline_weight = float(baseline_row["bucket_weights"].get(label, 0.0))
+            state_age_rows.append(
+                {
+                    "state": state,
+                    "age_bucket": label,
+                    "candidate_weight": candidate_weight,
+                    "baseline_weight": baseline_weight,
+                    "weight_delta": candidate_weight - baseline_weight,
+                }
+            )
+    state_age_rows.sort(key=lambda row: abs(row["weight_delta"]), reverse=True)
+
+    return {
+        "critical_input_support": critical_rows,
+        "filing_status_weighted_delta": filing_status_rows,
+        "mfs_high_agi_delta": mfs_rows,
+        "state_marketplace_enrollment_top_gaps": state_marketplace_rows[:15],
+        "state_age_bucket_top_gaps": state_age_rows[:20],
+    }
+
+
+baseline = build_snapshot(BASELINE_DATASET)
+results = []
+for candidate_dataset in CANDIDATE_DATASETS:
+    candidate = build_snapshot(candidate_dataset)
+    results.append(
+        {
+            "candidate_dataset": candidate_dataset,
+            "candidate": candidate,
+            "comparisons": compare_snapshots(candidate, baseline),
+        }
+    )
+
+payload = {
+    "metric": "enhanced_cps_support_audit_batch",
+    "period": PERIOD,
+    "baseline_dataset": BASELINE_DATASET,
+    "baseline": baseline,
+    "results": results,
 }
 print(json.dumps(payload, sort_keys=True))
 """.strip()
@@ -1364,6 +1839,56 @@ def compare_us_pe_native_target_deltas(
     return json.loads(completed.stdout)
 
 
+def compute_batch_us_pe_native_target_deltas(
+    *,
+    candidate_dataset_paths: list[str | Path] | tuple[str | Path, ...],
+    baseline_dataset_path: str | Path,
+    period: int = 2024,
+    top_k: int = 25,
+    policyengine_us_data_repo: str | Path | None = None,
+    policyengine_us_data_python: str | Path | None = None,
+) -> list[dict[str, Any]]:
+    """Compare PE-native weighted-loss targets for many candidates against one baseline."""
+
+    if not candidate_dataset_paths:
+        return []
+    resolved_repo = resolve_policyengine_us_data_repo_root(policyengine_us_data_repo)
+    env = build_policyengine_us_data_subprocess_env(resolved_repo)
+    if policyengine_us_data_python is not None:
+        command = [str(Path(policyengine_us_data_python).expanduser())]
+    else:
+        command = ["uv", "run", "--project", str(resolved_repo), "python"]
+    completed = subprocess.run(
+        [
+            *command,
+            "-c",
+            _PE_NATIVE_TARGET_DELTA_BATCH_SCRIPT,
+            str(resolved_repo),
+            json.dumps(_ENHANCED_CPS_BAD_TARGETS),
+            str(int(period)),
+            str(Path(baseline_dataset_path).expanduser().resolve()),
+            json.dumps(
+                [
+                    str(Path(candidate_path).expanduser().resolve())
+                    for candidate_path in candidate_dataset_paths
+                ]
+            ),
+            str(int(top_k)),
+        ],
+        cwd=resolved_repo,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if completed.returncode != 0:
+        stderr = completed.stderr.strip()
+        stdout = completed.stdout.strip()
+        detail = stderr or stdout or f"exit code {completed.returncode}"
+        raise RuntimeError(f"PE-native batch target delta comparison failed: {detail}")
+    return list(json.loads(completed.stdout))
+
+
 def compute_us_pe_native_support_audit(
     *,
     candidate_dataset_path: str | Path,
@@ -1402,6 +1927,69 @@ def compute_us_pe_native_support_audit(
         detail = stderr or stdout or f"exit code {completed.returncode}"
         raise RuntimeError(f"PE-native support audit failed: {detail}")
     return json.loads(completed.stdout)
+
+
+def compute_batch_us_pe_native_support_audits(
+    *,
+    candidate_dataset_paths: list[str | Path] | tuple[str | Path, ...],
+    baseline_dataset_path: str | Path,
+    period: int = 2024,
+    policyengine_us_data_repo: str | Path | None = None,
+    policyengine_us_data_python: str | Path | None = None,
+) -> list[dict[str, Any]]:
+    """Compare PE support structure for many candidates against one baseline."""
+
+    if not candidate_dataset_paths:
+        return []
+    resolved_repo = resolve_policyengine_us_data_repo_root(policyengine_us_data_repo)
+    env = build_policyengine_us_data_subprocess_env(resolved_repo)
+    if policyengine_us_data_python is not None:
+        command = [str(Path(policyengine_us_data_python).expanduser())]
+    else:
+        command = ["uv", "run", "--project", str(resolved_repo), "python"]
+    completed = subprocess.run(
+        [
+            *command,
+            "-c",
+            _PE_NATIVE_SUPPORT_AUDIT_BATCH_SCRIPT,
+            str(resolved_repo),
+            str(int(period)),
+            str(Path(baseline_dataset_path).expanduser().resolve()),
+            json.dumps(
+                [
+                    str(Path(candidate_path).expanduser().resolve())
+                    for candidate_path in candidate_dataset_paths
+                ]
+            ),
+        ],
+        cwd=resolved_repo,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if completed.returncode != 0:
+        stderr = completed.stderr.strip()
+        stdout = completed.stdout.strip()
+        detail = stderr or stdout or f"exit code {completed.returncode}"
+        raise RuntimeError(f"PE-native batch support audit failed: {detail}")
+
+    payload = json.loads(completed.stdout)
+    baseline_dataset = str(payload["baseline_dataset"])
+    baseline_snapshot = payload["baseline"]
+    period_value = int(payload["period"])
+    return [
+        {
+            "metric": "enhanced_cps_support_audit",
+            "period": period_value,
+            "candidate_dataset": str(item["candidate_dataset"]),
+            "baseline_dataset": baseline_dataset,
+            "candidate": item["candidate"],
+            "baseline": baseline_snapshot,
+            "comparisons": item["comparisons"],
+        }
+        for item in payload.get("results", ())
+    ]
 
 
 def write_us_pe_native_scores(

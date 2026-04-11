@@ -12,6 +12,8 @@ from microplex_us.pipelines.pe_native_scores import (
     build_policyengine_us_data_subprocess_env,
     compare_us_pe_native_target_deltas,
     compute_batch_us_pe_native_scores,
+    compute_batch_us_pe_native_support_audits,
+    compute_batch_us_pe_native_target_deltas,
     compute_us_pe_native_scores,
     compute_us_pe_native_support_audit,
     resolve_policyengine_us_data_python,
@@ -361,6 +363,62 @@ def test_compare_us_pe_native_target_deltas_wraps_subprocess_payload(
     assert result["top_regressions"][0]["target_name"] == "nation/irs/example"
 
 
+def test_compute_batch_us_pe_native_target_deltas_wraps_multiple_candidates(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    candidate_a = tmp_path / "candidate-a.h5"
+    candidate_b = tmp_path / "candidate-b.h5"
+    baseline = tmp_path / "baseline.h5"
+    for path in (candidate_a, candidate_b, baseline):
+        path.write_text(path.stem)
+
+    payload = [
+        {
+            "metric": "enhanced_cps_native_loss_target_delta",
+            "period": 2024,
+            "from_dataset": str(baseline),
+            "to_dataset": str(candidate_a),
+            "top_regressions": [{"target_name": "nation/irs/example-a"}],
+            "top_improvements": [{"target_name": "state/example-a"}],
+        },
+        {
+            "metric": "enhanced_cps_native_loss_target_delta",
+            "period": 2024,
+            "from_dataset": str(baseline),
+            "to_dataset": str(candidate_b),
+            "top_regressions": [{"target_name": "nation/irs/example-b"}],
+            "top_improvements": [{"target_name": "state/example-b"}],
+        },
+    ]
+
+    monkeypatch.setattr(
+        "microplex_us.pipelines.pe_native_scores.subprocess.run",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            returncode=0,
+            stdout=json.dumps(payload),
+            stderr="",
+        ),
+    )
+    monkeypatch.setattr(
+        "microplex_us.pipelines.pe_native_scores.resolve_policyengine_us_data_repo_root",
+        lambda _repo=None: tmp_path,
+    )
+
+    results = compute_batch_us_pe_native_target_deltas(
+        candidate_dataset_paths=[candidate_a, candidate_b],
+        baseline_dataset_path=baseline,
+        period=2024,
+        top_k=10,
+        policyengine_us_data_repo=tmp_path,
+        policyengine_us_data_python=tmp_path / "python",
+    )
+
+    assert len(results) == 2
+    assert results[0]["to_dataset"] == str(candidate_a)
+    assert results[1]["top_regressions"][0]["target_name"] == "nation/irs/example-b"
+
+
 def test_compute_us_pe_native_support_audit_wraps_subprocess_payload(
     monkeypatch,
     tmp_path,
@@ -429,3 +487,95 @@ def test_compute_us_pe_native_support_audit_wraps_subprocess_payload(
         result["comparisons"]["critical_input_support"][0]["variable"]
         == "child_support_expense"
     )
+
+
+def test_compute_batch_us_pe_native_support_audits_wraps_multiple_candidates(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    candidate_a = tmp_path / "candidate-a.h5"
+    candidate_b = tmp_path / "candidate-b.h5"
+    baseline = tmp_path / "baseline.h5"
+    for path in (candidate_a, candidate_b, baseline):
+        path.write_text(path.stem)
+
+    payload = {
+        "metric": "enhanced_cps_support_audit_batch",
+        "period": 2024,
+        "baseline_dataset": str(baseline),
+        "baseline": {
+            "critical_input_support": {
+                "child_support_expense": {"stored": True, "weighted_nonzero": 10.0}
+            }
+        },
+        "results": [
+            {
+                "candidate_dataset": str(candidate_a),
+                "candidate": {
+                    "critical_input_support": {
+                        "child_support_expense": {
+                            "stored": False,
+                            "weighted_nonzero": 0.0,
+                        }
+                    }
+                },
+                "comparisons": {
+                    "critical_input_support": [
+                        {
+                            "variable": "child_support_expense",
+                            "candidate_stored": False,
+                            "baseline_stored": True,
+                            "weighted_nonzero_delta": -10.0,
+                        }
+                    ]
+                },
+            },
+            {
+                "candidate_dataset": str(candidate_b),
+                "candidate": {
+                    "critical_input_support": {
+                        "child_support_expense": {
+                            "stored": True,
+                            "weighted_nonzero": 12.0,
+                        }
+                    }
+                },
+                "comparisons": {
+                    "critical_input_support": [
+                        {
+                            "variable": "child_support_expense",
+                            "candidate_stored": True,
+                            "baseline_stored": True,
+                            "weighted_nonzero_delta": 2.0,
+                        }
+                    ]
+                },
+            },
+        ],
+    }
+
+    monkeypatch.setattr(
+        "microplex_us.pipelines.pe_native_scores.subprocess.run",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            returncode=0,
+            stdout=json.dumps(payload),
+            stderr="",
+        ),
+    )
+    monkeypatch.setattr(
+        "microplex_us.pipelines.pe_native_scores.resolve_policyengine_us_data_repo_root",
+        lambda _repo=None: tmp_path,
+    )
+
+    results = compute_batch_us_pe_native_support_audits(
+        candidate_dataset_paths=[candidate_a, candidate_b],
+        baseline_dataset_path=baseline,
+        period=2024,
+        policyengine_us_data_repo=tmp_path,
+        policyengine_us_data_python=tmp_path / "python",
+    )
+
+    assert len(results) == 2
+    assert results[0]["baseline_dataset"] == str(baseline)
+    assert results[0]["candidate_dataset"] == str(candidate_a)
+    assert results[1]["comparisons"]["critical_input_support"][0]["weighted_nonzero_delta"] == 2.0

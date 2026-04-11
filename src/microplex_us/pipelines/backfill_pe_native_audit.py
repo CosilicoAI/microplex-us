@@ -4,12 +4,17 @@ from __future__ import annotations
 
 import argparse
 import json
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from microplex.targets import assert_valid_benchmark_artifact_manifest
 
 from microplex_us.pipelines.backfill_pe_native_scores import (
     discover_us_candidate_artifact_dirs,
+)
+from microplex_us.pipelines.pe_native_scores import (
+    compute_batch_us_pe_native_support_audits,
+    compute_batch_us_pe_native_target_deltas,
 )
 from microplex_us.pipelines.pe_us_data_rebuild_audit import (
     build_policyengine_us_data_rebuild_native_audit,
@@ -66,15 +71,131 @@ def backfill_us_pe_native_audit_bundles(
 ) -> list[Path]:
     """Backfill PE rebuild native audits for a batch of saved bundles."""
 
-    return [
-        backfill_us_pe_native_audit_bundle(
-            artifact_dir,
-            force=force,
-            policyengine_us_data_repo=policyengine_us_data_repo,
-            policyengine_us_data_python=policyengine_us_data_python,
+    if not artifact_dirs:
+        return []
+
+    manifest_paths: list[Path] = []
+    grouped_pending: dict[
+        tuple[Path, int],
+        list[tuple[Path, Path, dict, dict, Path]],
+    ] = {}
+
+    for artifact_dir in artifact_dirs:
+        bundle_dir = Path(artifact_dir)
+        manifest_path = bundle_dir / "manifest.json"
+        manifest = json.loads(manifest_path.read_text())
+        artifacts = dict(manifest.get("artifacts", {}))
+        dataset_name = artifacts.get("policyengine_dataset")
+        if not dataset_name:
+            raise ValueError(
+                f"{bundle_dir} does not declare a policyengine_dataset artifact"
+            )
+
+        native_scores_path = _resolve_optional_native_scores_path(bundle_dir, artifacts)
+        if native_scores_path is None:
+            continue
+        manifest_paths.append(manifest_path)
+        native_scores_payload = json.loads(native_scores_path.read_text())
+        native_audit_path = bundle_dir / "pe_us_data_rebuild_native_audit.json"
+        if native_audit_path.exists() and not force:
+            _write_native_audit_payload_to_bundle(
+                bundle_dir=bundle_dir,
+                manifest_path=manifest_path,
+                manifest=manifest,
+                payload=json.loads(native_audit_path.read_text()),
+            )
+            continue
+
+        period = int(
+            native_scores_payload.get("period")
+            or manifest.get("config", {}).get("policyengine_dataset_year", 2024)
         )
-        for artifact_dir in artifact_dirs
-    ]
+        baseline_dataset = _resolve_baseline_dataset(manifest)
+        grouped_pending.setdefault((baseline_dataset, period), []).append(
+            (
+                bundle_dir,
+                manifest_path,
+                manifest,
+                native_scores_payload,
+                bundle_dir / str(dataset_name),
+            )
+        )
+
+    for (baseline_dataset, period), rows in grouped_pending.items():
+        candidate_dataset_paths = [candidate_path for *_rest, candidate_path in rows]
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            target_future = executor.submit(
+                compute_batch_us_pe_native_target_deltas,
+                candidate_dataset_paths=candidate_dataset_paths,
+                baseline_dataset_path=baseline_dataset,
+                period=period,
+                top_k=15,
+                policyengine_us_data_repo=policyengine_us_data_repo,
+                policyengine_us_data_python=policyengine_us_data_python,
+            )
+            support_future = executor.submit(
+                compute_batch_us_pe_native_support_audits,
+                candidate_dataset_paths=candidate_dataset_paths,
+                baseline_dataset_path=baseline_dataset,
+                period=period,
+                policyengine_us_data_repo=policyengine_us_data_repo,
+                policyengine_us_data_python=policyengine_us_data_python,
+            )
+            target_delta_payloads = target_future.result()
+            support_audit_payloads = support_future.result()
+
+        target_payload_by_candidate = {
+            str(Path(payload["to_dataset"]).expanduser().resolve()): payload
+            for payload in target_delta_payloads
+        }
+        support_payload_by_candidate = {
+            str(Path(payload["candidate_dataset"]).expanduser().resolve()): payload
+            for payload in support_audit_payloads
+        }
+
+        if len(target_payload_by_candidate) != len(rows):
+            raise ValueError(
+                "PE-native batch target-delta backfill returned a different number "
+                "of payloads than bundles"
+            )
+        if len(support_payload_by_candidate) != len(rows):
+            raise ValueError(
+                "PE-native batch support-audit backfill returned a different number "
+                "of payloads than bundles"
+            )
+
+        for (
+            bundle_dir,
+            manifest_path,
+            manifest,
+            native_scores_payload,
+            candidate_dataset_path,
+        ) in rows:
+            candidate_key = str(candidate_dataset_path.expanduser().resolve())
+            target_delta_payload = target_payload_by_candidate.get(candidate_key)
+            support_audit_payload = support_payload_by_candidate.get(candidate_key)
+            if target_delta_payload is None or support_audit_payload is None:
+                raise ValueError(
+                    "PE-native batch audit backfill did not return payloads for "
+                    f"{candidate_dataset_path}"
+                )
+            payload = build_policyengine_us_data_rebuild_native_audit(
+                bundle_dir,
+                manifest_payload=manifest,
+                native_scores_payload=native_scores_payload,
+                target_delta_payload=target_delta_payload,
+                support_audit_payload=support_audit_payload,
+                policyengine_us_data_repo=policyengine_us_data_repo,
+                policyengine_us_data_python=policyengine_us_data_python,
+            )
+            _write_native_audit_payload_to_bundle(
+                bundle_dir=bundle_dir,
+                manifest_path=manifest_path,
+                manifest=manifest,
+                payload=payload,
+            )
+
+    return manifest_paths
 
 
 def backfill_us_pe_native_audit_root(
@@ -142,13 +263,33 @@ def _resolve_required_native_scores_path(
     bundle_dir: Path,
     artifacts: dict,
 ) -> Path:
-    artifact_name = artifacts.get("policyengine_native_scores") or "policyengine_native_scores.json"
-    path = bundle_dir / str(artifact_name)
-    if path.exists():
+    path = _resolve_optional_native_scores_path(bundle_dir, artifacts)
+    if path is not None:
         return path
     raise ValueError(
         f"{bundle_dir} is missing policyengine_native_scores.json; backfill native scores first"
     )
+
+
+def _resolve_optional_native_scores_path(
+    bundle_dir: Path,
+    artifacts: dict,
+) -> Path | None:
+    artifact_name = (
+        artifacts.get("policyengine_native_scores") or "policyengine_native_scores.json"
+    )
+    path = bundle_dir / str(artifact_name)
+    if path.exists():
+        return path
+    return None
+
+
+def _resolve_baseline_dataset(manifest: dict) -> Path:
+    config = dict(manifest.get("config", {}))
+    configured = config.get("policyengine_baseline_dataset")
+    if not configured:
+        raise ValueError("Manifest does not include policyengine_baseline_dataset")
+    return Path(str(configured)).expanduser().resolve()
 
 
 def main(argv: list[str] | None = None) -> int:
