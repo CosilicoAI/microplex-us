@@ -76,7 +76,7 @@ def test_default_policyengine_us_data_rebuild_config_uses_incumbent_defaults() -
     assert config.policyengine_calibration_min_active_households == 20
     assert config.donor_imputer_backend == "qrf"
     assert config.donor_imputer_condition_selection == "pe_prespecified"
-    assert config.donor_imputer_excluded_variables == ("filing_status_code",)
+    assert config.donor_imputer_excluded_variables == ()
     assert config.policyengine_direct_override_variables == (
         "health_savings_account_ald",
         "non_sch_d_capital_gains",

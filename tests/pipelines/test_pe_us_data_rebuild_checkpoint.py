@@ -45,6 +45,7 @@ def test_default_policyengine_us_data_rebuild_checkpoint_config_sets_pe_context(
     assert config.policyengine_calibration_min_active_households == 20
     assert config.donor_imputer_backend == "qrf"
     assert config.donor_imputer_condition_selection == "pe_prespecified"
+    assert config.donor_imputer_excluded_variables == ()
     assert config.policyengine_baseline_dataset == "/tmp/enhanced_cps_2024.h5"
     assert config.policyengine_targets_db == "/tmp/policy_data.db"
     assert config.policyengine_dataset_year == 2024

@@ -76,6 +76,7 @@ def default_policyengine_us_data_rebuild_config(
         donor_imputer_backend="qrf",
         donor_imputer_condition_selection="pe_prespecified",
         donor_imputer_qrf_zero_threshold=0.05,
+        donor_imputer_excluded_variables=(),
         prefer_cached_cps_asec_source=False,
         policyengine_direct_override_variables=(
             "health_savings_account_ald",
