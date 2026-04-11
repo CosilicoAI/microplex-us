@@ -1,17 +1,30 @@
-# Rebuilding `policyengine-us-data` in Microplex
+# PolicyEngine Oracle Compatibility Path
 
-This document states the current execution rule for the rebuild track:
+This document states the current execution rule for the incumbent-compatibility
+track:
 
-> Rebuild the incumbent `policyengine-us-data` pipeline inside the cleaner
-> `microplex-us` structure first. Improve architecture immediately. Improve
-> results only on the margin during the rebuild pass. Save materially different
-> modeling choices for a later, explicit challenger phase.
+> Use `policyengine-us-data` as the incumbent comparator and use
+> `policyengine-us` plus the active targets DB as the shared measurement
+> oracle. Match incumbent behavior where that sharpens attribution or closes an
+> interface contract. Keep `microplex-us` as an independent runtime, and treat
+> materially different modeling choices as explicit challenger modes rather
+> than calling the whole project a PE-US-data clone.
 
-That is a stricter rule than "make it better however we can."
+That is a stricter rule than either "make Microplex mimic PE-US-data wholesale" or
+"make it better however we can."
+
+Historical note:
+
+- some internal module names still use `pe_us_data_rebuild`
+- that reflects the original implementation thread, not the methodological
+  claim
+- the claim now is oracle compatibility plus incumbent comparison, not
+  wholesale reconstruction
 
 ## Current runtime entry points
 
-The rebuild track now has explicit code-owned runtime entry points in
+The incumbent-compatibility track currently uses historically named runtime
+entry points in
 [`pe_us_data_rebuild.py`](/Users/maxghenis/CosilicoAI/microplex-us/src/microplex_us/pipelines/pe_us_data_rebuild.py):
 
 - `default_policyengine_us_data_rebuild_config(...)`
@@ -26,15 +39,15 @@ And it now has one concrete saved-run checkpoint runner in
 - `attach_policyengine_us_data_rebuild_checkpoint_evidence(...)`
 - `run_policyengine_us_data_rebuild_checkpoint(...)`
 
-These are meant to make the incumbent-parity path callable as a first-class
-Microplex profile rather than a loose collection of remembered settings.
+These make the incumbent-comparison path callable as a first-class Microplex
+profile rather than a loose collection of remembered settings.
 
 That profile now also includes:
 
 - the PE-style PUF Social Security QRF split mode
 - the PE-style prespecified donor-predictor mode for source imputations
 - opt-in ACS/SCF donor providers plus a block-spec-driven SIPP donor provider
-  for the rebuild path
+  for the compatibility path
 - one shared donor-block manifest,
   [`pe_source_impute_blocks.json`](/Users/maxghenis/CosilicoAI/microplex-us/src/microplex_us/manifests/pe_source_impute_blocks.json),
   that now drives both:
@@ -53,20 +66,24 @@ That profile now also includes:
     so `us.py` no longer owns PE block resolution, PE block-frame preparation /
     entity projection, condition-surface prep, the prespecified block
     fit/generate/match loop, or a second duplicated generic donor execution loop
-  - one saved-run rebuild parity sidecar in
+  - one saved-run parity sidecar in
     [`pe_us_data_rebuild_parity.py`](/Users/maxghenis/CosilicoAI/microplex-us/src/microplex_us/pipelines/pe_us_data_rebuild_parity.py)
-    that records profile conformance, the exact PE-US-data baseline slice, and
+    that records profile conformance, the exact incumbent baseline slice, and
     the harness / PE-native verdicts for one artifact bundle
+  - one saved-run native audit sidecar in
+    [`pe_us_data_rebuild_audit.py`](/Users/maxghenis/CosilicoAI/microplex-us/src/microplex_us/pipelines/pe_us_data_rebuild_audit.py)
+    that records family regressions, target-level regressions, support audits,
+    and imputation-sidecar verdict hints for the same artifact bundle
   - one checkpoint runner that saves a normal versioned Microplex artifact
     bundle first, then attaches harness/native parity evidence from the saved
-    dataset, and finally materializes the rebuild parity sidecar from the
+    dataset, and finally materializes parity / native-audit sidecars from the
     updated bundle instead of relying on an ad hoc notebook or shell sequence
 
 ## Why this rule exists
 
 If we mix:
 
-- source and mapping parity
+- oracle-compatibility checks
 - model-family changes
 - predictor-surface changes
 - weighting-backend changes
@@ -76,16 +93,17 @@ in the same pass, then we lose attribution.
 
 We may still end up with a better system, but we will not know whether it is:
 
-- a faithful rebuild of the incumbent path
+- a closer match to incumbent interface behavior
 - a materially different model stack
 - or both
 
-The rebuild track is meant to answer a simpler question first:
+The incumbent-compatibility track is meant to answer a simpler question first:
 
-> Can Microplex reproduce the incumbent PE-US-data build path in a more
-> sustainable, modular, spec-driven form?
+> Can Microplex produce a PE-ingestable dataset under a documented
+> incumbent-compatible profile, in a cleaner and more auditable form, while
+> keeping the differences from the incumbent attributable?
 
-## What is allowed in the rebuild pass
+## What is allowed in the incumbent-compatibility pass
 
 Allowed changes are architectural improvements that should move outputs only on
 the margin:
@@ -105,9 +123,9 @@ These are improvements in:
 - reproducibility
 - evaluation discipline
 
-without trying to win by changing the underlying statistical contract.
+without trying to win by silently changing the underlying comparison contract.
 
-## What is not allowed by default in the rebuild pass
+## What is not allowed by default in the incumbent-compatibility pass
 
 These should be treated as explicit departures, not silent cleanup:
 
@@ -119,27 +137,27 @@ These should be treated as explicit departures, not silent cleanup:
 - changing fallback heuristics in ways likely to move support or totals
 - changing weighting/calibration objectives or optimization backends
 - introducing new target surfaces as if they were still measuring the same
-  incumbent pipeline
+  incumbent comparison problem
 
 Any such change can still be good. It just belongs in the challenger phase,
 where it is measured as an intentional departure.
 
 ## Practical decision rule
 
-When we face a design choice during the rebuild:
+When we face a design choice during the incumbent-compatibility pass:
 
 1. Ask whether the incumbent PE-US-data behavior is clear enough to reproduce.
-2. If yes, reproduce it in cleaner Microplex structure.
+2. If yes, match it inside cleaner Microplex structure.
 3. Only deviate if the incumbent choice would create an obvious architectural
    problem.
 4. If we deviate, choose the smallest alternative that should change outputs
    only on the margin.
 5. Write the deviation down as `intentional` rather than letting it masquerade
-   as parity.
+   as oracle compatibility.
 
 ## Examples
 
-### Good rebuild-pass changes
+### Good incumbent-compatibility changes
 
 - Keep PE's QRF family, but call it through a Microplex method spec instead of
   an inline script.
@@ -161,7 +179,7 @@ When we face a design choice during the rebuild:
 - Keep the same CPS reason-code logic, but express it in a source adapter with
   explicit parity tests.
 
-### Too far for the rebuild pass
+### Too far for the incumbent-compatibility pass
 
 - switching from PE's prespecified QRF predictors to a broader automatic
   feature search because it seems statistically cleaner
@@ -180,7 +198,7 @@ If we follow it, then the matrix statuses:
 - `Compatible, not equivalent`
 - `Different`
 
-actually describe the build path.
+actually describe the comparison contract.
 
 If we ignore it, the matrix becomes unstable because every "cleanup" quietly
 changes the underlying model contract.
@@ -191,8 +209,8 @@ This rule does **not** say we should stop improving the pipeline.
 
 It says:
 
-1. rebuild the incumbent path cleanly
-2. prove parity or intentional difference
-3. then run challenger methods against that rebuilt baseline
+1. make the incumbent-comparison path explicit and auditable
+2. prove parity or intentional difference where parity matters
+3. then run challenger methods against that incumbent-compatible baseline
 
 That sequence is what gives later benchmark wins credibility.

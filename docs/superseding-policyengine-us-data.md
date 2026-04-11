@@ -11,6 +11,12 @@ It is not a paper claim. It is the operational plan that ties together:
 - the remaining gates between "diagnostic replacement path" and "real
   supersession"
 
+It also uses one important framing rule:
+
+- `microplex-us` is not defined as a rebuild of `policyengine-us-data`
+- `policyengine-us` plus the active targets DB are the measurement oracle
+- `policyengine-us-data` is the incumbent comparator and interface reference
+
 ## Core principle
 
 `policyengine-us-data` is the incumbent dataset, not truth.

@@ -9,14 +9,17 @@ built on top of the generic `microplex` engine.
 - [Architecture](./docs/architecture.md)
 - [Source semantics](./docs/source-semantics.md)
 - [Benchmarking](./docs/benchmarking.md)
-- [Rebuilding `policyengine-us-data` in Microplex](./docs/rebuilding-policyengine-us-data-in-microplex.md)
+- [Methodology ledger](./docs/methodology-ledger.md)
+- [PolicyEngine oracle compatibility path](./docs/policyengine-oracle-compatibility.md)
 - [PE construction parity](./docs/pe-construction-parity.md)
 - [Superseding `policyengine-us-data`](./docs/superseding-policyengine-us-data.md)
 
 ## Current focus
 
-`microplex-us` is being built as a library-first replacement path for
-`policyengine-us-data`:
+`microplex-us` is being built as a library-first US runtime with
+`policyengine-us` as the shared measurement operator and
+`policyengine-us-data` as the incumbent comparator, not as the thing we are
+trying to clone wholesale:
 
 - canonical source and target metadata
 - PE-US-compatible export
