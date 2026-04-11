@@ -59,6 +59,7 @@ This is the current working methods snapshot, not a claim of finality.
 | Current production imputation reading | `structured_pe_conditioning` is the support winner on the current checkpoint ablation; `top_correlated_qrf` is the MAE winner. | `Provisional` | [pe_us_data_rebuild_parity.json](/Users/maxghenis/CosilicoAI/microplex-us/artifacts/checkpoints/checkpoint-ablation-real-20260410a/pe_us_data_rebuild_parity.json), [pe_us_data_rebuild_native_audit.json](/Users/maxghenis/CosilicoAI/microplex-us/artifacts/checkpoints/checkpoint-ablation-real-20260410a/pe_us_data_rebuild_native_audit.json) |
 | Broad mission metric | The mission metric is PE-native broad loss frontier, but pre-calibration support evidence is retained so unrealistic imputations do not hide behind later weighting. | `Canonical` | [superseding-policyengine-us-data.md](/Users/maxghenis/CosilicoAI/microplex-us/docs/superseding-policyengine-us-data.md), [pe_us_data_rebuild_native_audit.json](/Users/maxghenis/CosilicoAI/microplex-us/artifacts/checkpoints/checkpoint-ablation-real-20260410a/pe_us_data_rebuild_native_audit.json) |
 | Current benchmark reading | On the current checkpoint artifact, harness metrics improved versus the incumbent comparator, but native broad loss is still much worse than `enhanced_cps_2024`. | `Canonical` | [pe_us_data_rebuild_parity.json](/Users/maxghenis/CosilicoAI/microplex-us/artifacts/checkpoints/checkpoint-ablation-real-20260410a/pe_us_data_rebuild_parity.json), [pe_us_data_rebuild_native_audit.json](/Users/maxghenis/CosilicoAI/microplex-us/artifacts/checkpoints/checkpoint-ablation-real-20260410a/pe_us_data_rebuild_native_audit.json) |
+| Current cross-run regression reading | Across 66 scored modelpass checkpoint runs, `national_irs_other` appears in the top 3 every time, `state_agi_distribution` in 63/66, and `state_aca_spending` in 54/66. Near-term model work should target those recurring families directly rather than broad tuning. | `Provisional` | [live_pe_us_data_rebuild_checkpoint_modelpass_regression_summary_20260410.json](/Users/maxghenis/CosilicoAI/microplex-us/artifacts/live_pe_us_data_rebuild_checkpoint_modelpass_regression_summary_20260410.json) |
 
 ## Canonical pipeline
 
@@ -141,6 +142,7 @@ For the current checkpoint-style evidence bundle, the most useful files are:
 - [pe_us_data_rebuild_parity.json](/Users/maxghenis/CosilicoAI/microplex-us/artifacts/checkpoints/checkpoint-ablation-real-20260410a/pe_us_data_rebuild_parity.json)
 - [pe_us_data_rebuild_native_audit.json](/Users/maxghenis/CosilicoAI/microplex-us/artifacts/checkpoints/checkpoint-ablation-real-20260410a/pe_us_data_rebuild_native_audit.json)
 - [imputation_ablation.json](/Users/maxghenis/CosilicoAI/microplex-us/artifacts/checkpoints/checkpoint-ablation-real-20260410a/imputation_ablation.json)
+- [live_pe_us_data_rebuild_checkpoint_modelpass_regression_summary_20260410.json](/Users/maxghenis/CosilicoAI/microplex-us/artifacts/live_pe_us_data_rebuild_checkpoint_modelpass_regression_summary_20260410.json)
 
 ## Decision log
 
@@ -184,6 +186,22 @@ For the current checkpoint-style evidence bundle, the most useful files are:
 - Evidence:
   - [manifest.json](/Users/maxghenis/CosilicoAI/microplex-us/artifacts/checkpoints/checkpoint-ablation-real-20260410a/manifest.json)
   - [data_flow_snapshot.json](/Users/maxghenis/CosilicoAI/microplex-us/artifacts/checkpoints/checkpoint-ablation-real-20260410a/data_flow_snapshot.json)
+
+### 2026-04-10: Cross-run regression priority
+
+- Decision:
+  - prioritize targeted fixes for `national_irs_other`,
+    `state_agi_distribution`, and then `state_aca_spending`
+- Why:
+  - across recent modelpass checkpoint families, the same regressions recur even
+    when total loss improves substantially
+  - `national_irs_other` appears in the top 3 for all 66 scored runs
+  - `state_agi_distribution` appears in the top 3 for 63/66 runs and is the
+    largest regressing family in 34 runs
+  - `state_aca_spending` appears in the top 3 for 54/66 runs but is more often
+    a secondary or tertiary regression
+- Evidence:
+  - [live_pe_us_data_rebuild_checkpoint_modelpass_regression_summary_20260410.json](/Users/maxghenis/CosilicoAI/microplex-us/artifacts/live_pe_us_data_rebuild_checkpoint_modelpass_regression_summary_20260410.json)
 
 ## Update rule
 
