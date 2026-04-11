@@ -85,6 +85,12 @@ _PIPELINE_EXPORTS = (
     "USMicroplexSourceExperimentSpec",
     "USMicroplexTargets",
     "USMicroplexVersionedBuildArtifacts",
+    "backfill_us_pe_native_audit_bundle",
+    "backfill_us_pe_native_audit_bundles",
+    "backfill_us_pe_native_audit_root",
+    "backfill_us_pe_native_scores_bundle",
+    "backfill_us_pe_native_scores_bundles",
+    "backfill_us_pe_native_scores_root",
     "append_us_microplex_run_index_entry",
     "append_us_microplex_run_registry_entry",
     "attach_policyengine_us_data_rebuild_checkpoint_evidence",
@@ -114,6 +120,7 @@ _PIPELINE_EXPORTS = (
     "default_us_atomic_rung5_calibration",
     "default_us_source_mix_experiments",
     "evaluate_us_reduced_benchmark",
+    "discover_us_candidate_artifact_dirs",
     "list_us_microplex_target_delta_rows",
     "load_us_microplex_run_registry",
     "rebuild_us_microplex_run_index",
@@ -134,6 +141,7 @@ _PIPELINE_EXPORTS = (
     "warm_us_microplex_parity_cache",
     "write_policyengine_us_data_rebuild_native_audit",
     "write_us_microplex_site_snapshot",
+    "rebuild_us_pe_native_run_registry",
 )
 
 _POLICYENGINE_EXPORTS = (

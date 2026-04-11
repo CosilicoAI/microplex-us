@@ -33,6 +33,24 @@ _EXPORT_MODULES: dict[str, str] = {
         ),
     ),
     **_exports(
+        "microplex_us.pipelines.backfill_pe_native_audit",
+        (
+            "backfill_us_pe_native_audit_bundle",
+            "backfill_us_pe_native_audit_bundles",
+            "backfill_us_pe_native_audit_root",
+        ),
+    ),
+    **_exports(
+        "microplex_us.pipelines.backfill_pe_native_scores",
+        (
+            "backfill_us_pe_native_scores_bundle",
+            "backfill_us_pe_native_scores_bundles",
+            "backfill_us_pe_native_scores_root",
+            "discover_us_candidate_artifact_dirs",
+            "rebuild_us_pe_native_run_registry",
+        ),
+    ),
+    **_exports(
         "microplex_us.pipelines.calibration_stage_parity",
         (
             "build_us_calibration_stage_parity_audit",

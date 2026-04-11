@@ -15,6 +15,9 @@ from microplex_us.pipelines.artifacts import (
     build_and_save_versioned_us_microplex_from_source_providers,
     save_versioned_us_microplex_build_result,
 )
+from microplex_us.pipelines.backfill_pe_native_audit import (
+    backfill_us_pe_native_audit_bundles,
+)
 from microplex_us.pipelines.backfill_pe_native_scores import (
     backfill_us_pe_native_scores_bundles,
 )
@@ -584,6 +587,10 @@ def run_us_microplex_source_experiments(
             baseline_dataset=performance_harness_config.baseline_dataset,
             policyengine_us_data_repo=performance_harness_config.policyengine_us_data_repo,
             rebuild_registry=True,
+        )
+        backfill_us_pe_native_audit_bundles(
+            [result.artifact_paths.output_dir for result in results],
+            policyengine_us_data_repo=performance_harness_config.policyengine_us_data_repo,
         )
         results = list(
             _refresh_experiment_results_from_registry(

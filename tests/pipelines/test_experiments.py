@@ -384,6 +384,16 @@ def test_run_us_microplex_source_experiments_can_use_performance_session(
             Path(path) / "manifest.json" for path in artifact_dirs
         ],
     )
+    calls["backfill_native_audit"] = []
+    monkeypatch.setattr(
+        "microplex_us.pipelines.experiments.backfill_us_pe_native_audit_bundles",
+        lambda artifact_dirs, **kwargs: calls["backfill_native_audit"].append(
+            {
+                "artifact_dirs": [Path(path) for path in artifact_dirs],
+                "kwargs": dict(kwargs),
+            }
+        ),
+    )
     monkeypatch.setattr(
         "microplex_us.pipelines.experiments.load_us_microplex_run_registry",
         lambda _path: registry_entries,
@@ -402,6 +412,7 @@ def test_run_us_microplex_source_experiments_can_use_performance_session(
         n_synthetic=25,
         targets_db="/tmp/policy_data.db",
         baseline_dataset="/tmp/baseline.h5",
+        policyengine_us_data_repo="/tmp/policyengine-us-data",
         evaluate_parity=True,
         evaluate_pe_native_loss=True,
     )
@@ -448,6 +459,15 @@ def test_run_us_microplex_source_experiments_can_use_performance_session(
     assert calls["save"][0]["defer_policyengine_harness"] is False
     assert calls["save"][0]["precomputed_policyengine_native_scores"] is None
     assert calls["save"][0]["defer_policyengine_native_score"] is True
+    assert len(calls["backfill_native_audit"]) == 1
+    assert calls["backfill_native_audit"][0]["artifact_dirs"] == [
+        tmp_path / "experiments" / "cps-only",
+        tmp_path / "experiments" / "cps+puf",
+    ]
+    assert (
+        calls["backfill_native_audit"][0]["kwargs"]["policyengine_us_data_repo"]
+        == "/tmp/policyengine-us-data"
+    )
     assert report.best_result.current_entry is not None
     assert report.best_result.current_entry.artifact_id == "cps+puf"
 
