@@ -60,6 +60,7 @@ This is the current working methods snapshot, not a claim of finality.
 | Broad mission metric | The mission metric is PE-native broad loss frontier, but pre-calibration support evidence is retained so unrealistic imputations do not hide behind later weighting. | `Canonical` | [superseding-policyengine-us-data.md](/Users/maxghenis/CosilicoAI/microplex-us/docs/superseding-policyengine-us-data.md), [pe_us_data_rebuild_native_audit.json](/Users/maxghenis/CosilicoAI/microplex-us/artifacts/checkpoints/checkpoint-ablation-real-20260410a/pe_us_data_rebuild_native_audit.json) |
 | Current benchmark reading | On the current checkpoint artifact, harness metrics improved versus the incumbent comparator, but native broad loss is still much worse than `enhanced_cps_2024`. | `Canonical` | [pe_us_data_rebuild_parity.json](/Users/maxghenis/CosilicoAI/microplex-us/artifacts/checkpoints/checkpoint-ablation-real-20260410a/pe_us_data_rebuild_parity.json), [pe_us_data_rebuild_native_audit.json](/Users/maxghenis/CosilicoAI/microplex-us/artifacts/checkpoints/checkpoint-ablation-real-20260410a/pe_us_data_rebuild_native_audit.json) |
 | Current cross-run regression reading | Across 66 scored modelpass checkpoint runs, `national_irs_other` appears in the top 3 every time, `state_agi_distribution` in 63/66, and `state_aca_spending` in 54/66. Near-term model work should target those recurring families directly rather than broad tuning. | `Provisional` | [live_pe_us_data_rebuild_checkpoint_modelpass_regression_summary_20260410.json](/Users/maxghenis/CosilicoAI/microplex-us/artifacts/live_pe_us_data_rebuild_checkpoint_modelpass_regression_summary_20260410.json) |
+| Current `national_irs_other` drilldown reading | The audited `national_irs_other` failures are concentrated in filing-status-sensitive IRS cells and coincide with large `SINGLE` and `JOINT` overcounts plus `SEPARATE` undercounts. The first remediation step is to preserve source-authoritative filing-status inputs into the PE construction path. | `Provisional` | [live_pe_us_data_rebuild_checkpoint_national_irs_other_drilldown_20260410.json](/Users/maxghenis/CosilicoAI/microplex-us/artifacts/live_pe_us_data_rebuild_checkpoint_national_irs_other_drilldown_20260410.json) |
 
 ## Canonical pipeline
 
@@ -143,6 +144,7 @@ For the current checkpoint-style evidence bundle, the most useful files are:
 - [pe_us_data_rebuild_native_audit.json](/Users/maxghenis/CosilicoAI/microplex-us/artifacts/checkpoints/checkpoint-ablation-real-20260410a/pe_us_data_rebuild_native_audit.json)
 - [imputation_ablation.json](/Users/maxghenis/CosilicoAI/microplex-us/artifacts/checkpoints/checkpoint-ablation-real-20260410a/imputation_ablation.json)
 - [live_pe_us_data_rebuild_checkpoint_modelpass_regression_summary_20260410.json](/Users/maxghenis/CosilicoAI/microplex-us/artifacts/live_pe_us_data_rebuild_checkpoint_modelpass_regression_summary_20260410.json)
+- [live_pe_us_data_rebuild_checkpoint_national_irs_other_drilldown_20260410.json](/Users/maxghenis/CosilicoAI/microplex-us/artifacts/live_pe_us_data_rebuild_checkpoint_national_irs_other_drilldown_20260410.json)
 
 ## Decision log
 
@@ -202,6 +204,23 @@ For the current checkpoint-style evidence bundle, the most useful files are:
     a secondary or tertiary regression
 - Evidence:
   - [live_pe_us_data_rebuild_checkpoint_modelpass_regression_summary_20260410.json](/Users/maxghenis/CosilicoAI/microplex-us/artifacts/live_pe_us_data_rebuild_checkpoint_modelpass_regression_summary_20260410.json)
+
+### 2026-04-10: First `national_irs_other` remediation target
+
+- Decision:
+  - first fix the preservation of source-authoritative filing-status inputs in
+    the PE-oracle rebuild path before attempting more downstream status tuning
+- Why:
+  - audited `national_irs_other` lead runs show repeated IRS target failures in
+    filing-status-sensitive cells, especially `Single`, `Joint`, and high-AGI
+    bins
+  - those same audited runs show large `SINGLE` and `JOINT` count surpluses,
+    large `SEPARATE` deficits, and missing or distorted MFS support bins
+  - the saved candidate seed/synthetic/calibrated rows for leading runs retain
+    `marital_status` but not `filing_status_code`, so the authoritative PUF tax
+    filing code is disappearing before tax-unit construction
+- Evidence:
+  - [live_pe_us_data_rebuild_checkpoint_national_irs_other_drilldown_20260410.json](/Users/maxghenis/CosilicoAI/microplex-us/artifacts/live_pe_us_data_rebuild_checkpoint_national_irs_other_drilldown_20260410.json)
 
 ## Update rule
 
