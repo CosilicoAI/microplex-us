@@ -717,10 +717,10 @@ def _refresh_experiment_results_from_registry(
         refreshed.append(
             replace(
                 result,
-                artifact_paths=replace(
+                artifact_paths=_refresh_experiment_artifact_paths(
                     result.artifact_paths,
-                    run_registry=Path(run_registry_path),
-                    run_index_db=run_index_path,
+                    run_registry_path=Path(run_registry_path),
+                    run_index_path=run_index_path,
                 ),
                 current_entry=current_entry,
                 frontier_entry=frontier_entry,
@@ -728,3 +728,57 @@ def _refresh_experiment_results_from_registry(
             )
         )
     return tuple(refreshed)
+
+
+def _refresh_experiment_artifact_paths(
+    artifact_paths: USMicroplexArtifactPaths,
+    *,
+    run_registry_path: Path,
+    run_index_path: Path,
+) -> USMicroplexArtifactPaths:
+    manifest_payload = _load_optional_json(artifact_paths.manifest)
+    artifacts = dict(manifest_payload.get("artifacts", {})) if manifest_payload else {}
+    artifact_root = artifact_paths.output_dir
+    return replace(
+        artifact_paths,
+        data_flow_snapshot=_resolve_optional_result_artifact_path(
+            artifact_root,
+            artifacts.get("data_flow_snapshot"),
+            fallback="data_flow_snapshot.json",
+        ),
+        policyengine_harness=_resolve_optional_result_artifact_path(
+            artifact_root,
+            artifacts.get("policyengine_harness"),
+        ),
+        policyengine_native_scores=_resolve_optional_result_artifact_path(
+            artifact_root,
+            artifacts.get("policyengine_native_scores"),
+        ),
+        policyengine_native_audit=_resolve_optional_result_artifact_path(
+            artifact_root,
+            artifacts.get("policyengine_native_audit"),
+        ),
+        run_registry=Path(run_registry_path),
+        run_index_db=run_index_path,
+    )
+
+
+def _resolve_optional_result_artifact_path(
+    artifact_root: Path,
+    artifact_name: str | None,
+    *,
+    fallback: str | None = None,
+) -> Path | None:
+    if artifact_name:
+        path = artifact_root / artifact_name
+        return path if path.exists() else None
+    if fallback is None:
+        return None
+    fallback_path = artifact_root / fallback
+    return fallback_path if fallback_path.exists() else None
+
+
+def _load_optional_json(path: Path) -> dict[str, Any] | None:
+    if not path.exists():
+        return None
+    return json.loads(path.read_text())

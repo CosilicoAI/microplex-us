@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 from microplex_us.pipelines.artifacts import USMicroplexArtifactPaths
@@ -492,6 +493,76 @@ def test_refresh_experiment_results_from_registry_returns_original_results_when_
     )
 
     assert loaded == results
+
+
+def test_refresh_experiment_results_from_registry_refreshes_backfilled_artifact_paths(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    output_dir = tmp_path / "cps-only"
+    output_dir.mkdir()
+    manifest_path = output_dir / "manifest.json"
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "artifacts": {
+                    "data_flow_snapshot": "data_flow_snapshot.json",
+                    "policyengine_native_scores": "policyengine_native_scores.json",
+                    "policyengine_native_audit": "pe_us_data_rebuild_native_audit.json",
+                }
+            }
+        )
+    )
+    for name in (
+        "data_flow_snapshot.json",
+        "policyengine_native_scores.json",
+        "pe_us_data_rebuild_native_audit.json",
+    ):
+        (output_dir / name).write_text("{}")
+    registry_path = tmp_path / "run_registry.jsonl"
+    result = USMicroplexExperimentResult(
+        name="cps-only",
+        artifact_paths=USMicroplexArtifactPaths(
+            output_dir=output_dir,
+            version_id="cps-only",
+            seed_data=output_dir / "seed.parquet",
+            synthetic_data=output_dir / "synthetic.parquet",
+            calibrated_data=output_dir / "calibrated.parquet",
+            targets=output_dir / "targets.json",
+            manifest=manifest_path,
+            policyengine_native_scores=None,
+            policyengine_native_audit=None,
+            data_flow_snapshot=None,
+        ),
+        frontier_metric="candidate_composite_parity_loss",
+        frontier_delta=None,
+    )
+    registry_entries = [
+        _entry("cps-only", composite_loss=0.4, source_names=("cps",)),
+    ]
+    monkeypatch.setattr(
+        "microplex_us.pipelines.experiments.load_us_microplex_run_registry",
+        lambda _path: registry_entries,
+    )
+    monkeypatch.setattr(
+        "microplex_us.pipelines.experiments.select_us_microplex_frontier_entry",
+        lambda _path, *, metric="candidate_composite_parity_loss": registry_entries[0]
+    )
+    loaded = _refresh_experiment_results_from_registry(
+        (result,),
+        run_registry_path=registry_path,
+        frontier_metric="candidate_composite_parity_loss",
+    )
+
+    assert loaded[0].artifact_paths.data_flow_snapshot == output_dir / "data_flow_snapshot.json"
+    assert (
+        loaded[0].artifact_paths.policyengine_native_scores
+        == output_dir / "policyengine_native_scores.json"
+    )
+    assert (
+        loaded[0].artifact_paths.policyengine_native_audit
+        == output_dir / "pe_us_data_rebuild_native_audit.json"
+    )
 
 
 def test_run_us_microplex_source_experiments_requires_performance_config_for_session(
