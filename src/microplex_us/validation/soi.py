@@ -9,6 +9,9 @@ Data source: https://www.irs.gov/statistics/soi-tax-stats-individual-income-tax-
 """
 
 from dataclasses import dataclass
+import os
+import sqlite3
+from pathlib import Path
 
 import polars as pl
 
@@ -178,19 +181,22 @@ class SOITargets:
     def is_consistent(self, tolerance: float = 0.01) -> bool:
         """Check if targets are internally consistent."""
         # Returns by bracket should sum to total
-        bracket_sum = sum(self.returns_by_agi_bracket.values())
-        if abs(bracket_sum - self.total_returns) / self.total_returns > tolerance:
-            return False
+        if self.returns_by_agi_bracket:
+            bracket_sum = sum(self.returns_by_agi_bracket.values())
+            if self.total_returns and abs(bracket_sum - self.total_returns) / self.total_returns > tolerance:
+                return False
 
         # AGI by bracket should sum to total
-        agi_sum = sum(self.agi_by_bracket.values())
-        if abs(agi_sum - self.total_agi) / abs(self.total_agi) > tolerance:
-            return False
+        if self.agi_by_bracket:
+            agi_sum = sum(self.agi_by_bracket.values())
+            if self.total_agi and abs(agi_sum - self.total_agi) / abs(self.total_agi) > tolerance:
+                return False
 
         # Filing status should sum to total
-        status_sum = sum(self.returns_by_filing_status.values())
-        if abs(status_sum - self.total_returns) / self.total_returns > tolerance:
-            return False
+        if self.returns_by_filing_status:
+            status_sum = sum(self.returns_by_filing_status.values())
+            if self.total_returns and abs(status_sum - self.total_returns) / self.total_returns > tolerance:
+                return False
 
         return True
 
@@ -218,7 +224,198 @@ def get_available_years() -> list[int]:
     return sorted(_SOI_DATA.keys())
 
 
-def load_soi_targets(year: int) -> SOITargets:
+def _agi_bracket_label(lower: float, upper: float) -> str:
+    if lower == float("-inf"):
+        if upper == 1:
+            return "under_1"
+        return f"under_{int(upper)}"
+    if upper == float("inf"):
+        if lower == 10_000_000:
+            return "10m_plus"
+        if lower >= 1_000_000:
+            lower_m = lower / 1_000_000
+            if float(lower_m).is_integer():
+                return f"{int(lower_m)}m_plus"
+            return f"{lower_m:g}m_plus"
+        if lower >= 1_000:
+            return f"{int(lower)}_plus"
+        return f"{int(lower)}_plus"
+    if lower == float("-inf") and upper == 1:
+        return "under_1"
+    if lower == 1 and upper == 5_000:
+        return "1_to_5k"
+    if lower == 5_000 and upper == 10_000:
+        return "5k_to_10k"
+    if lower == 10_000 and upper == 15_000:
+        return "10k_to_15k"
+    if lower == 15_000 and upper == 20_000:
+        return "15k_to_20k"
+    if lower == 20_000 and upper == 25_000:
+        return "20k_to_25k"
+    if lower == 25_000 and upper == 30_000:
+        return "25k_to_30k"
+    if lower == 30_000 and upper == 40_000:
+        return "30k_to_40k"
+    if lower == 40_000 and upper == 50_000:
+        return "40k_to_50k"
+    if lower == 50_000 and upper == 75_000:
+        return "50k_to_75k"
+    if lower == 75_000 and upper == 100_000:
+        return "75k_to_100k"
+    if lower == 100_000 and upper == 200_000:
+        return "100k_to_200k"
+    if lower == 200_000 and upper == 500_000:
+        return "200k_to_500k"
+    if lower == 500_000 and upper == 1_000_000:
+        return "500k_to_1m"
+    if lower == 1_000_000 and upper == 1_500_000:
+        return "1m_to_1_5m"
+    if lower == 1_500_000 and upper == 2_000_000:
+        return "1_5m_to_2m"
+    if lower == 2_000_000 and upper == 5_000_000:
+        return "2m_to_5m"
+    if lower == 5_000_000 and upper == 10_000_000:
+        return "5m_to_10m"
+    if lower == 10_000_000 and upper == float("inf"):
+        return "10m_plus"
+    return f"{int(lower)}_to_{int(upper)}"
+
+
+def _load_soi_targets_from_db(year: int, targets_db: str | Path) -> SOITargets:
+    db_path = Path(targets_db)
+    if not db_path.exists():
+        raise FileNotFoundError(f"PolicyEngine targets DB not found: {db_path}")
+
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    try:
+        rows = conn.execute(
+            """
+            SELECT
+                t.target_id,
+                t.variable,
+                t.value,
+                t.period,
+                t.stratum_id,
+                sc.constraint_variable,
+                sc.operation,
+                sc.value AS constraint_value
+            FROM targets t
+            JOIN strata s ON t.stratum_id = s.stratum_id
+            LEFT JOIN stratum_constraints sc
+                ON s.stratum_id = sc.stratum_id
+            WHERE t.active = 1
+              AND t.reform_id = 0
+              AND t.period <= ?
+              AND t.variable IN ('adjusted_gross_income', 'person_count', 'tax_unit_count')
+            """,
+            (year,),
+        ).fetchall()
+    finally:
+        conn.close()
+
+    targets_by_id: dict[int, dict[str, object]] = {}
+    for row in rows:
+        target_id = int(row["target_id"])
+        target = targets_by_id.setdefault(
+            target_id,
+            {
+                "target_id": target_id,
+                "variable": row["variable"],
+                "value": float(row["value"]),
+                "period": int(row["period"]),
+                "stratum_id": int(row["stratum_id"]),
+                "constraints": [],
+            },
+        )
+        if row["constraint_variable"] is not None:
+            target["constraints"].append(
+                {
+                    "variable": row["constraint_variable"],
+                    "operation": row["operation"],
+                    "value": row["constraint_value"],
+                }
+            )
+
+    best_targets: dict[tuple[int, str], dict[str, object]] = {}
+    for target in targets_by_id.values():
+        key = (int(target["stratum_id"]), str(target["variable"]))
+        existing = best_targets.get(key)
+        if existing is None or int(target["period"]) > int(existing["period"]):
+            best_targets[key] = target
+
+    total_agi = None
+    returns_by_agi_bracket: dict[str, int] = {}
+    agi_by_bracket: dict[str, int] = {}
+    returns_by_filing_status: dict[str, int] = {}
+
+    for target in best_targets.values():
+        constraints = target["constraints"]
+        if not constraints:
+            continue
+
+        constraint_vars = {c["variable"] for c in constraints}
+        lower = float("-inf")
+        upper = float("inf")
+        has_agi_bounds = False
+        for c in constraints:
+            if c["variable"] == "adjusted_gross_income":
+                has_agi_bounds = True
+                value = float(c["value"])
+                if c["operation"] in (">=", ">"):
+                    lower = max(lower, value)
+                elif c["operation"] in ("<=", "<"):
+                    upper = min(upper, value)
+
+        has_state = "state_fips" in constraint_vars
+        has_district = "congressional_district_geoid" in constraint_vars
+        is_filer_slice = "tax_unit_is_filer" in constraint_vars
+
+        if target["variable"] == "adjusted_gross_income" and not has_agi_bounds:
+            if is_filer_slice and not has_state and not has_district:
+                total_agi = int(float(target["value"]))
+            continue
+
+        if has_district:
+            continue
+
+        if has_agi_bounds:
+            label = _agi_bracket_label(lower, upper)
+            if target["variable"] == "tax_unit_count" and has_state:
+                returns_by_agi_bracket[label] = returns_by_agi_bracket.get(label, 0) + int(
+                    float(target["value"])
+                )
+                continue
+            if target["variable"] == "adjusted_gross_income" and has_state:
+                agi_by_bracket[label] = agi_by_bracket.get(label, 0) + int(
+                    float(target["value"])
+                )
+                continue
+            if target["variable"] == "person_count" and is_filer_slice and not has_state:
+                returns_by_agi_bracket[label] = int(float(target["value"]))
+                continue
+
+        if target["variable"] == "tax_unit_count" and "filing_status" in constraint_vars:
+            status_value = next(
+                c["value"] for c in constraints if c["variable"] == "filing_status"
+            )
+            returns_by_filing_status[str(status_value)] = int(float(target["value"]))
+
+    total_returns = sum(returns_by_agi_bracket.values()) if returns_by_agi_bracket else 0
+    if total_agi is None:
+        total_agi = sum(agi_by_bracket.values()) if agi_by_bracket else 0
+
+    return SOITargets(
+        year=year,
+        total_returns=total_returns,
+        total_agi=total_agi,
+        returns_by_agi_bracket=returns_by_agi_bracket,
+        agi_by_bracket=agi_by_bracket,
+        returns_by_filing_status=returns_by_filing_status,
+    )
+
+
+def load_soi_targets(year: int, *, targets_db: str | Path | None = None) -> SOITargets:
     """
     Load SOI targets for a given year.
 
@@ -231,6 +428,15 @@ def load_soi_targets(year: int) -> SOITargets:
     Raises:
         ValueError: If year not available
     """
+    resolved_db = targets_db
+    if resolved_db is None:
+        resolved_db = os.getenv("MICROPLEX_POLICYENGINE_TARGETS_DB") or os.getenv(
+            "POLICYENGINE_TARGETS_DB"
+        )
+
+    if resolved_db is not None:
+        return _load_soi_targets_from_db(year, resolved_db)
+
     if year not in _SOI_DATA:
         available = ", ".join(str(y) for y in sorted(_SOI_DATA.keys()))
         raise ValueError(f"SOI data for {year} not available. Available years: {available}")

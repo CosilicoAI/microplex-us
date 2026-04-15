@@ -8,7 +8,27 @@ from enum import Enum
 
 import numpy as np
 import pandas as pd
-from microplex.core import EntityType, SourceVariableCapability
+from microplex.core import EntityType
+from microplex.core.semantics import (
+    FrameSemanticCheck,
+    FrameSemanticCheckReport,
+    FrameSemanticTransform,
+    SemanticTransformStage,
+    apply_frame_semantic_transforms,
+    evaluate_frame_semantic_checks,
+)
+
+try:
+    from microplex.core import SourceVariableCapability
+except ImportError:
+
+    @dataclass(frozen=True)
+    class SourceVariableCapability:
+        """Compatibility shim for older core branches."""
+
+        authoritative: bool = True
+        usable_as_condition: bool = True
+        notes: str | None = None
 
 
 class DonorMatchStrategy(Enum):
@@ -42,6 +62,39 @@ class ProjectionAggregation(Enum):
     MEAN = "mean"
 
 
+PE_STYLE_PUF_IRS_DEMOGRAPHIC_PREDICTORS = (
+    "age",
+    "is_male",
+    "tax_unit_is_joint",
+    "tax_unit_count_dependents",
+    "is_tax_unit_head",
+    "is_tax_unit_spouse",
+    "is_tax_unit_dependent",
+)
+PUF_IRS_TAX_PREFERRED_CONDITION_VARS = (
+    "age",
+    "is_male",
+    "tax_unit_is_joint",
+    "tax_unit_count_dependents",
+    "is_tax_unit_head",
+    "is_tax_unit_spouse",
+    "is_tax_unit_dependent",
+)
+# Keep PE-aligned PUF tax-leaf conditioning structural by default.
+PUF_IRS_TAX_SUPPLEMENTAL_SHARED_CONDITION_VARS: tuple[str, ...] = ()
+RENTAL_INCOME_COMPONENT_PREFERRED_CONDITION_VARS = (
+    "state_fips",
+    "tenure",
+    "age",
+    "tax_unit_is_joint",
+    "tax_unit_count_dependents",
+    "income",
+    "employment_income",
+    "self_employment_income",
+    "real_estate_taxes",
+)
+
+
 @dataclass(frozen=True)
 class DonorImputationBlockSpec:
     """Declarative donor-model spec for one imputation block."""
@@ -68,6 +121,10 @@ class VariableSemanticSpec:
     support_family: VariableSupportFamily = VariableSupportFamily.CONTINUOUS
     derived_from: tuple[str, ...] = ()
     donor_match_strategy: DonorMatchStrategy = DonorMatchStrategy.RANK
+    donor_transform: FrameSemanticTransform | None = None
+    donor_check: FrameSemanticCheck | None = None
+    preferred_condition_vars: tuple[str, ...] = ()
+    supplemental_shared_condition_vars: tuple[str, ...] = ()
     notes: str | None = None
 
     def is_redundant_given(self, variable_names: Iterable[str]) -> bool:
@@ -88,10 +145,79 @@ class VariableSemanticSpec:
         if self.condition_entities:
             return self.condition_entities
         if self.native_entity is EntityType.PERSON:
+            record_entity = getattr(EntityType, "RECORD", None)
             return tuple(
-                entity for entity in EntityType if entity is not EntityType.RECORD
+                entity for entity in EntityType if entity is not record_entity
             )
         return (EntityType.HOUSEHOLD, self.native_entity)
+
+
+def zero_minor_employment_income(frame: pd.DataFrame) -> pd.DataFrame:
+    """Enforce zero employment income for minors on donor-integrated seed frames."""
+    if "employment_income" not in frame.columns or "age" not in frame.columns:
+        return frame
+    ages = pd.to_numeric(frame["age"], errors="coerce")
+    if ages.isna().all():
+        return frame
+    result = frame.copy()
+    minor_mask = ages.lt(18).fillna(False)
+    if not minor_mask.any():
+        return result
+    result["employment_income"] = (
+        pd.to_numeric(result["employment_income"], errors="coerce")
+        .fillna(0.0)
+        .astype(float)
+    )
+    result.loc[minor_mask, "employment_income"] = 0.0
+    return result
+
+
+def suppress_retired_senior_employment_income_without_esi(
+    frame: pd.DataFrame,
+) -> pd.DataFrame:
+    """Suppress donor-overridden wage income for retired seniors without ESI."""
+    required_columns = {"employment_income", "age", "has_esi"}
+    if not required_columns.issubset(frame.columns):
+        return frame
+    ages = pd.to_numeric(frame["age"], errors="coerce")
+    if ages.isna().all():
+        return frame
+    social_security_income = social_security_retirement_compatible_amount(frame)
+    has_esi = (
+        pd.to_numeric(frame["has_esi"], errors="coerce")
+        .fillna(0.0)
+        .astype(float)
+        .gt(0.0)
+    )
+    retired_senior_mask = (
+        ages.ge(65).fillna(False) & social_security_income.gt(0.0) & ~has_esi
+    )
+    if not retired_senior_mask.any():
+        return frame
+    result = frame.copy()
+    result["employment_income"] = (
+        pd.to_numeric(result["employment_income"], errors="coerce")
+        .fillna(0.0)
+        .astype(float)
+    )
+    result.loc[retired_senior_mask, "employment_income"] = 0.0
+    return result
+
+
+def normalize_employment_income_donor_values(frame: pd.DataFrame) -> pd.DataFrame:
+    """Apply donor-side employment income semantic guards in a stable order."""
+    adjusted = normalize_social_security_columns(frame)
+    adjusted = zero_minor_employment_income(adjusted)
+    return suppress_retired_senior_employment_income_without_esi(adjusted)
+
+
+def minor_positive_employment_income_mask(frame: pd.DataFrame) -> pd.Series:
+    """Return rows where minors still carry positive employment income."""
+    if "employment_income" not in frame.columns or "age" not in frame.columns:
+        return pd.Series(False, index=frame.index, dtype=bool)
+    ages = pd.to_numeric(frame["age"], errors="coerce")
+    income = pd.to_numeric(frame["employment_income"], errors="coerce").fillna(0.0)
+    return ages.lt(18).fillna(False) & income.gt(0.0)
 
 
 VARIABLE_SEMANTIC_SPECS: dict[str, VariableSemanticSpec] = {
@@ -105,19 +231,29 @@ VARIABLE_SEMANTIC_SPECS: dict[str, VariableSemanticSpec] = {
     "tenure": VariableSemanticSpec(native_entity=EntityType.HOUSEHOLD),
     "state": VariableSemanticSpec(native_entity=EntityType.HOUSEHOLD),
     "dividend_income": VariableSemanticSpec(
-        native_entity=EntityType.TAX_UNIT,
-        condition_entities=(EntityType.HOUSEHOLD, EntityType.TAX_UNIT),
+        native_entity=EntityType.PERSON,
+        condition_entities=(
+            EntityType.PERSON,
+            EntityType.HOUSEHOLD,
+            EntityType.TAX_UNIT,
+        ),
         support_family=VariableSupportFamily.ZERO_INFLATED_POSITIVE,
         derived_from=(
             "qualified_dividend_income",
             "non_qualified_dividend_income",
         ),
         donor_match_strategy=DonorMatchStrategy.ZERO_INFLATED_POSITIVE,
+        preferred_condition_vars=PUF_IRS_TAX_PREFERRED_CONDITION_VARS,
+        supplemental_shared_condition_vars=PUF_IRS_TAX_SUPPLEMENTAL_SHARED_CONDITION_VARS,
         notes="Dividend totals are derived from the qualified and non-qualified atomic basis.",
     ),
     "ordinary_dividend_income": VariableSemanticSpec(
-        native_entity=EntityType.TAX_UNIT,
-        condition_entities=(EntityType.HOUSEHOLD, EntityType.TAX_UNIT),
+        native_entity=EntityType.PERSON,
+        condition_entities=(
+            EntityType.PERSON,
+            EntityType.HOUSEHOLD,
+            EntityType.TAX_UNIT,
+        ),
         support_family=VariableSupportFamily.ZERO_INFLATED_POSITIVE,
         derived_from=(
             "qualified_dividend_income",
@@ -127,31 +263,55 @@ VARIABLE_SEMANTIC_SPECS: dict[str, VariableSemanticSpec] = {
         notes="Ordinary dividend totals are derived from the qualified and non-qualified atomic basis.",
     ),
     "qualified_dividend_income": VariableSemanticSpec(
-        native_entity=EntityType.TAX_UNIT,
-        condition_entities=(EntityType.HOUSEHOLD, EntityType.TAX_UNIT),
+        native_entity=EntityType.PERSON,
+        condition_entities=(
+            EntityType.PERSON,
+            EntityType.HOUSEHOLD,
+            EntityType.TAX_UNIT,
+        ),
         support_family=VariableSupportFamily.ZERO_INFLATED_POSITIVE,
         donor_match_strategy=DonorMatchStrategy.ZERO_INFLATED_POSITIVE,
+        preferred_condition_vars=PUF_IRS_TAX_PREFERRED_CONDITION_VARS,
+        supplemental_shared_condition_vars=PUF_IRS_TAX_SUPPLEMENTAL_SHARED_CONDITION_VARS,
     ),
     "non_qualified_dividend_income": VariableSemanticSpec(
-        native_entity=EntityType.TAX_UNIT,
-        condition_entities=(EntityType.HOUSEHOLD, EntityType.TAX_UNIT),
+        native_entity=EntityType.PERSON,
+        condition_entities=(
+            EntityType.PERSON,
+            EntityType.HOUSEHOLD,
+            EntityType.TAX_UNIT,
+        ),
         support_family=VariableSupportFamily.ZERO_INFLATED_POSITIVE,
         donor_match_strategy=DonorMatchStrategy.ZERO_INFLATED_POSITIVE,
+        preferred_condition_vars=PUF_IRS_TAX_PREFERRED_CONDITION_VARS,
+        supplemental_shared_condition_vars=PUF_IRS_TAX_SUPPLEMENTAL_SHARED_CONDITION_VARS,
     ),
     "taxable_interest_income": VariableSemanticSpec(
-        native_entity=EntityType.TAX_UNIT,
-        condition_entities=(EntityType.HOUSEHOLD, EntityType.TAX_UNIT),
+        native_entity=EntityType.PERSON,
+        condition_entities=(
+            EntityType.PERSON,
+            EntityType.HOUSEHOLD,
+            EntityType.TAX_UNIT,
+        ),
         support_family=VariableSupportFamily.ZERO_INFLATED_POSITIVE,
         donor_match_strategy=DonorMatchStrategy.ZERO_INFLATED_POSITIVE,
+        preferred_condition_vars=PUF_IRS_TAX_PREFERRED_CONDITION_VARS,
+        supplemental_shared_condition_vars=PUF_IRS_TAX_SUPPLEMENTAL_SHARED_CONDITION_VARS,
     ),
     "tax_exempt_interest_income": VariableSemanticSpec(
-        native_entity=EntityType.TAX_UNIT,
-        condition_entities=(EntityType.HOUSEHOLD, EntityType.TAX_UNIT),
+        native_entity=EntityType.PERSON,
+        condition_entities=(
+            EntityType.PERSON,
+            EntityType.HOUSEHOLD,
+            EntityType.TAX_UNIT,
+        ),
         support_family=VariableSupportFamily.ZERO_INFLATED_POSITIVE,
         donor_match_strategy=DonorMatchStrategy.ZERO_INFLATED_POSITIVE,
+        preferred_condition_vars=PUF_IRS_TAX_PREFERRED_CONDITION_VARS,
+        supplemental_shared_condition_vars=PUF_IRS_TAX_SUPPLEMENTAL_SHARED_CONDITION_VARS,
     ),
     "taxable_pension_income": VariableSemanticSpec(
-        native_entity=EntityType.TAX_UNIT,
+        native_entity=EntityType.PERSON,
         condition_entities=(
             EntityType.PERSON,
             EntityType.HOUSEHOLD,
@@ -159,9 +319,11 @@ VARIABLE_SEMANTIC_SPECS: dict[str, VariableSemanticSpec] = {
         ),
         support_family=VariableSupportFamily.ZERO_INFLATED_POSITIVE,
         donor_match_strategy=DonorMatchStrategy.ZERO_INFLATED_POSITIVE,
+        preferred_condition_vars=PUF_IRS_TAX_PREFERRED_CONDITION_VARS,
+        supplemental_shared_condition_vars=PUF_IRS_TAX_SUPPLEMENTAL_SHARED_CONDITION_VARS,
     ),
     "taxable_social_security": VariableSemanticSpec(
-        native_entity=EntityType.TAX_UNIT,
+        native_entity=EntityType.PERSON,
         condition_entities=(
             EntityType.PERSON,
             EntityType.HOUSEHOLD,
@@ -169,6 +331,7 @@ VARIABLE_SEMANTIC_SPECS: dict[str, VariableSemanticSpec] = {
         ),
         support_family=VariableSupportFamily.ZERO_INFLATED_POSITIVE,
         donor_match_strategy=DonorMatchStrategy.ZERO_INFLATED_POSITIVE,
+        preferred_condition_vars=PUF_IRS_TAX_PREFERRED_CONDITION_VARS,
     ),
     "state_income_tax_paid": VariableSemanticSpec(
         native_entity=EntityType.TAX_UNIT,
@@ -201,16 +364,54 @@ VARIABLE_SEMANTIC_SPECS: dict[str, VariableSemanticSpec] = {
         donor_match_strategy=DonorMatchStrategy.ZERO_INFLATED_POSITIVE,
     ),
     "student_loan_interest": VariableSemanticSpec(
-        native_entity=EntityType.TAX_UNIT,
-        condition_entities=(EntityType.HOUSEHOLD, EntityType.TAX_UNIT),
+        native_entity=EntityType.PERSON,
+        condition_entities=(
+            EntityType.PERSON,
+            EntityType.HOUSEHOLD,
+            EntityType.TAX_UNIT,
+        ),
         support_family=VariableSupportFamily.ZERO_INFLATED_POSITIVE,
         donor_match_strategy=DonorMatchStrategy.ZERO_INFLATED_POSITIVE,
+        preferred_condition_vars=PUF_IRS_TAX_PREFERRED_CONDITION_VARS,
     ),
     "ira_deduction": VariableSemanticSpec(
         native_entity=EntityType.TAX_UNIT,
         condition_entities=(EntityType.HOUSEHOLD, EntityType.TAX_UNIT),
         support_family=VariableSupportFamily.ZERO_INFLATED_POSITIVE,
         donor_match_strategy=DonorMatchStrategy.ZERO_INFLATED_POSITIVE,
+    ),
+    "health_savings_account_ald": VariableSemanticSpec(
+        native_entity=EntityType.PERSON,
+        condition_entities=(
+            EntityType.PERSON,
+            EntityType.HOUSEHOLD,
+            EntityType.TAX_UNIT,
+        ),
+        support_family=VariableSupportFamily.ZERO_INFLATED_POSITIVE,
+        donor_match_strategy=DonorMatchStrategy.ZERO_INFLATED_POSITIVE,
+        preferred_condition_vars=PUF_IRS_TAX_PREFERRED_CONDITION_VARS,
+    ),
+    "self_employed_health_insurance_ald": VariableSemanticSpec(
+        native_entity=EntityType.PERSON,
+        condition_entities=(
+            EntityType.PERSON,
+            EntityType.HOUSEHOLD,
+            EntityType.TAX_UNIT,
+        ),
+        support_family=VariableSupportFamily.ZERO_INFLATED_POSITIVE,
+        donor_match_strategy=DonorMatchStrategy.ZERO_INFLATED_POSITIVE,
+        preferred_condition_vars=PUF_IRS_TAX_PREFERRED_CONDITION_VARS,
+    ),
+    "self_employed_pension_contribution_ald": VariableSemanticSpec(
+        native_entity=EntityType.PERSON,
+        condition_entities=(
+            EntityType.PERSON,
+            EntityType.HOUSEHOLD,
+            EntityType.TAX_UNIT,
+        ),
+        support_family=VariableSupportFamily.ZERO_INFLATED_POSITIVE,
+        donor_match_strategy=DonorMatchStrategy.ZERO_INFLATED_POSITIVE,
+        preferred_condition_vars=PUF_IRS_TAX_PREFERRED_CONDITION_VARS,
     ),
     "qualified_dividend_share": VariableSemanticSpec(
         native_entity=EntityType.TAX_UNIT,
@@ -226,9 +427,50 @@ VARIABLE_SEMANTIC_SPECS: dict[str, VariableSemanticSpec] = {
         ),
         support_family=VariableSupportFamily.ZERO_INFLATED_POSITIVE,
         donor_match_strategy=DonorMatchStrategy.ZERO_INFLATED_POSITIVE,
+        preferred_condition_vars=PUF_IRS_TAX_PREFERRED_CONDITION_VARS,
+        supplemental_shared_condition_vars=PUF_IRS_TAX_SUPPLEMENTAL_SHARED_CONDITION_VARS,
+    ),
+    "employment_income": VariableSemanticSpec(
+        native_entity=EntityType.PERSON,
+        condition_entities=(
+            EntityType.PERSON,
+            EntityType.HOUSEHOLD,
+            EntityType.TAX_UNIT,
+        ),
+        donor_transform=FrameSemanticTransform(
+            name="normalize_employment_income_donor_values",
+            required_columns=("employment_income", "age"),
+            transform_frame=normalize_employment_income_donor_values,
+            stage=SemanticTransformStage.POST_DONOR_INTEGRATION,
+            notes=(
+                "Employment income donor overrides should not assign positive wages "
+                "to minors and should suppress implausible retired-senior wages "
+                "when retirement Social Security is present without ESI."
+            ),
+        ),
+        donor_check=FrameSemanticCheck(
+            name="minor_positive_employment_income",
+            required_columns=("employment_income", "age"),
+            violation_mask=minor_positive_employment_income_mask,
+            stage=SemanticTransformStage.POST_DONOR_INTEGRATION,
+            notes="Minors should not retain positive donor-overridden wage income.",
+        ),
+        notes=(
+            "Employment income donor overrides should respect basic wage support "
+            "semantics for minors and retired seniors."
+        ),
     ),
     "self_employment_income": VariableSemanticSpec(
-        native_entity=EntityType.TAX_UNIT,
+        native_entity=EntityType.PERSON,
+        condition_entities=(
+            EntityType.PERSON,
+            EntityType.HOUSEHOLD,
+            EntityType.TAX_UNIT,
+        ),
+        notes="Self-employment income is signed and must preserve losses.",
+    ),
+    "rental_income_positive": VariableSemanticSpec(
+        native_entity=EntityType.PERSON,
         condition_entities=(
             EntityType.PERSON,
             EntityType.HOUSEHOLD,
@@ -236,6 +478,59 @@ VARIABLE_SEMANTIC_SPECS: dict[str, VariableSemanticSpec] = {
         ),
         support_family=VariableSupportFamily.ZERO_INFLATED_POSITIVE,
         donor_match_strategy=DonorMatchStrategy.ZERO_INFLATED_POSITIVE,
+        preferred_condition_vars=RENTAL_INCOME_COMPONENT_PREFERRED_CONDITION_VARS,
+        notes=(
+            "Positive rental-income support should track geography and property-like "
+            "predictors instead of generic labor-income conditioning."
+        ),
+    ),
+    "rental_income_negative": VariableSemanticSpec(
+        native_entity=EntityType.PERSON,
+        condition_entities=(
+            EntityType.PERSON,
+            EntityType.HOUSEHOLD,
+            EntityType.TAX_UNIT,
+        ),
+        support_family=VariableSupportFamily.ZERO_INFLATED_POSITIVE,
+        donor_match_strategy=DonorMatchStrategy.ZERO_INFLATED_POSITIVE,
+        preferred_condition_vars=RENTAL_INCOME_COMPONENT_PREFERRED_CONDITION_VARS,
+        notes=(
+            "Rental-loss support should track geography and property-like "
+            "predictors instead of generic labor-income conditioning."
+        ),
+    ),
+    "partnership_s_corp_income": VariableSemanticSpec(
+        native_entity=EntityType.PERSON,
+        condition_entities=(
+            EntityType.PERSON,
+            EntityType.HOUSEHOLD,
+            EntityType.TAX_UNIT,
+        ),
+        support_family=VariableSupportFamily.ZERO_INFLATED_POSITIVE,
+        donor_match_strategy=DonorMatchStrategy.ZERO_INFLATED_POSITIVE,
+        preferred_condition_vars=PUF_IRS_TAX_PREFERRED_CONDITION_VARS,
+        supplemental_shared_condition_vars=PUF_IRS_TAX_SUPPLEMENTAL_SHARED_CONDITION_VARS,
+    ),
+    "has_medicaid": VariableSemanticSpec(
+        projection_aggregation=ProjectionAggregation.MAX,
+        support_family=VariableSupportFamily.ZERO_INFLATED_POSITIVE,
+        donor_match_strategy=DonorMatchStrategy.ZERO_INFLATED_POSITIVE,
+        notes="Binary proxy for Medicaid participation on the CPS scaffold.",
+    ),
+    "public_assistance": VariableSemanticSpec(
+        support_family=VariableSupportFamily.ZERO_INFLATED_POSITIVE,
+        donor_match_strategy=DonorMatchStrategy.ZERO_INFLATED_POSITIVE,
+        notes="Public assistance amounts are sparse and should preserve support.",
+    ),
+    "ssi": VariableSemanticSpec(
+        support_family=VariableSupportFamily.ZERO_INFLATED_POSITIVE,
+        donor_match_strategy=DonorMatchStrategy.ZERO_INFLATED_POSITIVE,
+        notes="SSI amounts are sparse and should preserve support.",
+    ),
+    "social_security": VariableSemanticSpec(
+        support_family=VariableSupportFamily.ZERO_INFLATED_POSITIVE,
+        donor_match_strategy=DonorMatchStrategy.ZERO_INFLATED_POSITIVE,
+        notes="Reported Social Security amounts are sparse and support-sensitive.",
     ),
     "snap": VariableSemanticSpec(
         native_entity=EntityType.SPM_UNIT,
@@ -262,6 +557,13 @@ DIVIDEND_COMPOSITION_MODEL_COLUMNS = (
     "dividend_income",
     DIVIDEND_SHARE_COLUMN,
 )
+SOCIAL_SECURITY_COMPONENT_COLUMNS = (
+    "social_security_retirement",
+    "social_security_disability",
+    "social_security_survivors",
+    "social_security_dependents",
+)
+SOCIAL_SECURITY_UNCLASSIFIED_COLUMN = "social_security_unclassified"
 
 
 def _nonnegative_series(frame: pd.DataFrame, column: str) -> pd.Series:
@@ -322,6 +624,60 @@ def normalize_dividend_columns(frame: pd.DataFrame) -> pd.DataFrame:
     return result
 
 
+def normalize_social_security_columns(frame: pd.DataFrame) -> pd.DataFrame:
+    """Normalize Social Security onto an explicit component basis.
+
+    Preserve any observed component columns and store any remaining gross
+    Social Security residual as an explicit unclassified amount.
+    """
+    result = frame.copy()
+    component_series = {
+        column: _nonnegative_series(result, column)
+        for column in SOCIAL_SECURITY_COMPONENT_COLUMNS
+    }
+    component_sum = sum(component_series.values(), start=pd.Series(0.0, index=result.index))
+    existing_unclassified = _nonnegative_series(result, SOCIAL_SECURITY_UNCLASSIFIED_COLUMN)
+
+    if "social_security" in result.columns:
+        observed_total = _nonnegative_series(result, "social_security")
+    else:
+        observed_total = _nonnegative_series(result, "gross_social_security")
+    normalized_total = pd.Series(
+        np.maximum(
+            observed_total.to_numpy(dtype=float),
+            (component_sum + existing_unclassified).to_numpy(dtype=float),
+        ),
+        index=result.index,
+        dtype=float,
+    )
+    unclassified = pd.Series(
+        np.maximum(
+            normalized_total.to_numpy(dtype=float) - component_sum.to_numpy(dtype=float),
+            0.0,
+        ),
+        index=result.index,
+        dtype=float,
+    )
+
+    for column, values in component_series.items():
+        result[column] = values.astype(float)
+    result[SOCIAL_SECURITY_UNCLASSIFIED_COLUMN] = unclassified.astype(float)
+    result["social_security"] = normalized_total.astype(float)
+    return result
+
+
+def social_security_retirement_compatible_amount(frame: pd.DataFrame) -> pd.Series:
+    """Return the PE-compatible retirement component amount.
+
+    PolicyEngine models total Social Security as the sum of the four component
+    variables. Until we have a better backward allocator, treat any
+    unclassified residual as retirement at compatibility points.
+    """
+    retirement = _nonnegative_series(frame, "social_security_retirement")
+    unclassified = _nonnegative_series(frame, SOCIAL_SECURITY_UNCLASSIFIED_COLUMN)
+    return (retirement + unclassified).astype(float)
+
+
 def add_dividend_composition_features(frame: pd.DataFrame) -> pd.DataFrame:
     """Add dividend total/share features derived from the atomic basis."""
     result = normalize_dividend_columns(frame)
@@ -371,8 +727,12 @@ def restore_dividend_components_from_composition(frame: pd.DataFrame) -> pd.Data
 
 
 DIVIDEND_DONOR_BLOCK_SPEC = DonorImputationBlockSpec(
-    native_entity=EntityType.TAX_UNIT,
-    condition_entities=(EntityType.HOUSEHOLD, EntityType.TAX_UNIT),
+    native_entity=EntityType.PERSON,
+    condition_entities=(
+        EntityType.PERSON,
+        EntityType.HOUSEHOLD,
+        EntityType.TAX_UNIT,
+    ),
     model_variables=DIVIDEND_COMPOSITION_MODEL_COLUMNS,
     restored_variables=DIVIDEND_COMPONENT_COLUMNS,
     match_strategies={
@@ -382,7 +742,6 @@ DIVIDEND_DONOR_BLOCK_SPEC = DonorImputationBlockSpec(
     prepare_frame=add_dividend_composition_features,
     restore_frame=restore_dividend_components_from_composition,
 )
-
 
 def variable_semantic_spec_for(variable_name: str) -> VariableSemanticSpec:
     """Return semantic metadata for one variable."""
@@ -492,10 +851,11 @@ def is_projected_condition_var_compatible(
 ) -> bool:
     """Return whether a condition variable remains compatible after projection."""
     condition_entity = variable_semantic_spec_for(condition_variable).native_entity
+    record_entity = getattr(EntityType, "RECORD", None)
     allowed_entities = {
         entity
         for entity in allowed_condition_entities
-        if entity is not EntityType.RECORD
+        if entity is not record_entity
     }
     if condition_entity in allowed_entities:
         return True
@@ -538,6 +898,38 @@ def donor_imputation_blocks(
         block_spec.model_variables
         for block_spec in donor_imputation_block_specs(variable_names)
     )
+
+
+def apply_donor_variable_semantics(
+    frame: pd.DataFrame,
+    variable_names: Iterable[str],
+) -> pd.DataFrame:
+    """Apply post-imputation semantic guards for donor-integrated variables."""
+    transforms: list[FrameSemanticTransform] = []
+    seen_transform_names: set[str] = set()
+    for variable_name in tuple(dict.fromkeys(variable_names)):
+        transform = variable_semantic_spec_for(variable_name).donor_transform
+        if transform is None or transform.name in seen_transform_names:
+            continue
+        transforms.append(transform)
+        seen_transform_names.add(transform.name)
+    return apply_frame_semantic_transforms(frame, transforms)
+
+
+def validate_donor_variable_semantics(
+    frame: pd.DataFrame,
+    variable_names: Iterable[str],
+) -> tuple[FrameSemanticCheckReport, ...]:
+    """Evaluate semantic checks for donor-integrated variables."""
+    checks: list[FrameSemanticCheck] = []
+    seen_check_names: set[str] = set()
+    for variable_name in tuple(dict.fromkeys(variable_names)):
+        check = variable_semantic_spec_for(variable_name).donor_check
+        if check is None or check.name in seen_check_names:
+            continue
+        checks.append(check)
+        seen_check_names.add(check.name)
+    return evaluate_frame_semantic_checks(frame, checks)
 
 
 def resolve_variable_semantic_capabilities(

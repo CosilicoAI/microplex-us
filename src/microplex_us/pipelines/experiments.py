@@ -15,11 +15,22 @@ from microplex_us.pipelines.artifacts import (
     build_and_save_versioned_us_microplex_from_source_providers,
     save_versioned_us_microplex_build_result,
 )
+from microplex_us.pipelines.backfill_pe_native_audit import (
+    backfill_us_pe_native_audit_bundles,
+)
+from microplex_us.pipelines.backfill_pe_native_scores import (
+    backfill_us_pe_native_scores_bundles,
+)
 from microplex_us.pipelines.performance import (
     USMicroplexPerformanceHarnessConfig,
     USMicroplexPerformanceSession,
 )
-from microplex_us.pipelines.registry import FrontierMetric, USMicroplexRunRegistryEntry
+from microplex_us.pipelines.registry import (
+    FrontierMetric,
+    USMicroplexRunRegistryEntry,
+    load_us_microplex_run_registry,
+    select_us_microplex_frontier_entry,
+)
 from microplex_us.pipelines.us import USMicroplexBuildConfig
 from microplex_us.policyengine.harness import (
     PolicyEngineUSComparisonCache,
@@ -153,6 +164,50 @@ def default_us_source_mix_experiments(
     return tuple(experiments)
 
 
+def build_us_n_synthetic_sweep_experiments(
+    experiment: USMicroplexSourceExperimentSpec,
+    n_synthetic_values: tuple[int, ...] | list[int],
+    *,
+    name_template: str = "{base_name}-n{n_synthetic}",
+) -> tuple[USMicroplexSourceExperimentSpec, ...]:
+    """Expand one experiment into a deterministic n_synthetic sweep."""
+    if not n_synthetic_values:
+        raise ValueError(
+            "build_us_n_synthetic_sweep_experiments requires at least one n_synthetic value"
+        )
+
+    base_config = experiment.config or USMicroplexBuildConfig()
+    seen_values: set[int] = set()
+    sweep_experiments: list[USMicroplexSourceExperimentSpec] = []
+    for raw_value in n_synthetic_values:
+        n_synthetic = int(raw_value)
+        if n_synthetic <= 0:
+            raise ValueError("n_synthetic sweep values must be positive integers")
+        if n_synthetic in seen_values:
+            raise ValueError(
+                f"Duplicate n_synthetic sweep value supplied: {n_synthetic}"
+            )
+        seen_values.add(n_synthetic)
+        sweep_experiments.append(
+            USMicroplexSourceExperimentSpec(
+                name=name_template.format(
+                    base_name=experiment.name,
+                    n_synthetic=n_synthetic,
+                ),
+                providers=experiment.providers,
+                config=replace(base_config, n_synthetic=n_synthetic),
+                queries=dict(experiment.queries),
+                metadata={
+                    **dict(experiment.metadata),
+                    "base_experiment_name": experiment.name,
+                    "n_synthetic": n_synthetic,
+                    "sweep_parameter": "n_synthetic",
+                },
+            )
+        )
+    return tuple(sweep_experiments)
+
+
 @dataclass(frozen=True)
 class USMicroplexExperimentResult:
     """Persistable summary for one completed source-mix experiment."""
@@ -199,9 +254,24 @@ class USMicroplexExperimentResult:
                     if self.artifact_paths.policyengine_dataset is not None
                     else None
                 ),
+                "data_flow_snapshot": (
+                    str(self.artifact_paths.data_flow_snapshot)
+                    if self.artifact_paths.data_flow_snapshot is not None
+                    else None
+                ),
                 "policyengine_harness": (
                     str(self.artifact_paths.policyengine_harness)
                     if self.artifact_paths.policyengine_harness is not None
+                    else None
+                ),
+                "policyengine_native_scores": (
+                    str(self.artifact_paths.policyengine_native_scores)
+                    if self.artifact_paths.policyengine_native_scores is not None
+                    else None
+                ),
+                "policyengine_native_audit": (
+                    str(self.artifact_paths.policyengine_native_audit)
+                    if self.artifact_paths.policyengine_native_audit is not None
                     else None
                 ),
                 "run_registry": (
@@ -252,9 +322,24 @@ class USMicroplexExperimentResult:
                     if artifact_paths.get("policyengine_dataset") is not None
                     else None
                 ),
+                data_flow_snapshot=(
+                    Path(artifact_paths["data_flow_snapshot"])
+                    if artifact_paths.get("data_flow_snapshot") is not None
+                    else None
+                ),
                 policyengine_harness=(
                     Path(artifact_paths["policyengine_harness"])
                     if artifact_paths.get("policyengine_harness") is not None
+                    else None
+                ),
+                policyengine_native_scores=(
+                    Path(artifact_paths["policyengine_native_scores"])
+                    if artifact_paths.get("policyengine_native_scores") is not None
+                    else None
+                ),
+                policyengine_native_audit=(
+                    Path(artifact_paths["policyengine_native_audit"])
+                    if artifact_paths.get("policyengine_native_audit") is not None
                     else None
                 ),
                 run_registry=(
@@ -414,6 +499,12 @@ def run_us_microplex_source_experiments(
         and performance_harness_config.baseline_dataset is not None
     ):
         active_performance_session.warm_parity_cache(config=performance_harness_config)
+    batch_native_scoring = (
+        active_performance_session is not None
+        and performance_harness_config is not None
+        and performance_harness_config.evaluate_pe_native_loss
+        and len(experiments) > 1
+    )
 
     for experiment in experiments:
         harness_metadata = {
@@ -433,6 +524,8 @@ def run_us_microplex_source_experiments(
                 experiment,
                 performance_harness_config,
             )
+            if batch_native_scoring:
+                harness_config = replace(harness_config, evaluate_pe_native_loss=False)
             performance_result = active_performance_session.run(
                 list(experiment.providers),
                 config=harness_config,
@@ -447,6 +540,16 @@ def run_us_microplex_source_experiments(
                 policyengine_baseline_dataset=policyengine_baseline_dataset,
                 policyengine_harness_slices=policyengine_harness_slices,
                 policyengine_harness_metadata=harness_metadata,
+                precomputed_policyengine_harness_payload=(
+                    performance_result.parity_run.to_dict()
+                    if performance_result.parity_run is not None
+                    else None
+                ),
+                defer_policyengine_harness=performance_result.parity_run is None,
+                precomputed_policyengine_native_scores=(
+                    None if batch_native_scoring else performance_result.pe_native_scores
+                ),
+                defer_policyengine_native_score=batch_native_scoring,
                 run_registry_path=run_registry_path,
                 run_registry_metadata=registry_metadata,
             )
@@ -477,6 +580,26 @@ def run_us_microplex_source_experiments(
             )
         )
 
+    resolved_run_registry_path = Path(run_registry_path or output_root / "run_registry.jsonl")
+    if batch_native_scoring:
+        backfill_us_pe_native_scores_bundles(
+            [result.artifact_paths.output_dir for result in results],
+            baseline_dataset=performance_harness_config.baseline_dataset,
+            policyengine_us_data_repo=performance_harness_config.policyengine_us_data_repo,
+            rebuild_registry=True,
+        )
+        backfill_us_pe_native_audit_bundles(
+            [result.artifact_paths.output_dir for result in results],
+            policyengine_us_data_repo=performance_harness_config.policyengine_us_data_repo,
+        )
+        results = list(
+            _refresh_experiment_results_from_registry(
+                results,
+                run_registry_path=resolved_run_registry_path,
+                frontier_metric=frontier_metric,
+            )
+        )
+
     report = USMicroplexExperimentReport(
         output_root=output_root,
         frontier_metric=frontier_metric,
@@ -487,13 +610,175 @@ def run_us_microplex_source_experiments(
     return report
 
 
+def run_us_microplex_n_synthetic_sweep(
+    experiment: USMicroplexSourceExperimentSpec,
+    n_synthetic_values: tuple[int, ...] | list[int],
+    output_root: str | Path,
+    *,
+    name_template: str = "{base_name}-n{n_synthetic}",
+    frontier_metric: FrontierMetric = "candidate_composite_parity_loss",
+    policyengine_target_provider: Any | None = None,
+    policyengine_baseline_dataset: str | Path | None = None,
+    policyengine_comparison_cache: PolicyEngineUSComparisonCache | None = None,
+    policyengine_harness_slices: (
+        tuple[PolicyEngineUSHarnessSlice, ...] | list[PolicyEngineUSHarnessSlice] | None
+    ) = None,
+    policyengine_harness_metadata: dict[str, Any] | None = None,
+    run_registry_path: str | Path | None = None,
+    report_path: str | Path | None = None,
+    performance_harness_config: USMicroplexPerformanceHarnessConfig | None = None,
+    performance_session: USMicroplexPerformanceSession | None = None,
+    metadata: dict[str, Any] | None = None,
+) -> USMicroplexExperimentReport:
+    """Run one base experiment across multiple n_synthetic values."""
+    sweep_experiments = build_us_n_synthetic_sweep_experiments(
+        experiment,
+        n_synthetic_values,
+        name_template=name_template,
+    )
+    sweep_values = [spec.metadata["n_synthetic"] for spec in sweep_experiments]
+    return run_us_microplex_source_experiments(
+        sweep_experiments,
+        output_root,
+        frontier_metric=frontier_metric,
+        policyengine_target_provider=policyengine_target_provider,
+        policyengine_baseline_dataset=policyengine_baseline_dataset,
+        policyengine_comparison_cache=policyengine_comparison_cache,
+        policyengine_harness_slices=policyengine_harness_slices,
+        policyengine_harness_metadata=policyengine_harness_metadata,
+        run_registry_path=run_registry_path,
+        report_path=report_path,
+        performance_harness_config=performance_harness_config,
+        performance_session=performance_session,
+        metadata={
+            "base_experiment_name": experiment.name,
+            "n_synthetic_values": sweep_values,
+            "sweep_parameter": "n_synthetic",
+            **dict(metadata or {}),
+        },
+    )
+
+
 def _resolve_experiment_performance_config(
     experiment: USMicroplexSourceExperimentSpec,
     base_config: USMicroplexPerformanceHarnessConfig,
 ) -> USMicroplexPerformanceHarnessConfig:
     build_config = experiment.config or base_config.build_config
-    return replace(
+    resolved = replace(
         base_config,
         build_config=build_config,
         evaluate_parity=False,
     )
+    if build_config is None:
+        return resolved
+    return replace(
+        resolved,
+        n_synthetic=build_config.n_synthetic,
+        random_seed=build_config.random_seed,
+    )
+
+
+def _refresh_experiment_results_from_registry(
+    results: list[USMicroplexExperimentResult] | tuple[USMicroplexExperimentResult, ...],
+    *,
+    run_registry_path: str | Path,
+    frontier_metric: FrontierMetric,
+) -> tuple[USMicroplexExperimentResult, ...]:
+    registry_entries = load_us_microplex_run_registry(run_registry_path)
+    if not registry_entries:
+        return tuple(results)
+
+    frontier_entry = select_us_microplex_frontier_entry(
+        run_registry_path,
+        metric=frontier_metric,
+    )
+    entries_by_artifact_id = {entry.artifact_id: entry for entry in registry_entries}
+    run_index_path = Path(run_registry_path).parent / "run_index.duckdb"
+
+    refreshed: list[USMicroplexExperimentResult] = []
+    for result in results:
+        version_id = result.artifact_paths.version_id or result.artifact_paths.output_dir.name
+        current_entry = entries_by_artifact_id.get(version_id)
+        current_value = (
+            getattr(current_entry, frontier_metric, None)
+            if current_entry is not None
+            else None
+        )
+        frontier_value = (
+            getattr(frontier_entry, frontier_metric, None)
+            if frontier_entry is not None
+            else None
+        )
+        frontier_delta = (
+            current_value - frontier_value
+            if current_value is not None and frontier_value is not None
+            else None
+        )
+        refreshed.append(
+            replace(
+                result,
+                artifact_paths=_refresh_experiment_artifact_paths(
+                    result.artifact_paths,
+                    run_registry_path=Path(run_registry_path),
+                    run_index_path=run_index_path,
+                ),
+                current_entry=current_entry,
+                frontier_entry=frontier_entry,
+                frontier_delta=frontier_delta,
+            )
+        )
+    return tuple(refreshed)
+
+
+def _refresh_experiment_artifact_paths(
+    artifact_paths: USMicroplexArtifactPaths,
+    *,
+    run_registry_path: Path,
+    run_index_path: Path,
+) -> USMicroplexArtifactPaths:
+    manifest_payload = _load_optional_json(artifact_paths.manifest)
+    artifacts = dict(manifest_payload.get("artifacts", {})) if manifest_payload else {}
+    artifact_root = artifact_paths.output_dir
+    return replace(
+        artifact_paths,
+        data_flow_snapshot=_resolve_optional_result_artifact_path(
+            artifact_root,
+            artifacts.get("data_flow_snapshot"),
+            fallback="data_flow_snapshot.json",
+        ),
+        policyengine_harness=_resolve_optional_result_artifact_path(
+            artifact_root,
+            artifacts.get("policyengine_harness"),
+        ),
+        policyengine_native_scores=_resolve_optional_result_artifact_path(
+            artifact_root,
+            artifacts.get("policyengine_native_scores"),
+        ),
+        policyengine_native_audit=_resolve_optional_result_artifact_path(
+            artifact_root,
+            artifacts.get("policyengine_native_audit"),
+        ),
+        run_registry=Path(run_registry_path),
+        run_index_db=run_index_path,
+    )
+
+
+def _resolve_optional_result_artifact_path(
+    artifact_root: Path,
+    artifact_name: str | None,
+    *,
+    fallback: str | None = None,
+) -> Path | None:
+    if artifact_name:
+        path = artifact_root / artifact_name
+        return path if path.exists() else None
+    if fallback is None:
+        return None
+    fallback_path = artifact_root / fallback
+    return fallback_path if fallback_path.exists() else None
+
+
+def _load_optional_json(path: Path) -> dict[str, Any] | None:
+    if not path.exists():
+        return None
+    return json.loads(path.read_text())

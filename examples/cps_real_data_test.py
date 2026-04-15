@@ -27,9 +27,7 @@ from sklearn.preprocessing import StandardScaler
 
 # Add paths for local development
 PACKAGE_ROOT = Path(__file__).resolve().parents[1]
-WORKSPACE_ROOT = PACKAGE_ROOT.parent
 sys.path.insert(0, str(PACKAGE_ROOT / "src"))
-sys.path.insert(0, str(WORKSPACE_ROOT / "microplex" / "benchmarks"))
 
 from microplex import HierarchicalSynthesizer, HouseholdSchema, Reweighter
 

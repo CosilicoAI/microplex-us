@@ -7,12 +7,23 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
+import pandas as pd
 from microplex.targets import (
+    BenchmarkComparison,
+    BenchmarkResult,
     TargetAggregation,
+    TargetMetric,
     TargetProvider,
     TargetQuery,
     TargetSet,
     TargetSpec,
+    UnsupportedTarget,
+    build_benchmark_result,
+    compare_benchmark_results,
+    max_abs_relative_error,
+    mean_abs_relative_error,
+    normalize_metric_payload,
+    relative_error_ratio,
 )
 
 from microplex_us.policyengine.us import (
@@ -23,6 +34,13 @@ from microplex_us.policyengine.us import (
     infer_policyengine_us_variable_bindings,
     load_policyengine_us_entity_tables,
     materialize_policyengine_us_variables_safely,
+)
+
+POLICYENGINE_US_BENCHMARK_GROUP_FIELDS = (
+    "source",
+    "geographic_level",
+    "variable",
+    "is_count",
 )
 
 
@@ -195,10 +213,7 @@ class PolicyEngineUSTargetEvaluation:
 
     @property
     def relative_error(self) -> float | None:
-        target_value = float(self.target.value)
-        if target_value == 0.0:
-            return None
-        return (self.actual_value - target_value) / abs(target_value)
+        return relative_error_ratio(self.actual_value, float(self.target.value))
 
 
 @dataclass
@@ -214,29 +229,67 @@ class PolicyEngineUSTargetEvaluationReport:
 
     @property
     def mean_abs_relative_error(self) -> float | None:
-        errors = [
-            abs(evaluation.relative_error)
-            for evaluation in self.evaluations
-            if evaluation.relative_error is not None
-        ]
-        if not errors:
+        metrics = self.benchmark_metrics
+        if not metrics:
             return None
-        return float(np.mean(errors))
+        return mean_abs_relative_error(metrics)
 
     @property
     def max_abs_relative_error(self) -> float | None:
-        errors = [
-            abs(evaluation.relative_error)
-            for evaluation in self.evaluations
-            if evaluation.relative_error is not None
-        ]
-        if not errors:
+        metrics = self.benchmark_metrics
+        if not metrics:
             return None
-        return float(max(errors))
+        return max_abs_relative_error(metrics)
 
     @property
     def supported_target_count(self) -> int:
         return len(self.evaluations)
+
+    @property
+    def benchmark_metrics(self) -> list[TargetMetric]:
+        return [
+            normalize_metric_payload(
+                {
+                    "name": evaluation.target.name,
+                    "estimate": evaluation.actual_value,
+                    "target": float(evaluation.target.value),
+                    "metadata": {
+                        "source": evaluation.target.source,
+                        "entity": evaluation.target.entity.value,
+                        "measure": evaluation.target.measure,
+                        "aggregation": evaluation.target.aggregation.value,
+                        **dict(evaluation.target.metadata),
+                    },
+                }
+            )
+            for evaluation in self.evaluations
+        ]
+
+    @property
+    def benchmark_result(self) -> BenchmarkResult:
+        return build_benchmark_result(
+            label=self.label,
+            time_period=self.period,
+            metrics=self.benchmark_metrics,
+            target_count=(len(self.evaluations) + len(self.unsupported_targets)),
+            unsupported_targets=[
+                UnsupportedTarget(
+                    name=target.name,
+                    reason="unsupported",
+                    metadata={
+                        "entity": target.entity.value,
+                        "measure": target.measure,
+                        "aggregation": target.aggregation.value,
+                        **dict(target.metadata),
+                    },
+                )
+                for target in self.unsupported_targets
+            ],
+            metadata={
+                "materialized_variables": list(self.materialized_variables),
+                "materialization_failures": dict(self.materialization_failures),
+            },
+        )
 
 
 @dataclass
@@ -247,14 +300,52 @@ class PolicyEngineUSTargetComparisonReport:
     baseline: PolicyEngineUSTargetEvaluationReport | None = None
 
     @property
-    def mean_abs_relative_error_delta(self) -> float | None:
+    def benchmark_comparison(self) -> BenchmarkComparison | None:
         if self.baseline is None:
             return None
-        candidate_error = self.candidate.mean_abs_relative_error
-        baseline_error = self.baseline.mean_abs_relative_error
-        if candidate_error is None or baseline_error is None:
+        try:
+            return compare_benchmark_results(
+                self.candidate.benchmark_result,
+                self.baseline.benchmark_result,
+                group_fields=POLICYENGINE_US_BENCHMARK_GROUP_FIELDS,
+            )
+        except ValueError:
             return None
-        return candidate_error - baseline_error
+
+    @property
+    def mean_abs_relative_error_delta(self) -> float | None:
+        comparison = self.benchmark_comparison
+        if comparison is None:
+            return None
+        return comparison.mean_abs_relative_error_delta
+
+    @property
+    def target_win_rate(self) -> float | None:
+        comparison = self.benchmark_comparison
+        if comparison is None:
+            return None
+        return comparison.target_win_rate
+
+    @property
+    def common_target_count(self) -> int:
+        comparison = self.benchmark_comparison
+        if comparison is None:
+            return 0
+        return comparison.common_target_count
+
+    @property
+    def deltas(self):
+        comparison = self.benchmark_comparison
+        if comparison is None:
+            return []
+        return comparison.deltas
+
+    @property
+    def grouped_summaries(self):
+        comparison = self.benchmark_comparison
+        if comparison is None:
+            return {}
+        return comparison.grouped_summaries
 
 
 def evaluate_policyengine_us_target_set(
@@ -266,6 +357,7 @@ def evaluate_policyengine_us_target_set(
     simulation_cls: Any | None = None,
     label: str = "candidate",
     strict_materialization: bool = False,
+    direct_override_variables: tuple[str, ...] = (),
 ) -> PolicyEngineUSTargetEvaluationReport:
     """Evaluate canonical targets against a PE-US-style entity-table bundle."""
     target_list = _normalize_target_list(targets)
@@ -282,6 +374,7 @@ def evaluate_policyengine_us_target_set(
         period=period,
         dataset_year=dataset_year,
         simulation_cls=simulation_cls,
+        direct_override_variables=direct_override_variables,
     )
     working_tables = materialization_result.tables
     bindings = {
@@ -297,6 +390,11 @@ def evaluate_policyengine_us_target_set(
         target_list,
         working_tables,
         bindings,
+    )
+    supported_targets = _filter_targets_with_supported_dataset_geography(
+        supported_targets,
+        tables=working_tables,
+        bindings=bindings,
     )
     supported_target_keys = {
         _target_cache_key(target)
@@ -401,6 +499,7 @@ def evaluate_policyengine_us_target_sets(
     simulation_cls: Any | None = None,
     label: str = "candidate",
     strict_materialization: bool = False,
+    direct_override_variables: tuple[str, ...] = (),
 ) -> dict[str, PolicyEngineUSTargetEvaluationReport]:
     """Evaluate the union of multiple target sets once, then slice the report back out."""
     union_targets: list[TargetSpec] = []
@@ -426,6 +525,7 @@ def evaluate_policyengine_us_target_sets(
         simulation_cls=simulation_cls,
         label=label,
         strict_materialization=strict_materialization,
+        direct_override_variables=direct_override_variables,
     )
     return {
         name: slice_policyengine_us_target_evaluation_report(union_report, target_set)
@@ -442,6 +542,7 @@ def evaluate_policyengine_us_target_query(
     simulation_cls: Any | None = None,
     label: str = "candidate",
     strict_materialization: bool = False,
+    direct_override_variables: tuple[str, ...] = (),
 ) -> PolicyEngineUSTargetEvaluationReport:
     """Load canonical targets from a provider and evaluate them against tables."""
     target_set = provider.load_target_set(query)
@@ -454,6 +555,7 @@ def evaluate_policyengine_us_target_query(
         simulation_cls=simulation_cls,
         label=label,
         strict_materialization=strict_materialization,
+        direct_override_variables=direct_override_variables,
     )
 
 
@@ -469,6 +571,7 @@ def compare_policyengine_us_target_query_to_baseline(
     baseline_label: str = "policyengine_baseline",
     strict_materialization: bool = True,
     cache: PolicyEngineUSComparisonCache | None = None,
+    candidate_direct_override_variables: tuple[str, ...] = (),
 ) -> PolicyEngineUSTargetComparisonReport:
     """Compare a candidate PE-US bundle to a baseline PE dataset on one target slice."""
     target_set = (
@@ -509,6 +612,7 @@ def compare_policyengine_us_target_query_to_baseline(
         simulation_cls=simulation_cls,
         label=candidate_label,
         strict_materialization=strict_materialization,
+        direct_override_variables=candidate_direct_override_variables,
     )
     return PolicyEngineUSTargetComparisonReport(
         candidate=candidate_report,
@@ -594,6 +698,63 @@ def _evaluate_target_value(
         bindings=bindings,
         household_weights=household_weights,
     )
+
+
+def _filter_targets_with_supported_dataset_geography(
+    targets: list[TargetSpec],
+    *,
+    tables: PolicyEngineUSEntityTableBundle,
+    bindings: dict[str, PolicyEngineUSVariableBinding],
+) -> list[TargetSpec]:
+    """Drop targets that require geography the current dataset only encodes as defaults."""
+    if _has_nondefault_bound_feature_values(
+        "congressional_district_geoid",
+        tables=tables,
+        bindings=bindings,
+    ):
+        return targets
+
+    return [
+        target
+        for target in targets
+        if not any(
+            target_filter.feature == "congressional_district_geoid"
+            for target_filter in target.filters
+        )
+    ]
+
+
+def _has_nondefault_bound_feature_values(
+    feature: str,
+    *,
+    tables: PolicyEngineUSEntityTableBundle,
+    bindings: dict[str, PolicyEngineUSVariableBinding],
+) -> bool:
+    binding = bindings.get(feature)
+    if binding is None:
+        return False
+
+    column = binding.column or feature
+    try:
+        table = tables.table_for(binding.entity)
+    except KeyError:
+        return False
+    if column not in table.columns:
+        return False
+
+    values = pd.Series(table[column]).dropna()
+    if values.empty:
+        return False
+
+    numeric_values = pd.to_numeric(values, errors="coerce")
+    if numeric_values.notna().all():
+        return bool((numeric_values != 0).any())
+
+    normalized = values.astype(str).str.strip()
+    nondefault_values = normalized[
+        ~normalized.isin({"", "0", "0.0", "nan", "None", "<NA>"})
+    ]
+    return not nondefault_values.empty
 
 
 def _evaluate_linear_target(

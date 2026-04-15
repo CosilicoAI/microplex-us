@@ -51,12 +51,14 @@ def append_us_microplex_run_index_entry(
                 source_names_json,
                 rows_seed,
                 rows_synthetic,
-                rows_calibrated,
-                weights_nonzero,
-                weights_total,
-                candidate_mean_abs_relative_error,
-                baseline_mean_abs_relative_error,
-                mean_abs_relative_error_delta,
+            rows_calibrated,
+            weights_nonzero,
+            weights_total,
+            full_oracle_capped_mean_abs_relative_error,
+            full_oracle_mean_abs_relative_error,
+            candidate_mean_abs_relative_error,
+            baseline_mean_abs_relative_error,
+            mean_abs_relative_error_delta,
                 candidate_composite_parity_loss,
                 baseline_composite_parity_loss,
                 composite_parity_loss_delta,
@@ -77,7 +79,7 @@ def append_us_microplex_run_index_entry(
                 improved_delta_frontier,
                 improved_composite_frontier,
                 metadata_json
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             _run_row(entry),
         )
@@ -172,6 +174,8 @@ def select_us_microplex_frontier_index_row(
 ) -> dict[str, Any] | None:
     """Select the best indexed run by one frontier metric."""
     metric_column = {
+        "full_oracle_capped_mean_abs_relative_error": "full_oracle_capped_mean_abs_relative_error",
+        "full_oracle_mean_abs_relative_error": "full_oracle_mean_abs_relative_error",
         "candidate_composite_parity_loss": "candidate_composite_parity_loss",
         "candidate_mean_abs_relative_error": "candidate_mean_abs_relative_error",
         "mean_abs_relative_error_delta": "mean_abs_relative_error_delta",
@@ -315,6 +319,8 @@ def _ensure_schema(conn: duckdb.DuckDBPyConnection) -> None:
             rows_calibrated BIGINT,
             weights_nonzero DOUBLE,
             weights_total DOUBLE,
+            full_oracle_capped_mean_abs_relative_error DOUBLE,
+            full_oracle_mean_abs_relative_error DOUBLE,
             candidate_mean_abs_relative_error DOUBLE,
             baseline_mean_abs_relative_error DOUBLE,
             mean_abs_relative_error_delta DOUBLE,
@@ -340,6 +346,18 @@ def _ensure_schema(conn: duckdb.DuckDBPyConnection) -> None:
             metadata_json TEXT
         )
         """
+    )
+    _ensure_column(
+        conn,
+        "runs",
+        "full_oracle_capped_mean_abs_relative_error",
+        "DOUBLE",
+    )
+    _ensure_column(
+        conn,
+        "runs",
+        "full_oracle_mean_abs_relative_error",
+        "DOUBLE",
     )
     conn.execute(
         """
@@ -417,6 +435,8 @@ def _run_row(entry: USMicroplexRunRegistryEntry) -> tuple[Any, ...]:
         _int_or_none(entry.rows.get("calibrated")),
         _float_or_none(entry.weights.get("nonzero")),
         _float_or_none(entry.weights.get("total")),
+        _float_or_none(entry.full_oracle_capped_mean_abs_relative_error),
+        _float_or_none(entry.full_oracle_mean_abs_relative_error),
         _float_or_none(entry.candidate_mean_abs_relative_error),
         _float_or_none(entry.baseline_mean_abs_relative_error),
         _float_or_none(entry.mean_abs_relative_error_delta),
@@ -440,6 +460,23 @@ def _run_row(entry: USMicroplexRunRegistryEntry) -> tuple[Any, ...]:
         entry.improved_delta_frontier,
         entry.improved_composite_frontier,
         _json_text(entry.metadata),
+    )
+
+
+def _ensure_column(
+    conn: duckdb.DuckDBPyConnection,
+    table_name: str,
+    column_name: str,
+    column_type: str,
+) -> None:
+    existing = {
+        str(row[1])
+        for row in conn.execute(f"PRAGMA table_info('{table_name}')").fetchall()
+    }
+    if column_name in existing:
+        return
+    conn.execute(
+        f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_type}"
     )
 
 

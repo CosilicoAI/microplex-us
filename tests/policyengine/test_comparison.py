@@ -15,6 +15,7 @@ from microplex.targets import (
     TargetFilter,
     TargetQuery,
     TargetSpec,
+    normalize_metric_payload,
 )
 
 import microplex_us.policyengine.comparison as comparison_module
@@ -31,6 +32,10 @@ from microplex_us.policyengine import (
     evaluate_policyengine_us_target_set,
     load_policyengine_us_entity_tables,
     write_policyengine_us_time_period_dataset,
+)
+from microplex_us.policyengine.comparison import (
+    PolicyEngineUSTargetEvaluation,
+    PolicyEngineUSTargetEvaluationReport,
 )
 
 
@@ -275,6 +280,46 @@ def test_evaluate_policyengine_us_target_set_scores_count_sum_and_mean():
     }
 
 
+def test_policyengine_us_benchmark_metrics_delegate_to_shared_normalization():
+    target = TargetSpec(
+        name="zero_target_snap",
+        entity=EntityType.HOUSEHOLD,
+        value=0.0,
+        period=2024,
+        measure="snap",
+        aggregation="sum",
+        source="test",
+        metadata={"geographic_level": "national"},
+    )
+    report = PolicyEngineUSTargetEvaluationReport(
+        label="candidate",
+        period=2024,
+        evaluations=[
+            PolicyEngineUSTargetEvaluation(
+                target=target,
+                actual_value=2.5,
+            )
+        ],
+    )
+
+    assert report.benchmark_metrics == [
+        normalize_metric_payload(
+            {
+                "name": "zero_target_snap",
+                "estimate": 2.5,
+                "target": 0.0,
+                "metadata": {
+                    "source": "test",
+                    "entity": EntityType.HOUSEHOLD.value,
+                    "measure": "snap",
+                    "aggregation": "sum",
+                    "geographic_level": "national",
+                },
+            }
+        )
+    ]
+
+
 def test_evaluate_policyengine_us_target_set_materializes_missing_variables(tmp_path):
     base_tables = _sample_tables()
     tables = PolicyEngineUSEntityTableBundle(
@@ -425,6 +470,123 @@ def test_evaluate_policyengine_us_target_set_skips_failed_materializations(tmp_p
     assert [target.name for target in report.unsupported_targets] == ["income_tax_total"]
 
 
+def test_evaluate_policyengine_us_target_set_marks_district_targets_unsupported_when_district_geography_materializes_to_defaults():
+    base_tables = _sample_tables()
+    tables = PolicyEngineUSEntityTableBundle(
+        households=base_tables.households,
+        persons=base_tables.persons,
+        tax_units=base_tables.tax_units,
+        spm_units=base_tables.spm_units,
+        families=base_tables.families,
+        marital_units=base_tables.marital_units,
+    )
+
+    class FakeEntity:
+        def __init__(self, key: str):
+            self.key = key
+
+    class FakeVariable:
+        def __init__(self, entity: FakeEntity, formulas: dict[str, object] | None = None):
+            self.entity = entity
+            self.formulas = formulas or {}
+
+        def is_input_variable(self) -> bool:
+            return not self.formulas
+
+    class FakeTaxBenefitSystem:
+        variables = {
+            "state_fips": FakeVariable(FakeEntity("household")),
+            "congressional_district_geoid": FakeVariable(
+                FakeEntity("household"),
+                formulas={"2024": object()},
+            ),
+        }
+
+    class FakeSimulation:
+        tax_benefit_system = FakeTaxBenefitSystem()
+
+        def __init__(self, dataset, dataset_year=None, **kwargs):
+            assert Path(dataset).exists()
+            _ = dataset_year, kwargs
+
+        def calculate(self, variable, period=None, map_to=None):
+            assert period == 2024
+            assert map_to is None
+            if variable == "congressional_district_geoid":
+                return np.array([0.0, 0.0])
+            raise KeyError(variable)
+
+    report = evaluate_policyengine_us_target_set(
+        tables,
+        [
+            TargetSpec(
+                name="district_households",
+                entity=EntityType.HOUSEHOLD,
+                value=2.0,
+                period=2024,
+                aggregation="count",
+                filters=(
+                    TargetFilter(
+                        "congressional_district_geoid",
+                        FilterOperator.EQ,
+                        601,
+                    ),
+                ),
+            )
+        ],
+        period=2024,
+        dataset_year=2024,
+        simulation_cls=FakeSimulation,
+    )
+
+    assert report.materialized_variables == ("congressional_district_geoid",)
+    assert report.supported_target_count == 0
+    assert len(report.evaluations) == 0
+    assert [target.name for target in report.unsupported_targets] == [
+        "district_households"
+    ]
+
+
+def test_evaluate_policyengine_us_target_set_supports_district_targets_with_real_district_geography():
+    base_tables = _sample_tables()
+    tables = PolicyEngineUSEntityTableBundle(
+        households=base_tables.households.assign(
+            congressional_district_geoid=np.array([601, 3601])
+        ),
+        persons=base_tables.persons,
+        tax_units=base_tables.tax_units,
+        spm_units=base_tables.spm_units,
+        families=base_tables.families,
+        marital_units=base_tables.marital_units,
+    )
+
+    report = evaluate_policyengine_us_target_set(
+        tables,
+        [
+            TargetSpec(
+                name="district_households",
+                entity=EntityType.HOUSEHOLD,
+                value=2.0,
+                period=2024,
+                aggregation="count",
+                filters=(
+                    TargetFilter(
+                        "congressional_district_geoid",
+                        FilterOperator.EQ,
+                        601,
+                    ),
+                ),
+            )
+        ],
+        period=2024,
+    )
+
+    assert report.materialized_variables == ()
+    assert report.supported_target_count == 1
+    assert not report.unsupported_targets
+    assert report.evaluations[0].actual_value == 2.0
+
+
 def test_evaluate_policyengine_us_target_set_raises_on_strict_materialization_failure(
     tmp_path,
 ):
@@ -491,7 +653,7 @@ def test_evaluate_policyengine_us_target_set_raises_on_strict_materialization_fa
         )
 
 
-def test_evaluate_policyengine_us_target_set_marks_cross_entity_constraints_unsupported():
+def test_evaluate_policyengine_us_target_set_supports_person_to_tax_unit_count_filters():
     report = evaluate_policyengine_us_target_set(
         _sample_tables(),
         [
@@ -509,9 +671,11 @@ def test_evaluate_policyengine_us_target_set_marks_cross_entity_constraints_unsu
         period=2024,
     )
 
-    assert report.supported_target_count == 0
-    assert len(report.evaluations) == 0
-    assert [target.name for target in report.unsupported_targets] == ["adult_tax_units"]
+    assert report.supported_target_count == 1
+    assert len(report.evaluations) == 1
+    assert report.evaluations[0].target.name == "adult_tax_units"
+    assert report.evaluations[0].actual_value == pytest.approx(3.0)
+    assert report.unsupported_targets == []
 
 
 def test_evaluate_policyengine_us_target_set_batches_supported_constraint_compilation(
@@ -603,6 +767,59 @@ def test_compare_policyengine_us_target_query_to_baseline(tmp_path):
     assert report.candidate.mean_abs_relative_error == pytest.approx(0.18)
     assert report.baseline.mean_abs_relative_error == 0.0
     assert report.mean_abs_relative_error_delta == pytest.approx(0.18)
+
+
+def test_policyengine_us_comparison_report_uses_common_target_intersection():
+    shared_target = TargetSpec(
+        name="shared",
+        entity=EntityType.HOUSEHOLD,
+        value=10.0,
+        period=2024,
+        measure="snap",
+        aggregation="sum",
+        source="snap",
+    )
+    candidate_only_target = TargetSpec(
+        name="candidate_only",
+        entity=EntityType.HOUSEHOLD,
+        value=10.0,
+        period=2024,
+        measure="snap",
+        aggregation="sum",
+        source="snap",
+    )
+    baseline_only_target = TargetSpec(
+        name="baseline_only",
+        entity=EntityType.HOUSEHOLD,
+        value=10.0,
+        period=2024,
+        measure="snap",
+        aggregation="sum",
+        source="snap",
+    )
+
+    report = PolicyEngineUSTargetComparisonReport(
+        candidate=PolicyEngineUSTargetEvaluationReport(
+            label="candidate",
+            period=2024,
+            evaluations=[
+                PolicyEngineUSTargetEvaluation(target=shared_target, actual_value=8.0),
+                PolicyEngineUSTargetEvaluation(target=candidate_only_target, actual_value=100.0),
+            ],
+        ),
+        baseline=PolicyEngineUSTargetEvaluationReport(
+            label="baseline",
+            period=2024,
+            evaluations=[
+                PolicyEngineUSTargetEvaluation(target=shared_target, actual_value=9.0),
+                PolicyEngineUSTargetEvaluation(target=baseline_only_target, actual_value=0.0),
+            ],
+        ),
+    )
+
+    assert report.common_target_count == 1
+    assert report.mean_abs_relative_error_delta == pytest.approx(0.1)
+    assert report.target_win_rate == 0.0
 
 
 def test_compare_policyengine_us_target_query_to_baseline_evaluates_baseline_first(

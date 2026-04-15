@@ -23,6 +23,7 @@ from microplex_us.policyengine import (
     PolicyEngineUSEntityTableBundle,
     PolicyEngineUSHarnessRun,
     PolicyEngineUSHarnessSlice,
+    PolicyEngineUSHarnessSliceResult,
     PolicyEngineUSMaterializationError,
     build_policyengine_us_time_period_arrays,
     default_policyengine_us_db_all_target_slices,
@@ -31,6 +32,11 @@ from microplex_us.policyengine import (
     evaluate_policyengine_us_harness,
     filter_nonempty_policyengine_us_harness_slices,
     write_policyengine_us_time_period_dataset,
+)
+from microplex_us.policyengine.comparison import (
+    PolicyEngineUSTargetComparisonReport,
+    PolicyEngineUSTargetEvaluation,
+    PolicyEngineUSTargetEvaluationReport,
 )
 
 
@@ -196,11 +202,14 @@ def test_evaluate_policyengine_us_harness_scores_candidate_against_baseline(tmp_
     assert len(run.slice_results) == 2
     assert run.mean_abs_relative_error_delta is not None
     assert run.mean_abs_relative_error_delta < 0.0
+    assert run.benchmark_suite.mean_abs_relative_error_delta is not None
+    assert run.benchmark_suite.mean_abs_relative_error_delta < 0.0
     assert run.candidate_composite_parity_loss is not None
     assert run.baseline_composite_parity_loss is not None
     assert run.composite_parity_loss_delta is not None
     assert run.composite_parity_loss_delta < 0.0
     assert run.slice_win_rate == 1.0
+    assert run.benchmark_suite.slice_win_rate == 1.0
     assert run.target_win_rate == 1.0
     assert run.supported_target_rate == 1.0
     assert run.tag_summaries["national"]["supported_target_rate"] == 1.0
@@ -271,6 +280,90 @@ def test_policyengine_us_harness_run_round_trips_json(tmp_path):
     assert loaded.candidate_composite_parity_loss == run.candidate_composite_parity_loss
     assert payload["slices"][0]["summary"]["candidate_supported_target_count"] == 2
     assert payload["slices"][0]["summary"]["baseline_supported_target_count"] == 2
+
+
+def test_policyengine_us_harness_preserves_duplicate_target_names_across_slices():
+    target = TargetSpec(
+        name="population",
+        entity=EntityType.HOUSEHOLD,
+        value=100.0,
+        period=2024,
+        aggregation="count",
+        metadata={
+            "geo_level": "state",
+            "domain_variable": "age",
+        },
+    )
+    run = PolicyEngineUSHarnessRun(
+        candidate_label="candidate",
+        baseline_label="baseline",
+        period=2024,
+        slice_results=[
+            PolicyEngineUSHarnessSliceResult(
+                slice=PolicyEngineUSHarnessSlice(
+                    name="slice_a",
+                    query=TargetQuery(period=2024, names=("population",)),
+                ),
+                comparison=PolicyEngineUSTargetComparisonReport(
+                    candidate=PolicyEngineUSTargetEvaluationReport(
+                        label="candidate",
+                        period=2024,
+                        evaluations=[
+                            PolicyEngineUSTargetEvaluation(
+                                target=target,
+                                actual_value=100.0,
+                            )
+                        ],
+                    ),
+                    baseline=PolicyEngineUSTargetEvaluationReport(
+                        label="baseline",
+                        period=2024,
+                        evaluations=[
+                            PolicyEngineUSTargetEvaluation(
+                                target=target,
+                                actual_value=80.0,
+                            )
+                        ],
+                    ),
+                ),
+            ),
+            PolicyEngineUSHarnessSliceResult(
+                slice=PolicyEngineUSHarnessSlice(
+                    name="slice_b",
+                    query=TargetQuery(period=2024, names=("population",)),
+                ),
+                comparison=PolicyEngineUSTargetComparisonReport(
+                    candidate=PolicyEngineUSTargetEvaluationReport(
+                        label="candidate",
+                        period=2024,
+                        evaluations=[
+                            PolicyEngineUSTargetEvaluation(
+                                target=target,
+                                actual_value=50.0,
+                            )
+                        ],
+                    ),
+                    baseline=PolicyEngineUSTargetEvaluationReport(
+                        label="baseline",
+                        period=2024,
+                        evaluations=[
+                            PolicyEngineUSTargetEvaluation(
+                                target=target,
+                                actual_value=60.0,
+                            )
+                        ],
+                    ),
+                ),
+            ),
+        ],
+    )
+
+    cell_key = "geo=state|entity=household|aggregation=count|feature=household_count|domain=age"
+
+    assert run.candidate_micro_mean_abs_relative_error == pytest.approx(0.25)
+    assert run.baseline_micro_mean_abs_relative_error == pytest.approx(0.30)
+    assert run.attribute_cell_summaries[cell_key]["candidate_target_count"] == 2
+    assert run.attribute_cell_summaries[cell_key]["baseline_target_count"] == 2
 
 
 def test_evaluate_policyengine_us_harness_raises_on_strict_materialization_failure(
@@ -454,6 +547,117 @@ def test_evaluate_policyengine_us_harness_reuses_union_evaluation(tmp_path, monk
     ]
 
 
+def test_evaluate_policyengine_us_harness_passes_candidate_direct_override_variables(
+    tmp_path,
+    monkeypatch,
+):
+    provider = StaticTargetProvider(
+        TargetSet(
+            [
+                TargetSpec(
+                    name="snap_total",
+                    entity=EntityType.HOUSEHOLD,
+                    value=250.0,
+                    period=2024,
+                    measure="snap",
+                    aggregation="sum",
+                ),
+            ]
+        )
+    )
+    captured: list[tuple[str, ...]] = []
+    real_evaluate = comparison_module.evaluate_policyengine_us_target_sets
+
+    def record_evaluate(*args, **kwargs):
+        captured.append(tuple(kwargs.get("direct_override_variables", ())))
+        return real_evaluate(*args, **kwargs)
+
+    monkeypatch.setattr(
+        comparison_module,
+        "evaluate_policyengine_us_target_sets",
+        record_evaluate,
+    )
+    monkeypatch.setattr(
+        harness_module,
+        "evaluate_policyengine_us_target_sets",
+        record_evaluate,
+    )
+
+    evaluate_policyengine_us_harness(
+        _candidate_tables(),
+        provider,
+        [
+            PolicyEngineUSHarnessSlice(
+                name="snap",
+                query=TargetQuery(period=2024, names=("snap_total",)),
+            ),
+        ],
+        baseline_dataset=_baseline_dataset(tmp_path),
+        dataset_year=2024,
+        candidate_direct_override_variables=("snap", "ssi"),
+    )
+
+    assert captured == [("snap", "ssi")]
+
+
+def test_evaluate_policyengine_us_harness_excludes_zero_common_slices_from_suite(
+    tmp_path,
+):
+    provider = StaticTargetProvider(
+        TargetSet(
+            [
+                TargetSpec(
+                    name="ca_households",
+                    entity=EntityType.HOUSEHOLD,
+                    value=2.0,
+                    period=2024,
+                    aggregation="count",
+                    filters=(TargetFilter("state_fips", FilterOperator.EQ, 6),),
+                ),
+                TargetSpec(
+                    name="district_households",
+                    entity=EntityType.HOUSEHOLD,
+                    value=2.0,
+                    period=2024,
+                    aggregation="count",
+                    filters=(
+                        TargetFilter(
+                            "congressional_district_geoid",
+                            FilterOperator.EQ,
+                            601,
+                        ),
+                    ),
+                ),
+            ]
+        )
+    )
+
+    run = evaluate_policyengine_us_harness(
+        _candidate_tables(),
+        provider,
+        [
+            PolicyEngineUSHarnessSlice(
+                name="state",
+                query=TargetQuery(period=2024, names=("ca_households",)),
+                tags=("local", "state"),
+            ),
+            PolicyEngineUSHarnessSlice(
+                name="district",
+                query=TargetQuery(period=2024, names=("district_households",)),
+                tags=("local", "district"),
+            ),
+        ],
+        baseline_dataset=_baseline_dataset(tmp_path),
+        dataset_year=2024,
+        strict_materialization=False,
+    )
+
+    assert len(run.slice_results) == 2
+    assert run.slice_results[1].comparison.benchmark_comparison is None
+    assert [result.slice.name for result in run.benchmark_suite.slice_results] == ["state"]
+    assert run.metadata["excluded_slice_names"] == ["district"]
+
+
 def test_default_policyengine_us_db_harness_slices_tracks_provider_filters():
     slices = default_policyengine_us_db_harness_slices(
         period=2024,
@@ -502,7 +706,7 @@ def test_default_policyengine_us_db_parity_slices_track_tags_and_filters():
     assert slices[0].tags == ("parity", "local", "state", "programs")
     assert slices[0].query.provider_filters == {
         "reform_id": 3,
-        "variables": ["snap"],
+        "variables": ["household_count"],
         "domain_variable_values": ["snap"],
         "geo_levels": ["state"],
     }

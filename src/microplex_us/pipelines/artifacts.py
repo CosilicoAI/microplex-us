@@ -9,11 +9,25 @@ from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from typing import Any
 
+import pandas as pd
 from microplex.core import SourceProvider, SourceQuery
-from microplex.targets import TargetProvider
+from microplex.targets import (
+    TargetProvider,
+    assert_valid_benchmark_artifact_manifest,
+)
 
+from microplex_us.pipelines.data_flow_snapshot import (
+    write_us_microplex_data_flow_snapshot,
+)
 from microplex_us.pipelines.index_db import (
     append_us_microplex_run_index_entry,
+)
+from microplex_us.pipelines.pe_native_scores import (
+    compute_us_pe_native_scores,
+)
+from microplex_us.pipelines.summarize_child_tax_unit_agi_drift import (
+    DEFAULT_VARIABLES as DEFAULT_CHILD_TAX_UNIT_AGI_DRIFT_VARIABLES,
+    summarize_child_tax_unit_agi_drift,
 )
 from microplex_us.pipelines.registry import (
     FrontierMetric,
@@ -26,6 +40,7 @@ from microplex_us.pipelines.us import (
     USMicroplexBuildConfig,
     USMicroplexBuildResult,
     USMicroplexPipeline,
+    USMicroplexTargets,
     build_us_microplex,
 )
 from microplex_us.policyengine.harness import (
@@ -54,7 +69,11 @@ class USMicroplexArtifactPaths:
     version_id: str | None = None
     synthesizer: Path | None = None
     policyengine_dataset: Path | None = None
+    data_flow_snapshot: Path | None = None
     policyengine_harness: Path | None = None
+    policyengine_native_scores: Path | None = None
+    policyengine_native_audit: Path | None = None
+    child_tax_unit_agi_drift: Path | None = None
     run_registry: Path | None = None
     run_index_db: Path | None = None
 
@@ -70,6 +89,182 @@ class USMicroplexVersionedBuildArtifacts:
     frontier_delta: float | None = None
 
 
+def replay_us_microplex_policyengine_stage_from_artifact(
+    artifact_dir: str | Path,
+    *,
+    config_overrides: dict[str, Any] | None = None,
+) -> USMicroplexBuildResult:
+    """Replay calibration/export inputs from a saved artifact without raw ETL.
+
+    This reloads saved seed and synthetic rows, applies optional runtime config
+    overrides, and reruns the downstream calibration stage from the saved
+    synthetic population. For PE-DB builds, this intentionally calls
+    ``calibrate_policyengine_tables`` even when ``calibration_backend="none"``
+    so PE target materialization and export-only variables stay on the same
+    path as a full pipeline build.
+    """
+
+    artifact_root = Path(artifact_dir).expanduser().resolve()
+    manifest_path = artifact_root / "manifest.json"
+    if not manifest_path.exists():
+        raise FileNotFoundError(f"Saved artifact manifest not found: {manifest_path}")
+
+    manifest = json.loads(manifest_path.read_text())
+    config_payload = dict(manifest.get("config", {}))
+    config_payload.update(dict(config_overrides or {}))
+    config = USMicroplexBuildConfig(**config_payload)
+
+    seed_data = pd.read_parquet(
+        _resolve_saved_artifact_file(artifact_root, manifest, "seed_data")
+    )
+    synthetic_data = pd.read_parquet(
+        _resolve_saved_artifact_file(artifact_root, manifest, "synthetic_data")
+    )
+    targets_payload = json.loads(
+        _resolve_saved_artifact_file(artifact_root, manifest, "targets").read_text()
+    )
+    targets = USMicroplexTargets(
+        marginal=dict(targets_payload.get("marginal", {})),
+        continuous=dict(targets_payload.get("continuous", {})),
+    )
+
+    pipeline = USMicroplexPipeline(config)
+    if config.policyengine_targets_db is not None:
+        synthetic_tables = pipeline.build_policyengine_entity_tables(synthetic_data)
+        policyengine_tables, calibrated_data, calibration_summary = (
+            pipeline.calibrate_policyengine_tables(synthetic_tables)
+        )
+    else:
+        calibrated_data, calibration_summary = pipeline.calibrate(
+            synthetic_data,
+            targets,
+        )
+        policyengine_tables = pipeline.build_policyengine_entity_tables(calibrated_data)
+
+    synthesis_metadata = dict(manifest.get("synthesis", {}))
+    synthesis_metadata["policyengine_stage_replay"] = {
+        "source_artifact_dir": str(artifact_root),
+        "source_manifest": str(manifest_path),
+        "config_override_keys": sorted((config_overrides or {}).keys()),
+    }
+
+    return USMicroplexBuildResult(
+        config=config,
+        seed_data=seed_data,
+        synthetic_data=synthetic_data,
+        calibrated_data=calibrated_data,
+        targets=targets,
+        calibration_summary=calibration_summary,
+        synthesis_metadata=synthesis_metadata,
+        policyengine_tables=policyengine_tables,
+    )
+
+
+def replay_and_save_versioned_us_microplex_policyengine_stage(
+    artifact_dir: str | Path,
+    output_root: str | Path | None = None,
+    *,
+    config_overrides: dict[str, Any] | None = None,
+    version_id: str | None = None,
+    frontier_metric: FrontierMetric = "candidate_composite_parity_loss",
+    policyengine_comparison_cache: PolicyEngineUSComparisonCache | None = None,
+    policyengine_target_provider: TargetProvider | None = None,
+    policyengine_baseline_dataset: str | Path | None = None,
+    policyengine_harness_slices: (
+        tuple[PolicyEngineUSHarnessSlice, ...] | list[PolicyEngineUSHarnessSlice] | None
+    ) = None,
+    policyengine_harness_metadata: dict[str, Any] | None = None,
+    policyengine_us_data_repo: str | Path | None = None,
+    defer_policyengine_harness: bool = True,
+    require_policyengine_native_score: bool = False,
+    defer_policyengine_native_score: bool = False,
+    precomputed_policyengine_harness_payload: dict[str, Any] | None = None,
+    precomputed_policyengine_native_scores: dict[str, Any] | None = None,
+    run_registry_path: str | Path | None = None,
+    run_index_path: str | Path | None = None,
+    run_registry_metadata: dict[str, Any] | None = None,
+) -> USMicroplexVersionedBuildArtifacts:
+    """Replay a saved artifact's policy stage and persist a new versioned bundle."""
+
+    artifact_root = Path(artifact_dir).expanduser().resolve()
+    build_result = replay_us_microplex_policyengine_stage_from_artifact(
+        artifact_root,
+        config_overrides=config_overrides,
+    )
+    resolved_output_root = (
+        Path(output_root).expanduser().resolve()
+        if output_root is not None
+        else artifact_root.parent
+    )
+    replay_metadata = {
+        "policyengine_stage_replay": True,
+        "source_artifact_dir": str(artifact_root),
+        **dict(run_registry_metadata or {}),
+    }
+    return _finalize_versioned_build_artifacts(
+        build_result,
+        output_root=resolved_output_root,
+        version_id=version_id,
+        frontier_metric=frontier_metric,
+        policyengine_comparison_cache=policyengine_comparison_cache,
+        policyengine_target_provider=policyengine_target_provider,
+        policyengine_baseline_dataset=policyengine_baseline_dataset,
+        policyengine_harness_slices=policyengine_harness_slices,
+        policyengine_harness_metadata=policyengine_harness_metadata,
+        policyengine_us_data_repo=policyengine_us_data_repo,
+        defer_policyengine_harness=defer_policyengine_harness,
+        require_policyengine_native_score=require_policyengine_native_score,
+        defer_policyengine_native_score=defer_policyengine_native_score,
+        precomputed_policyengine_harness_payload=precomputed_policyengine_harness_payload,
+        precomputed_policyengine_native_scores=precomputed_policyengine_native_scores,
+        run_registry_path=run_registry_path,
+        run_index_path=run_index_path,
+        run_registry_metadata=replay_metadata,
+    )
+
+
+def _resolve_saved_artifact_file(
+    artifact_root: Path,
+    manifest: dict[str, Any],
+    artifact_key: str,
+) -> Path:
+    artifacts = dict(manifest.get("artifacts", {}))
+    filename = artifacts.get(artifact_key)
+    if not filename:
+        filename = "targets.json" if artifact_key == "targets" else f"{artifact_key}.parquet"
+    path = Path(filename)
+    if not path.is_absolute():
+        path = artifact_root / path
+    if not path.exists():
+        raise FileNotFoundError(f"Saved artifact file not found: {path}")
+    return path
+
+
+def _summarize_child_tax_unit_agi_drift_ratios(
+    payload: dict[str, Any],
+    *,
+    stage: str,
+    variables: tuple[str, ...],
+) -> dict[str, Any]:
+    stages = dict(payload.get("stages", {}))
+    stage_payload = dict(stages.get(stage, {}))
+    subsets = dict(stage_payload.get("subsets", {}))
+    adults = dict(subsets.get("adults", {}))
+    dependents = dict(subsets.get("dependents_under_20", {}))
+    ratios: dict[str, float | None] = {}
+    for variable in variables:
+        adult_sum = adults.get(variable, {}).get("sum")
+        child_sum = dependents.get(variable, {}).get("sum")
+        if adult_sum in (None, 0):
+            ratios[variable] = None
+        else:
+            ratios[variable] = float(child_sum or 0.0) / float(adult_sum)
+    return {
+        "stage": stage,
+        "dependents_under_20_sum_share": ratios,
+    }
+
+
 def save_us_microplex_artifacts(
     result: USMicroplexBuildResult,
     output_dir: str | Path,
@@ -81,9 +276,17 @@ def save_us_microplex_artifacts(
         tuple[PolicyEngineUSHarnessSlice, ...] | list[PolicyEngineUSHarnessSlice] | None
     ) = None,
     policyengine_harness_metadata: dict[str, Any] | None = None,
+    policyengine_us_data_repo: str | Path | None = None,
+    defer_policyengine_harness: bool = False,
+    require_policyengine_native_score: bool = False,
+    defer_policyengine_native_score: bool = False,
+    precomputed_policyengine_harness_payload: dict[str, Any] | None = None,
+    precomputed_policyengine_native_scores: dict[str, Any] | None = None,
     run_registry_path: str | Path | None = None,
     run_index_path: str | Path | None = None,
     run_registry_metadata: dict[str, Any] | None = None,
+    enable_child_tax_unit_agi_drift: bool = False,
+    child_tax_unit_agi_drift_variables: tuple[str, ...] | None = None,
 ) -> USMicroplexArtifactPaths:
     """Persist a build result as a reproducible artifact bundle."""
     output_dir = Path(output_dir)
@@ -98,7 +301,9 @@ def save_us_microplex_artifacts(
     policyengine_dataset_path = (
         output_dir / "policyengine_us.h5" if result.policyengine_tables is not None else None
     )
+    data_flow_snapshot_path = output_dir / "data_flow_snapshot.json"
     policyengine_harness_path = None
+    policyengine_native_scores_path = None
     resolved_run_registry_path = None
     resolved_run_index_path = None
     harness_payload = None
@@ -143,8 +348,21 @@ def save_us_microplex_artifacts(
     )
 
     harness_summary = None
-    if (
-        result.policyengine_tables is not None
+    native_scores_payload = (
+        dict(precomputed_policyengine_native_scores)
+        if precomputed_policyengine_native_scores is not None
+        else None
+    )
+    if precomputed_policyengine_harness_payload is not None:
+        harness_payload = dict(precomputed_policyengine_harness_payload)
+        policyengine_harness_path = output_dir / "policyengine_harness.json"
+        policyengine_harness_path.write_text(
+            json.dumps(harness_payload, indent=2, sort_keys=True)
+        )
+        harness_summary = harness_payload.get("summary")
+    elif (
+        not defer_policyengine_harness
+        and result.policyengine_tables is not None
         and resolved_target_provider is not None
         and resolved_baseline_dataset is not None
         and resolved_harness_slices
@@ -166,6 +384,60 @@ def save_us_microplex_artifacts(
         harness_run.save(policyengine_harness_path)
         harness_payload = harness_run.to_dict()
         harness_summary = harness_payload["summary"]
+
+    if native_scores_payload is not None:
+        policyengine_native_scores_path = output_dir / "policyengine_native_scores.json"
+        policyengine_native_scores_path.write_text(
+            json.dumps(native_scores_payload, indent=2, sort_keys=True)
+        )
+    elif (
+        not defer_policyengine_native_score
+        and policyengine_dataset_path is not None
+        and resolved_baseline_dataset is not None
+    ):
+        try:
+            native_scores_payload = compute_us_pe_native_scores(
+                candidate_dataset_path=policyengine_dataset_path,
+                baseline_dataset_path=resolved_baseline_dataset,
+                period=result.config.policyengine_dataset_year or 2024,
+                policyengine_us_data_repo=policyengine_us_data_repo,
+            )
+            policyengine_native_scores_path = (
+                output_dir / "policyengine_native_scores.json"
+            )
+            policyengine_native_scores_path.write_text(
+                json.dumps(native_scores_payload, indent=2, sort_keys=True)
+            )
+        except Exception:
+            if require_policyengine_native_score:
+                raise
+
+    child_tax_unit_agi_drift_path = None
+    child_tax_unit_agi_drift_summary: dict[str, Any] | None = None
+    if enable_child_tax_unit_agi_drift:
+        try:
+            drift_path = output_dir / "child_tax_unit_agi_drift.json"
+            variables = (
+                child_tax_unit_agi_drift_variables
+                or DEFAULT_CHILD_TAX_UNIT_AGI_DRIFT_VARIABLES
+            )
+            payload = summarize_child_tax_unit_agi_drift(
+                output_dir,
+                variables=variables,
+            )
+            drift_path.write_text(
+                json.dumps(payload, indent=2, sort_keys=True)
+            )
+            child_tax_unit_agi_drift_path = drift_path
+            child_tax_unit_agi_drift_summary = _summarize_child_tax_unit_agi_drift_ratios(
+                payload,
+                stage="calibrated",
+                variables=variables,
+            )
+        except Exception as exc:  # pragma: no cover - diagnostic best-effort
+            child_tax_unit_agi_drift_summary = {
+                "error": f"{type(exc).__name__}: {exc}",
+            }
 
     manifest = {
         "created_at": datetime.now(UTC).isoformat(),
@@ -194,14 +466,32 @@ def save_us_microplex_artifacts(
             "policyengine_dataset": (
                 policyengine_dataset_path.name if policyengine_dataset_path else None
             ),
+            "data_flow_snapshot": data_flow_snapshot_path.name,
             "policyengine_harness": (
                 policyengine_harness_path.name if policyengine_harness_path else None
+            ),
+            "policyengine_native_scores": (
+                policyengine_native_scores_path.name
+                if policyengine_native_scores_path is not None
+                else None
             ),
         },
     }
     if harness_summary is not None:
         manifest["policyengine_harness"] = harness_summary
-    if harness_summary is not None:
+    if native_scores_payload is not None:
+        manifest["policyengine_native_scores"] = dict(
+            native_scores_payload.get("summary", {})
+        )
+    if child_tax_unit_agi_drift_path is not None:
+        manifest["artifacts"]["child_tax_unit_agi_drift"] = (
+            child_tax_unit_agi_drift_path.name
+        )
+    if child_tax_unit_agi_drift_summary is not None:
+        manifest.setdefault("diagnostics", {})[
+            "child_tax_unit_agi_drift"
+        ] = child_tax_unit_agi_drift_summary
+    if harness_summary is not None or native_scores_payload is not None:
         resolved_run_registry_path = Path(run_registry_path or output_dir.parent / "run_registry.jsonl")
         run_entry = build_us_microplex_run_registry_entry(
             artifact_dir=output_dir,
@@ -226,13 +516,51 @@ def save_us_microplex_artifacts(
             "improved_candidate_frontier": recorded_entry.improved_candidate_frontier,
             "improved_delta_frontier": recorded_entry.improved_delta_frontier,
             "improved_composite_frontier": recorded_entry.improved_composite_frontier,
-            "default_frontier_metric": "candidate_composite_parity_loss",
+            "improved_native_frontier": recorded_entry.improved_native_frontier,
+            "default_frontier_metric": (
+                "enhanced_cps_native_loss_delta"
+                if native_scores_payload is not None
+                else "candidate_composite_parity_loss"
+            ),
         }
         manifest["run_index"] = {
             "path": str(resolved_run_index_path),
             "artifact_id": recorded_entry.artifact_id,
         }
-    manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True))
+    write_us_microplex_data_flow_snapshot(
+        output_dir,
+        data_flow_snapshot_path,
+        manifest_payload=manifest,
+    )
+    assert_valid_benchmark_artifact_manifest(
+        manifest,
+        artifact_dir=output_dir,
+        manifest_path=manifest_path,
+        summary_section=(
+            "policyengine_harness" if harness_summary is not None else None
+        ),
+        required_artifact_keys=(
+            "seed_data",
+            "synthetic_data",
+            "calibrated_data",
+            "targets",
+            *(
+                ("policyengine_native_scores",)
+                if native_scores_payload is not None
+                else ()
+            ),
+        ),
+        required_summary_keys=(
+            (
+                "candidate_mean_abs_relative_error",
+                "baseline_mean_abs_relative_error",
+                "mean_abs_relative_error_delta",
+            )
+            if harness_summary is not None
+            else ()
+        ),
+    )
+    _write_json_atomically(manifest_path, manifest)
 
     return USMicroplexArtifactPaths(
         output_dir=output_dir,
@@ -244,7 +572,11 @@ def save_us_microplex_artifacts(
         manifest=manifest_path,
         synthesizer=synthesizer_path,
         policyengine_dataset=policyengine_dataset_path,
+        data_flow_snapshot=data_flow_snapshot_path,
         policyengine_harness=policyengine_harness_path,
+        policyengine_native_scores=policyengine_native_scores_path,
+        policyengine_native_audit=None,
+        child_tax_unit_agi_drift=child_tax_unit_agi_drift_path,
         run_registry=resolved_run_registry_path,
         run_index_db=resolved_run_index_path,
     )
@@ -262,9 +594,17 @@ def save_versioned_us_microplex_artifacts(
         tuple[PolicyEngineUSHarnessSlice, ...] | list[PolicyEngineUSHarnessSlice] | None
     ) = None,
     policyengine_harness_metadata: dict[str, Any] | None = None,
+    policyengine_us_data_repo: str | Path | None = None,
+    defer_policyengine_harness: bool = False,
+    require_policyengine_native_score: bool = False,
+    defer_policyengine_native_score: bool = False,
+    precomputed_policyengine_harness_payload: dict[str, Any] | None = None,
+    precomputed_policyengine_native_scores: dict[str, Any] | None = None,
     run_registry_path: str | Path | None = None,
     run_index_path: str | Path | None = None,
     run_registry_metadata: dict[str, Any] | None = None,
+    enable_child_tax_unit_agi_drift: bool = False,
+    child_tax_unit_agi_drift_variables: tuple[str, ...] | None = None,
 ) -> USMicroplexArtifactPaths:
     """Persist a build under a stable versioned directory beneath one output root."""
     output_root = Path(output_root)
@@ -282,9 +622,17 @@ def save_versioned_us_microplex_artifacts(
         policyengine_baseline_dataset=policyengine_baseline_dataset,
         policyengine_harness_slices=policyengine_harness_slices,
         policyengine_harness_metadata=policyengine_harness_metadata,
+        policyengine_us_data_repo=policyengine_us_data_repo,
+        defer_policyengine_harness=defer_policyengine_harness,
+        require_policyengine_native_score=require_policyengine_native_score,
+        defer_policyengine_native_score=defer_policyengine_native_score,
+        precomputed_policyengine_harness_payload=precomputed_policyengine_harness_payload,
+        precomputed_policyengine_native_scores=precomputed_policyengine_native_scores,
         run_registry_path=run_registry_path or output_root / "run_registry.jsonl",
         run_index_path=run_index_path or output_root,
         run_registry_metadata=run_registry_metadata,
+        enable_child_tax_unit_agi_drift=enable_child_tax_unit_agi_drift,
+        child_tax_unit_agi_drift_variables=child_tax_unit_agi_drift_variables,
     )
     return USMicroplexArtifactPaths(
         output_dir=paths.output_dir,
@@ -296,7 +644,11 @@ def save_versioned_us_microplex_artifacts(
         manifest=paths.manifest,
         synthesizer=paths.synthesizer,
         policyengine_dataset=paths.policyengine_dataset,
+        data_flow_snapshot=paths.data_flow_snapshot,
         policyengine_harness=paths.policyengine_harness,
+        policyengine_native_scores=paths.policyengine_native_scores,
+        policyengine_native_audit=paths.policyengine_native_audit,
+        child_tax_unit_agi_drift=paths.child_tax_unit_agi_drift,
         run_registry=paths.run_registry,
         run_index_db=paths.run_index_db,
     )
@@ -317,9 +669,17 @@ def build_and_save_versioned_us_microplex(
         tuple[PolicyEngineUSHarnessSlice, ...] | list[PolicyEngineUSHarnessSlice] | None
     ) = None,
     policyengine_harness_metadata: dict[str, Any] | None = None,
+    policyengine_us_data_repo: str | Path | None = None,
+    defer_policyengine_harness: bool = False,
+    require_policyengine_native_score: bool = False,
+    defer_policyengine_native_score: bool = False,
+    precomputed_policyengine_harness_payload: dict[str, Any] | None = None,
+    precomputed_policyengine_native_scores: dict[str, Any] | None = None,
     run_registry_path: str | Path | None = None,
     run_index_path: str | Path | None = None,
     run_registry_metadata: dict[str, Any] | None = None,
+    enable_child_tax_unit_agi_drift: bool = False,
+    child_tax_unit_agi_drift_variables: tuple[str, ...] | None = None,
 ) -> USMicroplexVersionedBuildArtifacts:
     """Build a US microplex dataset, save a versioned bundle, and report frontier gap."""
     build_result = build_us_microplex(persons, households, config=config)
@@ -333,9 +693,17 @@ def build_and_save_versioned_us_microplex(
         policyengine_baseline_dataset=policyengine_baseline_dataset,
         policyengine_harness_slices=policyengine_harness_slices,
         policyengine_harness_metadata=policyengine_harness_metadata,
+        policyengine_us_data_repo=policyengine_us_data_repo,
+        defer_policyengine_harness=defer_policyengine_harness,
+        require_policyengine_native_score=require_policyengine_native_score,
+        defer_policyengine_native_score=defer_policyengine_native_score,
+        precomputed_policyengine_harness_payload=precomputed_policyengine_harness_payload,
+        precomputed_policyengine_native_scores=precomputed_policyengine_native_scores,
         run_registry_path=run_registry_path,
         run_index_path=run_index_path,
         run_registry_metadata=run_registry_metadata,
+        enable_child_tax_unit_agi_drift=enable_child_tax_unit_agi_drift,
+        child_tax_unit_agi_drift_variables=child_tax_unit_agi_drift_variables,
     )
 
 
@@ -352,9 +720,17 @@ def save_versioned_us_microplex_build_result(
         tuple[PolicyEngineUSHarnessSlice, ...] | list[PolicyEngineUSHarnessSlice] | None
     ) = None,
     policyengine_harness_metadata: dict[str, Any] | None = None,
+    policyengine_us_data_repo: str | Path | None = None,
+    defer_policyengine_harness: bool = False,
+    require_policyengine_native_score: bool = False,
+    defer_policyengine_native_score: bool = False,
+    precomputed_policyengine_harness_payload: dict[str, Any] | None = None,
+    precomputed_policyengine_native_scores: dict[str, Any] | None = None,
     run_registry_path: str | Path | None = None,
     run_index_path: str | Path | None = None,
     run_registry_metadata: dict[str, Any] | None = None,
+    enable_child_tax_unit_agi_drift: bool = False,
+    child_tax_unit_agi_drift_variables: tuple[str, ...] | None = None,
 ) -> USMicroplexVersionedBuildArtifacts:
     """Save an already-built result as a versioned bundle and report frontier gap."""
     return _finalize_versioned_build_artifacts(
@@ -367,9 +743,17 @@ def save_versioned_us_microplex_build_result(
         policyengine_baseline_dataset=policyengine_baseline_dataset,
         policyengine_harness_slices=policyengine_harness_slices,
         policyengine_harness_metadata=policyengine_harness_metadata,
+        policyengine_us_data_repo=policyengine_us_data_repo,
+        defer_policyengine_harness=defer_policyengine_harness,
+        require_policyengine_native_score=require_policyengine_native_score,
+        defer_policyengine_native_score=defer_policyengine_native_score,
+        precomputed_policyengine_harness_payload=precomputed_policyengine_harness_payload,
+        precomputed_policyengine_native_scores=precomputed_policyengine_native_scores,
         run_registry_path=run_registry_path,
         run_index_path=run_index_path,
         run_registry_metadata=run_registry_metadata,
+        enable_child_tax_unit_agi_drift=enable_child_tax_unit_agi_drift,
+        child_tax_unit_agi_drift_variables=child_tax_unit_agi_drift_variables,
     )
 
 
@@ -388,9 +772,17 @@ def build_and_save_versioned_us_microplex_from_source_provider(
         tuple[PolicyEngineUSHarnessSlice, ...] | list[PolicyEngineUSHarnessSlice] | None
     ) = None,
     policyengine_harness_metadata: dict[str, Any] | None = None,
+    policyengine_us_data_repo: str | Path | None = None,
+    defer_policyengine_harness: bool = False,
+    require_policyengine_native_score: bool = False,
+    defer_policyengine_native_score: bool = False,
+    precomputed_policyengine_harness_payload: dict[str, Any] | None = None,
+    precomputed_policyengine_native_scores: dict[str, Any] | None = None,
     run_registry_path: str | Path | None = None,
     run_index_path: str | Path | None = None,
     run_registry_metadata: dict[str, Any] | None = None,
+    enable_child_tax_unit_agi_drift: bool = False,
+    child_tax_unit_agi_drift_variables: tuple[str, ...] | None = None,
 ) -> USMicroplexVersionedBuildArtifacts:
     """Build from one source provider, save a versioned bundle, and report frontier gap."""
     pipeline = USMicroplexPipeline(config)
@@ -405,9 +797,17 @@ def build_and_save_versioned_us_microplex_from_source_provider(
         policyengine_baseline_dataset=policyengine_baseline_dataset,
         policyengine_harness_slices=policyengine_harness_slices,
         policyengine_harness_metadata=policyengine_harness_metadata,
+        policyengine_us_data_repo=policyengine_us_data_repo,
+        defer_policyengine_harness=defer_policyengine_harness,
+        require_policyengine_native_score=require_policyengine_native_score,
+        defer_policyengine_native_score=defer_policyengine_native_score,
+        precomputed_policyengine_harness_payload=precomputed_policyengine_harness_payload,
+        precomputed_policyengine_native_scores=precomputed_policyengine_native_scores,
         run_registry_path=run_registry_path,
         run_index_path=run_index_path,
         run_registry_metadata=run_registry_metadata,
+        enable_child_tax_unit_agi_drift=enable_child_tax_unit_agi_drift,
+        child_tax_unit_agi_drift_variables=child_tax_unit_agi_drift_variables,
     )
 
 
@@ -426,9 +826,17 @@ def build_and_save_versioned_us_microplex_from_source_providers(
         tuple[PolicyEngineUSHarnessSlice, ...] | list[PolicyEngineUSHarnessSlice] | None
     ) = None,
     policyengine_harness_metadata: dict[str, Any] | None = None,
+    policyengine_us_data_repo: str | Path | None = None,
+    defer_policyengine_harness: bool = False,
+    require_policyengine_native_score: bool = False,
+    defer_policyengine_native_score: bool = False,
+    precomputed_policyengine_harness_payload: dict[str, Any] | None = None,
+    precomputed_policyengine_native_scores: dict[str, Any] | None = None,
     run_registry_path: str | Path | None = None,
     run_index_path: str | Path | None = None,
     run_registry_metadata: dict[str, Any] | None = None,
+    enable_child_tax_unit_agi_drift: bool = False,
+    child_tax_unit_agi_drift_variables: tuple[str, ...] | None = None,
 ) -> USMicroplexVersionedBuildArtifacts:
     """Build from multiple source providers, save a versioned bundle, and report frontier gap."""
     pipeline = USMicroplexPipeline(config)
@@ -443,9 +851,17 @@ def build_and_save_versioned_us_microplex_from_source_providers(
         policyengine_baseline_dataset=policyengine_baseline_dataset,
         policyengine_harness_slices=policyengine_harness_slices,
         policyengine_harness_metadata=policyengine_harness_metadata,
+        policyengine_us_data_repo=policyengine_us_data_repo,
+        defer_policyengine_harness=defer_policyengine_harness,
+        require_policyengine_native_score=require_policyengine_native_score,
+        defer_policyengine_native_score=defer_policyengine_native_score,
+        precomputed_policyengine_harness_payload=precomputed_policyengine_harness_payload,
+        precomputed_policyengine_native_scores=precomputed_policyengine_native_scores,
         run_registry_path=run_registry_path,
         run_index_path=run_index_path,
         run_registry_metadata=run_registry_metadata,
+        enable_child_tax_unit_agi_drift=enable_child_tax_unit_agi_drift,
+        child_tax_unit_agi_drift_variables=child_tax_unit_agi_drift_variables,
     )
 
 
@@ -463,9 +879,17 @@ def build_and_save_versioned_us_microplex_from_data_dir(
         tuple[PolicyEngineUSHarnessSlice, ...] | list[PolicyEngineUSHarnessSlice] | None
     ) = None,
     policyengine_harness_metadata: dict[str, Any] | None = None,
+    policyengine_us_data_repo: str | Path | None = None,
+    defer_policyengine_harness: bool = False,
+    require_policyengine_native_score: bool = False,
+    defer_policyengine_native_score: bool = False,
+    precomputed_policyengine_harness_payload: dict[str, Any] | None = None,
+    precomputed_policyengine_native_scores: dict[str, Any] | None = None,
     run_registry_path: str | Path | None = None,
     run_index_path: str | Path | None = None,
     run_registry_metadata: dict[str, Any] | None = None,
+    enable_child_tax_unit_agi_drift: bool = False,
+    child_tax_unit_agi_drift_variables: tuple[str, ...] | None = None,
 ) -> USMicroplexVersionedBuildArtifacts:
     """Build from a CPS-style parquet directory, save a versioned bundle, and report frontier gap."""
     pipeline = USMicroplexPipeline(config)
@@ -480,9 +904,17 @@ def build_and_save_versioned_us_microplex_from_data_dir(
         policyengine_baseline_dataset=policyengine_baseline_dataset,
         policyengine_harness_slices=policyengine_harness_slices,
         policyengine_harness_metadata=policyengine_harness_metadata,
+        policyengine_us_data_repo=policyengine_us_data_repo,
+        defer_policyengine_harness=defer_policyengine_harness,
+        require_policyengine_native_score=require_policyengine_native_score,
+        defer_policyengine_native_score=defer_policyengine_native_score,
+        precomputed_policyengine_harness_payload=precomputed_policyengine_harness_payload,
+        precomputed_policyengine_native_scores=precomputed_policyengine_native_scores,
         run_registry_path=run_registry_path,
         run_index_path=run_index_path,
         run_registry_metadata=run_registry_metadata,
+        enable_child_tax_unit_agi_drift=enable_child_tax_unit_agi_drift,
+        child_tax_unit_agi_drift_variables=child_tax_unit_agi_drift_variables,
     )
 
 
@@ -499,9 +931,17 @@ def _finalize_versioned_build_artifacts(
         tuple[PolicyEngineUSHarnessSlice, ...] | list[PolicyEngineUSHarnessSlice] | None
     ),
     policyengine_harness_metadata: dict[str, Any] | None,
+    policyengine_us_data_repo: str | Path | None,
+    defer_policyengine_harness: bool,
+    require_policyengine_native_score: bool,
+    defer_policyengine_native_score: bool,
+    precomputed_policyengine_harness_payload: dict[str, Any] | None,
+    precomputed_policyengine_native_scores: dict[str, Any] | None,
     run_registry_path: str | Path | None,
     run_index_path: str | Path | None,
     run_registry_metadata: dict[str, Any] | None,
+    enable_child_tax_unit_agi_drift: bool = False,
+    child_tax_unit_agi_drift_variables: tuple[str, ...] | None = None,
 ) -> USMicroplexVersionedBuildArtifacts:
     artifact_paths = save_versioned_us_microplex_artifacts(
         build_result,
@@ -512,9 +952,17 @@ def _finalize_versioned_build_artifacts(
         policyengine_baseline_dataset=policyengine_baseline_dataset,
         policyengine_harness_slices=policyengine_harness_slices,
         policyengine_harness_metadata=policyengine_harness_metadata,
+        policyengine_us_data_repo=policyengine_us_data_repo,
+        defer_policyengine_harness=defer_policyengine_harness,
+        require_policyengine_native_score=require_policyengine_native_score,
+        defer_policyengine_native_score=defer_policyengine_native_score,
+        precomputed_policyengine_harness_payload=precomputed_policyengine_harness_payload,
+        precomputed_policyengine_native_scores=precomputed_policyengine_native_scores,
         run_registry_path=run_registry_path,
         run_index_path=run_index_path,
         run_registry_metadata=run_registry_metadata,
+        enable_child_tax_unit_agi_drift=enable_child_tax_unit_agi_drift,
+        child_tax_unit_agi_drift_variables=child_tax_unit_agi_drift_variables,
     )
     current_entry = None
     frontier_entry = None
@@ -544,6 +992,12 @@ def _finalize_versioned_build_artifacts(
         frontier_entry=frontier_entry,
         frontier_delta=frontier_delta,
     )
+
+
+def _write_json_atomically(path: Path, payload: dict[str, Any]) -> None:
+    temp_path = path.with_name(f".{path.name}.tmp")
+    temp_path.write_text(json.dumps(payload, indent=2, sort_keys=True))
+    temp_path.replace(path)
 
 
 def _resolve_policyengine_harness_context(
@@ -606,6 +1060,10 @@ def _resolve_policyengine_harness_context(
         "target_variables": list(result.config.policyengine_target_variables),
         "target_domains": list(result.config.policyengine_target_domains),
         "target_geo_levels": list(result.config.policyengine_target_geo_levels),
+        "target_profile": result.config.policyengine_target_profile,
+        "calibration_target_profile": (
+            result.config.policyengine_calibration_target_profile
+        ),
         "target_reform_id": result.config.policyengine_target_reform_id,
         "harness_slice_names": [slice_spec.name for slice_spec in resolved_harness_slices],
         "policyengine_us_runtime_version": _resolve_policyengine_us_runtime_version(),

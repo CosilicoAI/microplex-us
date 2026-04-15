@@ -10,14 +10,26 @@ from typing import Any
 
 import numpy as np
 from microplex.targets import (
+    BatchBenchmarkResultEvaluator,
+    BenchmarkResult,
+    BenchmarkSliceComparison,
+    BenchmarkSliceSpec,
+    BenchmarkSuiteResult,
     FilterOperator,
     TargetFilter,
     TargetProvider,
     TargetQuery,
     TargetSet,
+    build_benchmark_suite_from_results,
+    build_benchmark_suite_result,
+    evaluate_benchmark_slice_results,
+    filter_nonempty_benchmark_slices,
+    load_benchmark_slice_target_sets,
+    union_target_sets,
 )
 
 from microplex_us.policyengine.comparison import (
+    POLICYENGINE_US_BENCHMARK_GROUP_FIELDS,
     PolicyEngineUSComparisonCache,
     PolicyEngineUSTargetComparisonReport,
     PolicyEngineUSTargetEvaluation,
@@ -41,14 +53,7 @@ ATTRIBUTE_TAIL_FRACTION = 0.10
 UNSPECIFIED_ATTRIBUTE = "__unknown__"
 
 
-@dataclass(frozen=True)
-class PolicyEngineUSHarnessSlice:
-    """A named target-query slice used in a PE-US comparison harness."""
-
-    name: str
-    query: TargetQuery
-    description: str | None = None
-    tags: tuple[str, ...] = ()
+PolicyEngineUSHarnessSlice = BenchmarkSliceSpec
 
 
 @dataclass
@@ -79,6 +84,21 @@ class PolicyEngineUSHarnessSliceResult:
             return None
         return delta < 0.0
 
+    @property
+    def benchmark_slice_result(self) -> BenchmarkSliceComparison | None:
+        comparison = self.comparison.benchmark_comparison
+        if comparison is None:
+            return None
+        return BenchmarkSliceComparison(
+            slice=BenchmarkSliceSpec(
+                name=self.slice.name,
+                query=self.slice.query,
+                description=self.slice.description,
+                tags=self.slice.tags,
+            ),
+            comparison=comparison,
+        )
+
 
 @dataclass
 class PolicyEngineUSHarnessRun:
@@ -92,79 +112,61 @@ class PolicyEngineUSHarnessRun:
         default_factory=lambda: datetime.now(UTC).replace(microsecond=0).isoformat()
     )
     metadata: dict[str, Any] = field(default_factory=dict)
+    _benchmark_suite: BenchmarkSuiteResult | None = field(default=None, repr=False)
+
+    @property
+    def benchmark_suite(self) -> BenchmarkSuiteResult:
+        if self._benchmark_suite is not None:
+            return self._benchmark_suite
+        comparable_results = [
+            result for result in self.slice_results if result.comparison.baseline is not None
+        ]
+        return build_benchmark_suite_from_results(
+            candidate_label=self.candidate_label,
+            baseline_label=self.baseline_label,
+            period=self.period,
+            slices=[result.slice for result in comparable_results],
+            candidate_results={
+                result.slice.name: result.comparison.candidate.benchmark_result
+                for result in comparable_results
+            },
+            baseline_results={
+                result.slice.name: result.comparison.baseline.benchmark_result
+                for result in comparable_results
+                if result.comparison.baseline is not None
+            },
+            group_fields=POLICYENGINE_US_BENCHMARK_GROUP_FIELDS,
+            created_at=self.created_at,
+            metadata=dict(self.metadata),
+        )
 
     @property
     def candidate_mean_abs_relative_error(self) -> float | None:
-        errors = [
-            result.candidate_mean_abs_relative_error
-            for result in self.slice_results
-            if result.candidate_mean_abs_relative_error is not None
-        ]
-        if not errors:
-            return None
-        return float(np.mean(errors))
+        return self.benchmark_suite.candidate_mean_abs_relative_error
 
     @property
     def baseline_mean_abs_relative_error(self) -> float | None:
-        errors = [
-            result.baseline_mean_abs_relative_error
-            for result in self.slice_results
-            if result.baseline_mean_abs_relative_error is not None
-        ]
-        if not errors:
-            return None
-        return float(np.mean(errors))
+        return self.benchmark_suite.baseline_mean_abs_relative_error
 
     @property
     def mean_abs_relative_error_delta(self) -> float | None:
-        candidate_error = self.candidate_mean_abs_relative_error
-        baseline_error = self.baseline_mean_abs_relative_error
-        if candidate_error is None or baseline_error is None:
-            return None
-        return candidate_error - baseline_error
+        return self.benchmark_suite.mean_abs_relative_error_delta
 
     @property
     def slice_win_rate(self) -> float | None:
-        comparable = [
-            result.candidate_beats_baseline
-            for result in self.slice_results
-            if result.candidate_beats_baseline is not None
-        ]
-        if not comparable:
-            return None
-        return float(np.mean(np.asarray(comparable, dtype=float)))
+        return self.benchmark_suite.slice_win_rate
 
     @property
     def target_win_rate(self) -> float | None:
-        candidate_wins: list[bool] = []
-        for result in self.slice_results:
-            baseline_report = result.comparison.baseline
-            if baseline_report is None:
-                continue
-            baseline_by_name = {
-                evaluation.target.name: evaluation
-                for evaluation in baseline_report.evaluations
-            }
-            for evaluation in result.comparison.candidate.evaluations:
-                baseline_evaluation = baseline_by_name.get(evaluation.target.name)
-                if baseline_evaluation is None:
-                    continue
-                candidate_relative = evaluation.relative_error
-                baseline_relative = baseline_evaluation.relative_error
-                if candidate_relative is None or baseline_relative is None:
-                    continue
-                candidate_wins.append(abs(candidate_relative) < abs(baseline_relative))
-        if not candidate_wins:
-            return None
-        return float(np.mean(np.asarray(candidate_wins, dtype=float)))
+        return self.benchmark_suite.target_win_rate
 
     @property
     def supported_target_rate(self) -> float | None:
-        return self.supported_target_rate_for_tag(None)
+        return self.benchmark_suite.supported_target_rate
 
     @property
     def baseline_supported_target_rate(self) -> float | None:
-        return self._supported_target_rate_for_tag(None, kind="baseline")
+        return self.benchmark_suite.baseline_supported_target_rate
 
     @property
     def candidate_micro_mean_abs_relative_error(self) -> float | None:
@@ -330,47 +332,22 @@ class PolicyEngineUSHarnessRun:
         return scorecard
 
     def candidate_mean_abs_relative_error_for_tag(self, tag: str | None) -> float | None:
-        return self._mean_abs_relative_error(tag=tag, kind="candidate")
+        return self.benchmark_suite.candidate_mean_abs_relative_error_for_tag(tag)
 
     def baseline_mean_abs_relative_error_for_tag(self, tag: str | None) -> float | None:
-        return self._mean_abs_relative_error(tag=tag, kind="baseline")
+        return self.benchmark_suite.baseline_mean_abs_relative_error_for_tag(tag)
 
     def mean_abs_relative_error_delta_for_tag(self, tag: str | None) -> float | None:
-        candidate_error = self.candidate_mean_abs_relative_error_for_tag(tag)
-        baseline_error = self.baseline_mean_abs_relative_error_for_tag(tag)
-        if candidate_error is None or baseline_error is None:
-            return None
-        return candidate_error - baseline_error
+        return self.benchmark_suite.mean_abs_relative_error_delta_for_tag(tag)
 
     def slice_win_rate_for_tag(self, tag: str | None) -> float | None:
-        comparable = [
-            result.candidate_beats_baseline
-            for result in self._slice_results_for_tag(tag)
-            if result.candidate_beats_baseline is not None
-        ]
-        if not comparable:
-            return None
-        return float(np.mean(np.asarray(comparable, dtype=float)))
+        return self.benchmark_suite.slice_win_rate_for_tag(tag)
 
     def target_win_rate_for_tag(self, tag: str | None) -> float | None:
-        candidate_records = self._target_records_for_tag(tag, kind="candidate")
-        baseline_records = self._target_records_for_tag(tag, kind="baseline")
-        candidate_wins: list[bool] = []
-        for target_name, candidate_record in candidate_records.items():
-            baseline_record = baseline_records.get(target_name)
-            if baseline_record is None:
-                continue
-            candidate_relative = candidate_record["relative_error"]
-            baseline_relative = baseline_record["relative_error"]
-            if candidate_relative is None or baseline_relative is None:
-                continue
-            candidate_wins.append(abs(candidate_relative) < abs(baseline_relative))
-        if not candidate_wins:
-            return None
-        return float(np.mean(np.asarray(candidate_wins, dtype=float)))
+        return self.benchmark_suite.target_win_rate_for_tag(tag)
 
     def supported_target_rate_for_tag(self, tag: str | None) -> float | None:
-        return self._supported_target_rate_for_tag(tag, kind="candidate")
+        return self.benchmark_suite.supported_target_rate_for_tag(tag)
 
     def candidate_micro_mean_abs_relative_error_for_tag(self, tag: str | None) -> float | None:
         return self._micro_mean_abs_relative_error_for_tag(tag, kind="candidate")
@@ -502,18 +479,10 @@ class PolicyEngineUSHarnessRun:
         tag: str | None,
         kind: str,
     ) -> float | None:
-        errors = []
-        for result in self._slice_results_for_tag(tag):
-            value = (
-                result.candidate_mean_abs_relative_error
-                if kind == "candidate"
-                else result.baseline_mean_abs_relative_error
-            )
-            if value is not None:
-                errors.append(value)
-        if not errors:
-            return None
-        return float(np.mean(errors))
+        suite = self.benchmark_suite
+        if kind == "candidate":
+            return suite.candidate_mean_abs_relative_error_for_tag(tag)
+        return suite.baseline_mean_abs_relative_error_for_tag(tag)
 
     def _supported_target_rate_for_tag(
         self,
@@ -521,11 +490,10 @@ class PolicyEngineUSHarnessRun:
         *,
         kind: str,
     ) -> float | None:
-        records = self._target_records_for_tag(tag, kind=kind)
-        if not records:
-            return None
-        supported = sum(1 for record in records.values() if record["supported"])
-        return supported / len(records)
+        suite = self.benchmark_suite
+        if kind == "candidate":
+            return suite.supported_target_rate_for_tag(tag)
+        return suite.baseline_supported_target_rate_for_tag(tag)
 
     def _micro_mean_abs_relative_error_for_tag(
         self,
@@ -606,8 +574,8 @@ class PolicyEngineUSHarnessRun:
         tag: str | None,
         *,
         kind: str,
-    ) -> dict[str, dict[str, Any]]:
-        records: dict[str, dict[str, Any]] = {}
+    ) -> dict[tuple[str, str], dict[str, Any]]:
+        records: dict[tuple[str, str], dict[str, Any]] = {}
         for result in self._slice_results_for_tag(tag):
             report = (
                 result.comparison.candidate
@@ -617,8 +585,9 @@ class PolicyEngineUSHarnessRun:
             if report is None:
                 continue
             for target in report.unsupported_targets:
+                record_key = (result.slice.name, target.name)
                 records.setdefault(
-                    target.name,
+                    record_key,
                     {
                         "target": target,
                         "supported": False,
@@ -626,7 +595,7 @@ class PolicyEngineUSHarnessRun:
                     },
                 )
             for evaluation in report.evaluations:
-                records[evaluation.target.name] = {
+                records[(result.slice.name, evaluation.target.name)] = {
                     "target": evaluation.target,
                     "supported": True,
                     "relative_error": evaluation.relative_error,
@@ -695,10 +664,7 @@ class PolicyEngineUSHarnessRun:
             },
             "slices": [
                 {
-                    "name": result.slice.name,
-                    "description": result.slice.description,
-                    "tags": list(result.slice.tags),
-                    "query": _target_query_to_dict(result.slice.query),
+                    **result.slice.to_dict(),
                     "summary": _slice_result_summary(result),
                     "candidate": _report_to_dict(result.comparison.candidate),
                     "baseline": (
@@ -729,12 +695,7 @@ class PolicyEngineUSHarnessRun:
             metadata=dict(payload.get("metadata", {})),
             slice_results=[
                 PolicyEngineUSHarnessSliceResult(
-                    slice=PolicyEngineUSHarnessSlice(
-                        name=slice_payload["name"],
-                        description=slice_payload.get("description"),
-                        tags=tuple(slice_payload.get("tags", [])),
-                        query=_target_query_from_dict(slice_payload["query"]),
-                    ),
+                    slice=PolicyEngineUSHarnessSlice.from_dict(slice_payload),
                     comparison=PolicyEngineUSTargetComparisonReport(
                         candidate=_report_from_dict(slice_payload["candidate"]),
                         baseline=(
@@ -754,6 +715,74 @@ class PolicyEngineUSHarnessRun:
         return cls.from_dict(json.loads(Path(path).read_text()))
 
 
+@dataclass
+class _PolicyEngineUSCandidateBatchResultEvaluator(BatchBenchmarkResultEvaluator):
+    tables: PolicyEngineUSEntityTableBundle
+    period: int | str
+    dataset_year: int | None
+    simulation_cls: Any | None
+    label: str
+    strict_materialization: bool
+    direct_override_variables: tuple[str, ...] = ()
+    last_reports: dict[str, PolicyEngineUSTargetEvaluationReport] = field(
+        default_factory=dict,
+        init=False,
+    )
+
+    def evaluate_target_sets(
+        self,
+        target_sets: dict[str, TargetSet],
+        slices: tuple[BenchmarkSliceSpec, ...],
+    ) -> dict[str, BenchmarkResult]:
+        del slices
+        reports = evaluate_policyengine_us_target_sets(
+            self.tables,
+            target_sets,
+            period=self.period,
+            dataset_year=self.dataset_year,
+            simulation_cls=self.simulation_cls,
+            label=self.label,
+            strict_materialization=self.strict_materialization,
+            direct_override_variables=self.direct_override_variables,
+        )
+        self.last_reports = reports
+        return {name: report.benchmark_result for name, report in reports.items()}
+
+
+@dataclass
+class _PolicyEngineUSBaselineBatchResultEvaluator(BatchBenchmarkResultEvaluator):
+    baseline_dataset: str | Any
+    period: int | str
+    dataset_year: int | None
+    simulation_cls: Any | None
+    baseline_label: str
+    strict_materialization: bool
+    cache: PolicyEngineUSComparisonCache | None
+    last_reports: dict[str, PolicyEngineUSTargetEvaluationReport] = field(
+        default_factory=dict,
+        init=False,
+    )
+
+    def evaluate_target_sets(
+        self,
+        target_sets: dict[str, TargetSet],
+        slices: tuple[BenchmarkSliceSpec, ...],
+    ) -> dict[str, BenchmarkResult]:
+        del slices
+        reports = _evaluate_policyengine_us_baseline_target_sets(
+            target_sets,
+            baseline_dataset=self.baseline_dataset,
+            period=self.period,
+            dataset_year=self.dataset_year,
+            simulation_cls=self.simulation_cls,
+            baseline_label=self.baseline_label,
+            strict_materialization=self.strict_materialization,
+            cache=self.cache,
+        )
+        self.last_reports = reports
+        return {name: report.benchmark_result for name, report in reports.items()}
+
+
 def evaluate_policyengine_us_harness(
     candidate_tables: PolicyEngineUSEntityTableBundle,
     provider: TargetProvider,
@@ -767,60 +796,52 @@ def evaluate_policyengine_us_harness(
     metadata: dict[str, Any] | None = None,
     strict_materialization: bool = True,
     cache: PolicyEngineUSComparisonCache | None = None,
+    candidate_direct_override_variables: tuple[str, ...] = (),
 ) -> PolicyEngineUSHarnessRun:
     """Evaluate a candidate bundle against a baseline across named target slices."""
     if not slices:
         raise ValueError("PolicyEngineUSHarness requires at least one slice")
 
-    slice_target_sets = {
-        slice_spec.name: (
-            cache.load_target_set(provider, slice_spec.query)
+    slice_target_sets = load_benchmark_slice_target_sets(
+        provider,
+        slices,
+        loader=(
+            (lambda effective_provider, query: cache.load_target_set(effective_provider, query))
             if cache is not None
-            else provider.load_target_set(slice_spec.query)
-        )
-        for slice_spec in slices
-    }
-    candidate_reports = evaluate_policyengine_us_target_sets(
-        candidate_tables,
-        slice_target_sets,
-        period=slices[0].query.period if slices[0].query.period is not None else 2024,
+            else None
+        ),
+    )
+    period = slices[0].query.period if slices[0].query.period is not None else 2024
+    candidate_result_evaluator = _PolicyEngineUSCandidateBatchResultEvaluator(
+        tables=candidate_tables,
+        period=period,
         dataset_year=dataset_year,
         simulation_cls=simulation_cls,
         label=candidate_label,
         strict_materialization=strict_materialization,
+        direct_override_variables=candidate_direct_override_variables,
     )
-    union_target_set = _union_target_set(slice_target_sets)
-    baseline_union_report = (
-        cache.load_baseline_report(
-            target_set=union_target_set,
-            baseline_dataset=baseline_dataset,
-            period=slices[0].query.period if slices[0].query.period is not None else 2024,
-            dataset_year=dataset_year,
-            simulation_cls=simulation_cls,
-            baseline_label=baseline_label,
-            strict_materialization=strict_materialization,
-        )
-        if cache is not None
-        else evaluate_policyengine_us_target_set(
-            load_policyengine_us_entity_tables(
-                baseline_dataset,
-                period=slices[0].query.period if slices[0].query.period is not None else 2024,
-            ),
-            union_target_set,
-            period=slices[0].query.period if slices[0].query.period is not None else 2024,
-            dataset_year=dataset_year,
-            simulation_cls=simulation_cls,
-            label=baseline_label,
-            strict_materialization=strict_materialization,
-        )
+    candidate_results = evaluate_benchmark_slice_results(
+        slice_target_sets,
+        slices,
+        batch_evaluator=candidate_result_evaluator,
     )
-    baseline_reports = {
-        name: slice_policyengine_us_target_evaluation_report(
-            baseline_union_report,
-            target_set,
-        )
-        for name, target_set in slice_target_sets.items()
-    }
+    baseline_result_evaluator = _PolicyEngineUSBaselineBatchResultEvaluator(
+        baseline_dataset=baseline_dataset,
+        period=period,
+        dataset_year=dataset_year,
+        simulation_cls=simulation_cls,
+        baseline_label=baseline_label,
+        strict_materialization=strict_materialization,
+        cache=cache,
+    )
+    baseline_results = evaluate_benchmark_slice_results(
+        slice_target_sets,
+        slices,
+        batch_evaluator=baseline_result_evaluator,
+    )
+    candidate_reports = candidate_result_evaluator.last_reports
+    baseline_reports = baseline_result_evaluator.last_reports
     slice_results = [
         PolicyEngineUSHarnessSliceResult(
             slice=slice_spec,
@@ -831,25 +852,95 @@ def evaluate_policyengine_us_harness(
         )
         for slice_spec in slices
     ]
+    comparable_slice_results = [
+        result for result in slice_results if result.comparison.benchmark_comparison is not None
+    ]
+    suite_metadata = dict(metadata or {})
+    if len(comparable_slice_results) != len(slice_results):
+        suite_metadata["excluded_slice_names"] = [
+            result.slice.name
+            for result in slice_results
+            if result.comparison.benchmark_comparison is None
+        ]
+
     return PolicyEngineUSHarnessRun(
         candidate_label=candidate_label,
         baseline_label=baseline_label,
-        period=slices[0].query.period if slices[0].query.period is not None else 2024,
+        period=period,
         slice_results=slice_results,
-        metadata=dict(metadata or {}),
+        metadata=suite_metadata,
+        _benchmark_suite=(
+            build_benchmark_suite_from_results(
+                candidate_label=candidate_label,
+                baseline_label=baseline_label,
+                period=period,
+                slices=[result.slice for result in comparable_slice_results],
+                candidate_results={
+                    result.slice.name: candidate_results[result.slice.name]
+                    for result in comparable_slice_results
+                },
+                baseline_results={
+                    result.slice.name: baseline_results[result.slice.name]
+                    for result in comparable_slice_results
+                },
+                group_fields=POLICYENGINE_US_BENCHMARK_GROUP_FIELDS,
+                metadata=suite_metadata,
+            )
+            if comparable_slice_results
+            else build_benchmark_suite_result(
+                candidate_label=candidate_label,
+                baseline_label=baseline_label,
+                period=period,
+                slice_results=[],
+                metadata=suite_metadata,
+            )
+        ),
     )
 
 
-def _union_target_set(target_sets: dict[str, TargetSet]) -> TargetSet:
-    targets = TargetSet()
-    seen_names: set[str] = set()
-    for target_set in target_sets.values():
-        for target in target_set.targets:
-            if target.name in seen_names:
-                continue
-            seen_names.add(target.name)
-            targets.add(target)
-    return targets
+def _evaluate_policyengine_us_baseline_target_sets(
+    target_sets: dict[str, TargetSet],
+    *,
+    baseline_dataset: str | Any,
+    period: int | str,
+    dataset_year: int | None,
+    simulation_cls: Any | None,
+    baseline_label: str,
+    strict_materialization: bool,
+    cache: PolicyEngineUSComparisonCache | None,
+) -> dict[str, PolicyEngineUSTargetEvaluationReport]:
+    union_target_set = union_target_sets(target_sets)
+    baseline_union_report = (
+        cache.load_baseline_report(
+            target_set=union_target_set,
+            baseline_dataset=baseline_dataset,
+            period=period,
+            dataset_year=dataset_year,
+            simulation_cls=simulation_cls,
+            baseline_label=baseline_label,
+            strict_materialization=strict_materialization,
+        )
+        if cache is not None
+        else evaluate_policyengine_us_target_set(
+            load_policyengine_us_entity_tables(
+                baseline_dataset,
+                period=period,
+            ),
+            union_target_set,
+            period=period,
+            dataset_year=dataset_year,
+            simulation_cls=simulation_cls,
+            label=baseline_label,
+            strict_materialization=strict_materialization,
+        )
+    )
+    return {
+        name: slice_policyengine_us_target_evaluation_report(
+            baseline_union_report,
+            target_set,
+        )
+        for name, target_set in target_sets.items()
+    }
 
 
 def filter_nonempty_policyengine_us_harness_slices(
@@ -859,14 +950,14 @@ def filter_nonempty_policyengine_us_harness_slices(
     cache: PolicyEngineUSComparisonCache | None = None,
 ) -> tuple[PolicyEngineUSHarnessSlice, ...]:
     """Drop harness slices that resolve to no canonical targets."""
-    return tuple(
-        slice_spec
-        for slice_spec in slices
-        if (
-            cache.load_target_set(provider, slice_spec.query)
+    return filter_nonempty_benchmark_slices(
+        provider,
+        slices,
+        loader=(
+            (lambda effective_provider, query: cache.load_target_set(effective_provider, query))
             if cache is not None
-            else provider.load_target_set(slice_spec.query)
-        ).targets
+            else None
+        ),
     )
 
 
@@ -1077,9 +1168,9 @@ def default_policyengine_us_db_parity_slices(
         },
         {
             "name": "state_programs_core",
-            "description": "State SNAP and Medicaid recipiency targets from production calibration",
+            "description": "State SNAP household counts and Medicaid recipiency counts from production calibration",
             "geo_levels": ("state",),
-            "variables": ("snap", "person_count"),
+            "variables": ("household_count", "person_count"),
             "domain_variable_values": ("snap", "medicaid_enrolled"),
             "tags": ("parity", "local", "state", "programs"),
         },
@@ -1350,24 +1441,4 @@ def _target_from_dict(payload: dict[str, Any]) -> Any:
         units=payload.get("units"),
         description=payload.get("description"),
         metadata=dict(payload.get("metadata", {})),
-    )
-
-
-def _target_query_to_dict(query: TargetQuery) -> dict[str, Any]:
-    return {
-        "period": query.period,
-        "entity": query.entity.value if query.entity is not None else None,
-        "names": list(query.names),
-        "metadata_filters": dict(query.metadata_filters),
-        "provider_filters": dict(query.provider_filters),
-    }
-
-
-def _target_query_from_dict(payload: dict[str, Any]) -> TargetQuery:
-    return TargetQuery(
-        period=payload.get("period"),
-        entity=payload.get("entity"),
-        names=tuple(payload.get("names", [])),
-        metadata_filters=dict(payload.get("metadata_filters", {})),
-        provider_filters=dict(payload.get("provider_filters", {})),
     )

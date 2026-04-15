@@ -23,6 +23,8 @@ from microplex.targets import (
     apply_target_query,
 )
 
+from microplex_us.policyengine.target_profiles import PolicyEngineUSTargetCell
+
 GEOGRAPHIC_CONSTRAINT_VARIABLES: set[str] = {
     "state_fips",
     "congressional_district_geoid",
@@ -169,29 +171,50 @@ ENTITY_TYPE_TO_POLICYENGINE_US_ENTITY_KEY: dict[EntityType, str] = {
 
 SAFE_POLICYENGINE_US_EXPORT_VARIABLES: set[str] = {
     "age",
-    "employment_income",
+    "alimony_income",
+    "child_support_expense",
+    "child_support_received",
+    "receives_wic",
+    "cps_race",
+    "disability_benefits",
+    "health_insurance_premiums_without_medicare_part_b",
+    "is_female",
+    "is_hispanic",
+    "is_disabled",
+    "medicare_part_b_premiums",
     "employment_income_before_lsr",
-    "self_employment_income",
+    "other_medical_expenses",
+    "over_the_counter_health_expenses",
     "self_employment_income_before_lsr",
-    "pension_income",
-    "social_security",
     "social_security_retirement",
     "social_security_disability",
     "social_security_survivors",
     "social_security_dependents",
     "unemployment_compensation",
-    "interest_income",
     "taxable_interest_income",
     "tax_exempt_interest_income",
-    "dividend_income",
     "qualified_dividend_income",
     "non_qualified_dividend_income",
+    # `rent` is treated as a preserved stored input in PE-US-data even though
+    # the runtime can recalculate it on some paths.
+    "rent",
+    "real_estate_taxes",
     "rental_income",
-    "capital_gains",
     "short_term_capital_gains",
     "long_term_capital_gains_before_response",
     "partnership_s_corp_income",
+    "partnership_se_income",
+    "estate_income",
     "farm_income",
+    "farm_operations_income",
+    "farm_rent_income",
+    "has_esi",
+    "has_marketplace_health_coverage",
+    "health_savings_account_ald",
+    "is_separated",
+    "is_surviving_spouse",
+    "net_worth",
+    "ssn_card_type",
     "taxable_private_pension_income",
     "taxable_public_pension_income",
     "tax_exempt_private_pension_income",
@@ -200,7 +223,14 @@ SAFE_POLICYENGINE_US_EXPORT_VARIABLES: set[str] = {
     "student_loan_interest",
     "state_fips",
     "county_fips",
-    "filing_status",
+}
+
+POLICYENGINE_US_EXPORT_COLUMN_ALIASES: dict[str, str] = {
+    "race": "cps_race",
+}
+
+POLICYENGINE_US_EXPORT_DEFAULTS: dict[str, Any] = {
+    "ssn_card_type": "CITIZEN",
 }
 
 
@@ -298,6 +328,7 @@ class PolicyEngineUSDBTargetProvider:
         domain_variable_values: list[str] | None = None,
         domain_variable_is_null: bool | None = None,
         geo_levels: list[str] | None = None,
+        target_cells: list[dict[str, Any]] | None = None,
         target_ids: list[int] | None = None,
         stratum_ids: list[int] | None = None,
         reform_id: int = 0,
@@ -316,6 +347,7 @@ class PolicyEngineUSDBTargetProvider:
                 domain_variable_values=domain_variable_values,
                 domain_variable_is_null=domain_variable_is_null,
                 geo_levels=geo_levels,
+                target_cells=target_cells,
                 target_ids=target_ids,
                 stratum_ids=stratum_ids,
                 reform_id=reform_id,
@@ -326,6 +358,7 @@ class PolicyEngineUSDBTargetProvider:
             or domain_variable_values
             or geo_levels
             or domain_variable_is_null is not None
+            or target_cells
         ):
             raise ValueError(
                 "domain/geography filters require a target_overview view"
@@ -419,6 +452,7 @@ class PolicyEngineUSDBTargetProvider:
                 domain_variable_values=provider_filters.get("domain_variable_values"),
                 domain_variable_is_null=provider_filters.get("domain_variable_is_null"),
                 geo_levels=provider_filters.get("geo_levels"),
+                target_cells=provider_filters.get("target_cells"),
                 target_ids=provider_filters.get("target_ids"),
                 stratum_ids=provider_filters.get("stratum_ids"),
                 reform_id=int(provider_filters.get("reform_id", 0)),
@@ -461,6 +495,7 @@ class PolicyEngineUSDBTargetProvider:
         domain_variable_values: list[str] | None,
         domain_variable_is_null: bool | None,
         geo_levels: list[str] | None,
+        target_cells: list[dict[str, Any]] | None,
         target_ids: list[int] | None,
         stratum_ids: list[int] | None,
         reform_id: int,
@@ -499,7 +534,7 @@ class PolicyEngineUSDBTargetProvider:
             params.extend(geo_levels)
         if domain_variables:
             domain_clauses = [
-                "instr(coalesce(tv.domain_variable, ''), ?) > 0"
+                "instr(',' || coalesce(tv.domain_variable, '') || ',', ',' || ? || ',') > 0"
                 for _ in domain_variables
             ]
             clauses.append("(" + " OR ".join(domain_clauses) + ")")
@@ -512,6 +547,8 @@ class PolicyEngineUSDBTargetProvider:
             clauses.append("coalesce(tv.domain_variable, '') = ''")
         elif domain_variable_is_null is False:
             clauses.append("coalesce(tv.domain_variable, '') <> ''")
+        if target_cells:
+            clauses.append(self._build_target_cell_clause(target_cells, params))
 
         time_period = period if period is not None else 9999
         where_clause = " AND ".join(clauses) if clauses else "1=1"
@@ -587,6 +624,55 @@ class PolicyEngineUSDBTargetProvider:
         if self.validate:
             self._validate_targets(targets)
         return targets
+
+    def _build_target_cell_clause(
+        self,
+        target_cells: list[dict[str, Any]],
+        params: list[Any],
+    ) -> str:
+        cell_clauses: list[str] = []
+        for raw_cell in target_cells:
+            cell = PolicyEngineUSTargetCell(
+                variable=str(raw_cell["variable"]),
+                geo_level=(
+                    None
+                    if raw_cell.get("geo_level") is None
+                    else str(raw_cell["geo_level"])
+                ),
+                domain_variable=(
+                    None
+                    if "domain_variable" in raw_cell
+                    and raw_cell.get("domain_variable") is None
+                    else (
+                        str(raw_cell["domain_variable"])
+                        if raw_cell.get("domain_variable") is not None
+                        else None
+                    )
+                ),
+                geographic_id=(
+                    None
+                    if raw_cell.get("geographic_id") is None
+                    else str(raw_cell["geographic_id"])
+                ),
+            )
+            subclauses = ["tv.variable = ?"]
+            params.append(cell.variable)
+            if cell.geo_level is not None:
+                subclauses.append("tv.geo_level = ?")
+                params.append(cell.geo_level)
+            if "domain_variable" in raw_cell:
+                if cell.domain_variable is None:
+                    subclauses.append("coalesce(tv.domain_variable, '') = ''")
+                else:
+                    subclauses.append(
+                        "instr(',' || coalesce(tv.domain_variable, '') || ',', ',' || ? || ',') > 0"
+                    )
+                    params.append(cell.domain_variable)
+            if cell.geographic_id is not None:
+                subclauses.append("coalesce(tv.geographic_id, '') = ?")
+                params.append(cell.geographic_id)
+            cell_clauses.append("(" + " AND ".join(subclauses) + ")")
+        return "(" + " OR ".join(cell_clauses) + ")"
 
     def _group_target_rows(
         self,
@@ -1079,6 +1165,22 @@ def detect_policyengine_pseudo_inputs(
     return pseudo_inputs
 
 
+def resolve_policyengine_excluded_export_variables(
+    tax_benefit_system: Any,
+    exported_inputs: list[str] | tuple[str, ...],
+    *,
+    direct_override_variables: tuple[str, ...] = (),
+) -> set[str]:
+    """Resolve pseudo-input exports to exclude, preserving explicit overrides."""
+    excluded_variables = detect_policyengine_pseudo_inputs(
+        tax_benefit_system,
+        exported_inputs,
+    )
+    if direct_override_variables:
+        excluded_variables -= set(direct_override_variables)
+    return excluded_variables
+
+
 def materialize_policyengine_us_variables(
     tables: PolicyEngineUSEntityTableBundle,
     *,
@@ -1088,6 +1190,7 @@ def materialize_policyengine_us_variables(
     simulation_cls: Any | None = None,
     microsimulation_kwargs: dict[str, Any] | None = None,
     temp_dir: str | Path | None = None,
+    direct_override_variables: tuple[str, ...] = (),
 ) -> tuple[PolicyEngineUSEntityTableBundle, dict[str, PolicyEngineUSVariableBinding]]:
     """Calculate PolicyEngine variables on a temporary export and attach them to tables."""
     requested_variables = tuple(dict.fromkeys(str(variable) for variable in variables))
@@ -1100,6 +1203,7 @@ def materialize_policyengine_us_variables(
     export_maps = build_policyengine_us_export_variable_maps(
         tables,
         tax_benefit_system=tax_benefit_system,
+        direct_override_variables=direct_override_variables,
     )
     exported_inputs = sorted(
         {
@@ -1108,9 +1212,10 @@ def materialize_policyengine_us_variables(
             for target in variable_map.values()
         }
     )
-    excluded_variables = detect_policyengine_pseudo_inputs(
+    excluded_variables = resolve_policyengine_excluded_export_variables(
         tax_benefit_system,
         exported_inputs,
+        direct_override_variables=direct_override_variables,
     )
     arrays = build_policyengine_us_time_period_arrays(
         tables,
@@ -1153,6 +1258,7 @@ def materialize_policyengine_us_variables_safely(
     simulation_cls: Any | None = None,
     microsimulation_kwargs: dict[str, Any] | None = None,
     temp_dir: str | Path | None = None,
+    direct_override_variables: tuple[str, ...] = (),
 ) -> PolicyEngineUSVariableMaterializationResult:
     """Materialize PE variables, degrading to per-variable failures when needed."""
     requested_variables = tuple(dict.fromkeys(str(variable) for variable in variables))
@@ -1171,6 +1277,7 @@ def materialize_policyengine_us_variables_safely(
             simulation_cls=simulation_cls,
             microsimulation_kwargs=microsimulation_kwargs,
             temp_dir=temp_dir,
+            direct_override_variables=direct_override_variables,
         )
     except Exception:
         return _materialize_policyengine_us_variables_one_by_one(
@@ -1181,6 +1288,7 @@ def materialize_policyengine_us_variables_safely(
             simulation_cls=simulation_cls,
             microsimulation_kwargs=microsimulation_kwargs,
             temp_dir=temp_dir,
+            direct_override_variables=direct_override_variables,
         )
 
     return PolicyEngineUSVariableMaterializationResult(
@@ -1199,8 +1307,8 @@ def _materialize_policyengine_us_variables_one_by_one(
     simulation_cls: Any | None,
     microsimulation_kwargs: dict[str, Any] | None,
     temp_dir: str | Path | None,
+    direct_override_variables: tuple[str, ...],
 ) -> PolicyEngineUSVariableMaterializationResult:
-    base_tables = _copy_policyengine_us_entity_tables(tables)
     working_tables = _copy_policyengine_us_entity_tables(tables)
     bindings: dict[str, PolicyEngineUSVariableBinding] = {}
     materialized_variables: list[str] = []
@@ -1209,13 +1317,14 @@ def _materialize_policyengine_us_variables_one_by_one(
     for variable in requested_variables:
         try:
             materialized_tables, materialized_bindings = materialize_policyengine_us_variables(
-                base_tables,
+                working_tables,
                 variables=(variable,),
                 period=period,
                 dataset_year=dataset_year,
                 simulation_cls=simulation_cls,
                 microsimulation_kwargs=microsimulation_kwargs,
                 temp_dir=temp_dir,
+                direct_override_variables=direct_override_variables,
             )
         except Exception as exc:
             failed_variables[variable] = f"{type(exc).__name__}: {exc}"
@@ -1934,6 +2043,16 @@ def _evaluate_constraint_mask(
     if aligned is not None:
         return _apply_constraint_filter(aligned, constraint)
 
+    aligned_mask = _align_related_entity_constraint_mask(
+        target_rows=target_rows,
+        target_binding=target_binding,
+        constraint_binding=constraint_binding,
+        constraint=constraint,
+        tables=tables,
+    )
+    if aligned_mask is not None:
+        return aligned_mask
+
     if target_binding.entity is EntityType.HOUSEHOLD:
         aligned = _evaluate_constraint_on_households(
             constraint=constraint,
@@ -1974,6 +2093,38 @@ def _align_related_entity_constraint_values(
     )
     related_values = related_table.set_index(related_id_column)[constraint_column]
     return target_rows[related_id_column].map(related_values)
+
+
+def _align_related_entity_constraint_mask(
+    *,
+    target_rows: pd.DataFrame,
+    target_binding: PolicyEngineUSVariableBinding,
+    constraint_binding: PolicyEngineUSVariableBinding,
+    constraint: PolicyEngineUSConstraint | TargetFilter,
+    tables: PolicyEngineUSEntityTableBundle,
+) -> pd.Series | None:
+    if constraint_binding.entity is not EntityType.PERSON:
+        return None
+    if target_binding.entity not in {
+        EntityType.TAX_UNIT,
+        EntityType.SPM_UNIT,
+        EntityType.FAMILY,
+    }:
+        return None
+    persons = tables.persons
+    if persons is None:
+        return None
+    related_id_column = _entity_primary_id_column(target_binding.entity)
+    if related_id_column not in target_rows.columns or related_id_column not in persons.columns:
+        return None
+    constraint_column = _require_binding_column(
+        constraint_binding,
+        feature=_constraint_feature(constraint),
+    )
+    person_matches = _apply_constraint_filter(persons[constraint_column], constraint)
+    group_matches = person_matches.groupby(persons[related_id_column]).any()
+    aligned = target_rows[related_id_column].map(group_matches).fillna(False)
+    return pd.Series(aligned.to_numpy(dtype=bool), index=target_rows.index, dtype=bool)
 
 
 def _evaluate_constraint_on_households(
@@ -2095,11 +2246,13 @@ def build_policyengine_us_export_variable_maps(
     tables: PolicyEngineUSEntityTableBundle,
     *,
     tax_benefit_system: Any,
+    direct_override_variables: tuple[str, ...] = (),
 ) -> dict[str, dict[str, str]]:
     """Infer PE export variable maps from entity-table columns."""
     variable_metadata = getattr(tax_benefit_system, "variables", {})
     allowed_variables_by_entity = _group_policyengine_us_export_variables_by_entity(
-        variable_metadata
+        variable_metadata,
+        direct_override_variables=direct_override_variables,
     )
     table_specs = (
         ("household", tables.households, {"household_id", "household_weight", "weight"}),
@@ -2287,23 +2440,40 @@ def _infer_policyengine_us_table_variable_map(
 ) -> dict[str, str]:
     if table is None:
         return {}
-    return {
+    variable_map = {
         column: column
         for column in table.columns
         if column in allowed_variables
         and column not in excluded_columns
         and not column.endswith("_id")
     }
+    exported_targets = set(variable_map.values())
+    available_columns = set(table.columns)
+    for source_column, target_variable in POLICYENGINE_US_EXPORT_COLUMN_ALIASES.items():
+        if target_variable not in allowed_variables:
+            continue
+        if source_column not in available_columns or source_column in excluded_columns:
+            continue
+        if source_column.endswith("_id") or target_variable in exported_targets:
+            continue
+        variable_map[source_column] = target_variable
+        exported_targets.add(target_variable)
+    return variable_map
 
 
 def _group_policyengine_us_export_variables_by_entity(
     variable_metadata: dict[str, Any],
+    *,
+    direct_override_variables: tuple[str, ...] = (),
 ) -> dict[str, set[str]]:
+    allowed_variable_names = SAFE_POLICYENGINE_US_EXPORT_VARIABLES | set(
+        direct_override_variables
+    )
     allowed_variables_by_entity: dict[str, set[str]] = {
         entity_key: set() for entity_key in POLICYENGINE_US_ENTITY_KEY_TO_ENTITY_TYPE
     }
     for variable_name, metadata in variable_metadata.items():
-        if variable_name not in SAFE_POLICYENGINE_US_EXPORT_VARIABLES:
+        if variable_name not in allowed_variable_names:
             continue
         entity_key = getattr(getattr(metadata, "entity", None), "key", None)
         if entity_key not in allowed_variables_by_entity:
@@ -2686,8 +2856,19 @@ def _project_table_to_time_period_arrays(
             continue
         if source_column not in table.columns:
             raise ValueError(f"Projection source column not found: {source_column}")
+        values = pd.Series(table[source_column])
+        has_default = target_variable in POLICYENGINE_US_EXPORT_DEFAULTS
+        if has_default:
+            default_value = POLICYENGINE_US_EXPORT_DEFAULTS[target_variable]
+            values = values.where(values.notna(), other=default_value)
+            if isinstance(default_value, str):
+                string_values = values.astype("string")
+                values = string_values.where(
+                    string_values.notna() & string_values.ne(""),
+                    other=default_value,
+                )
         arrays[target_variable] = {
-            period_key: _normalize_h5_value(table[source_column]),
+            period_key: _normalize_h5_value(values),
         }
     return arrays
 
