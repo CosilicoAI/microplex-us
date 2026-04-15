@@ -5,6 +5,7 @@ from __future__ import annotations
 import importlib.util
 import logging
 import sys
+import time
 import warnings
 from collections import Counter
 from collections.abc import Iterable
@@ -4059,13 +4060,26 @@ class USMicroplexPipeline:
                 if donor_block_spec.native_entity is not EntityType.PERSON
             }
             if required_entities:
+                _emit_us_pipeline_progress(
+                    "US microplex donor integration: entity ids required",
+                    donor_source=donor_source_name,
+                    entities=_format_progress_values(
+                        sorted(entity.value for entity in required_entities)
+                    ),
+                    current_rows=len(current),
+                    donor_rows=len(donor_seed),
+                )
                 current = self._ensure_seed_entity_ids(
                     current,
                     entities=required_entities,
+                    frame_role="current",
+                    donor_source_name=donor_source_name,
                 )
                 donor_seed = self._ensure_seed_entity_ids(
                     donor_seed,
                     entities=required_entities,
+                    frame_role="donor",
+                    donor_source_name=donor_source_name,
                 )
 
             for donor_block_spec in donor_block_specs:
@@ -4960,6 +4974,8 @@ class USMicroplexPipeline:
         frame: pd.DataFrame,
         *,
         entities: set[EntityType],
+        frame_role: str | None = None,
+        donor_source_name: str | None = None,
     ) -> pd.DataFrame:
         missing_columns = [
             self._entity_key_column(entity)
@@ -4968,7 +4984,37 @@ class USMicroplexPipeline:
             and self._entity_key_column(entity) not in frame.columns
         ]
         if not missing_columns:
+            _emit_us_pipeline_progress(
+                "US microplex donor integration: entity ids ready",
+                donor_source=donor_source_name,
+                frame=frame_role,
+                rows=len(frame),
+                status="already_present",
+                columns=_format_progress_values(
+                    sorted(
+                        self._entity_key_column(entity) or ""
+                        for entity in entities
+                        if entity is not EntityType.PERSON
+                    )
+                ),
+            )
             return frame
+        started_at = time.perf_counter()
+        missing_column_set = set(missing_columns)
+        can_use_group_only_path = missing_column_set <= {"family_id", "spm_unit_id"}
+        method = (
+            "family_spm_only"
+            if can_use_group_only_path
+            else "policyengine_entity_bundle"
+        )
+        _emit_us_pipeline_progress(
+            "US microplex donor integration: entity ids start",
+            donor_source=donor_source_name,
+            frame=frame_role,
+            rows=len(frame),
+            missing_columns=_format_progress_values(missing_columns),
+            method=method,
+        )
         working = frame.copy()
         original_person_ids = working["person_id"].copy()
         working["person_id"] = np.arange(len(working), dtype=np.int64)
@@ -4976,19 +5022,39 @@ class USMicroplexPipeline:
             working["household_id"] = pd.factorize(working["household_id"])[0].astype(
                 np.int64
             )
-        persons = self.build_policyengine_entity_tables(working).persons.copy()
+        else:
+            working["household_id"] = np.arange(len(working), dtype=np.int64)
+        if "age" not in working.columns:
+            working["age"] = 0
+        if can_use_group_only_path:
+            working["relationship_to_head"] = self._normalize_relationship_to_head(
+                working
+            )
+            persons = self._assign_family_and_spm_units(working).copy()
+        else:
+            persons = self.build_policyengine_entity_tables(working).persons.copy()
         persons["source_person_id"] = original_person_ids.to_numpy()
         mapping = persons[["source_person_id", *missing_columns]]
         if mapping["source_person_id"].duplicated().any():
             raise ValueError(
                 "PolicyEngine entity table build produced duplicate person mappings"
             )
-        return frame.merge(
+        result = frame.merge(
             mapping,
             left_on="person_id",
             right_on="source_person_id",
             how="left",
         ).drop(columns=["source_person_id"])
+        _emit_us_pipeline_progress(
+            "US microplex donor integration: entity ids complete",
+            donor_source=donor_source_name,
+            frame=frame_role,
+            rows=len(result),
+            added_columns=_format_progress_values(missing_columns),
+            method=method,
+            elapsed_seconds=f"{time.perf_counter() - started_at:.3f}",
+        )
+        return result
 
     def _strip_generated_entity_ids(
         self,

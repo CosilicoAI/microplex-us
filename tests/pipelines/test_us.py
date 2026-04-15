@@ -8069,6 +8069,13 @@ class TestUSMicroplexPipeline:
         cps_input = pipeline.prepare_source_input(cps_frame)
         donor_input = pipeline.prepare_source_input(donor_frame)
         seed_data = pipeline.prepare_seed_data_from_source(cps_input)
+        monkeypatch.setattr(
+            pipeline,
+            "build_policyengine_entity_tables",
+            lambda _population: pytest.fail(
+                "SPM-only donor projection should not build full entity tables"
+            ),
+        )
 
         integration = pipeline._integrate_donor_sources(
             seed_data,
