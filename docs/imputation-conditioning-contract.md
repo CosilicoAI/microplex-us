@@ -57,6 +57,12 @@ The current donor-conditioning modes are:
   - use a PE-style structural predictor backbone declared in variable semantics
   - optionally admit a narrow supplemental shared set from the *actual*
     compatible overlap
+- `pe_plus_puf_native_challenger`
+  - keep the same PE structural predictor backbone
+  - for the explicitly marked problematic PUF tax-leaf blocks only, append a
+    narrow source-native raw-overlap set declared in semantics
+  - treat this as a non-default challenger lane, not as part of the PE-aligned
+    contract
 
 For the current PUF IRS tax-leaf family, PE alignment means the structural-only
 path. The local `policyengine-us-data`
@@ -85,6 +91,8 @@ Experimental:
 
 - whether `all_shared`, `top_correlated`, or `pe_prespecified` wins for a given
   block family
+- whether `pe_plus_puf_native_challenger` is worth keeping after a real
+  checkpoint comparison
 - whether a particular variable should admit a
   `supplemental_shared_condition_vars` set
 - which compatible shared predictors should be let back into a PE-structured

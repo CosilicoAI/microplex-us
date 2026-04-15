@@ -1,5 +1,6 @@
 """Tests for the US microplex pipeline library."""
 
+import logging
 import sqlite3
 from types import SimpleNamespace
 
@@ -28,8 +29,8 @@ from microplex_us.pipelines.us import (
     USMicroplexPipeline,
     USMicroplexTargets,
     _policyengine_target_loss_geography_key,
-    _select_policyengine_deferred_stage_constraints,
     _select_feasible_policyengine_calibration_constraints,
+    _select_policyengine_deferred_stage_constraints,
     _summarize_policyengine_target_fit_report,
     _summarize_weight_diagnostics,
     build_us_microplex,
@@ -867,10 +868,7 @@ class TestUSMicroplexPipeline:
             }
         )
 
-        tables = pipeline.build_policyengine_entity_tables(population)
-        tax_units = tables.tax_units.sort_values(["household_id", "tax_unit_id"]).reset_index(
-            drop=True
-        )
+        pipeline.build_policyengine_entity_tables(population)
 
     def test_build_policyengine_entity_tables_fallback_employment_excludes_transfer_income(
         self,
@@ -6271,7 +6269,7 @@ class TestUSMicroplexPipeline:
         donor_input = pipeline.prepare_source_input(donor_frame)
         seed_data = pipeline.prepare_seed_data_from_source(cps_input)
 
-        integration = pipeline._integrate_donor_sources(
+        pipeline._integrate_donor_sources(
             seed_data,
             scaffold_input=cps_input,
             donor_inputs=[donor_input],
@@ -6449,7 +6447,7 @@ class TestUSMicroplexPipeline:
         donor_input = pipeline.prepare_source_input(donor_frame)
         seed_data = pipeline.prepare_seed_data_from_source(cps_input)
 
-        integration = pipeline._integrate_donor_sources(
+        pipeline._integrate_donor_sources(
             seed_data,
             scaffold_input=cps_input,
             donor_inputs=[donor_input],
@@ -6512,6 +6510,51 @@ class TestUSMicroplexPipeline:
             current_frame=current_frame,
             donor_block=("dividend_income", "qualified_dividend_share"),
         ) == ["age", "is_male", "tax_unit_is_joint"]
+
+    def test_resolve_challenger_shared_condition_vars_uses_source_native_puf_overlap(
+        self,
+    ):
+        pipeline = USMicroplexPipeline(
+            USMicroplexBuildConfig(
+                donor_imputer_condition_selection="pe_plus_puf_native_challenger"
+            )
+        )
+        donor_frame = pd.DataFrame(
+            {
+                "age": [30, 45, 70],
+                "self_employment_income": [0.0, 15_000.0, 0.0],
+                "rental_income": [2_000.0, 0.0, 5_000.0],
+                "social_security_retirement": [0.0, 0.0, 20_000.0],
+                "alimony_income": [0.0, 3_000.0, 0.0],
+            }
+        )
+        current_frame = pd.DataFrame(
+            {
+                "age": [28, 50, 72],
+                "self_employment_income": [0.0, 12_000.0, 0.0],
+                "rental_income": [1_500.0, 0.0, 4_000.0],
+                "social_security_retirement": [0.0, 0.0, 18_000.0],
+                "alimony_income": [0.0, 2_500.0, 0.0],
+            }
+        )
+
+        assert pipeline._resolve_challenger_shared_condition_vars(
+            donor_frame=donor_frame,
+            current_frame=current_frame,
+            shared_vars=[
+                "age",
+                "self_employment_income",
+                "rental_income",
+                "social_security_retirement",
+                "alimony_income",
+            ],
+            donor_block=("taxable_interest_income",),
+            donor_source_name="irs_soi_puf_2024",
+        ) == [
+            "self_employment_income",
+            "rental_income",
+            "social_security_retirement",
+        ]
 
     def test_select_donor_condition_vars_keeps_all_shared_distinct_from_pe_presets(
         self,
@@ -6797,8 +6840,11 @@ class TestUSMicroplexPipeline:
                     "is_tax_unit_dependent",
                 ],
                 "requested_supplemental_shared_condition_vars": [],
+                "requested_challenger_shared_condition_vars": [],
                 "raw_supplemental_shared_condition_var_status": [],
+                "raw_challenger_shared_condition_var_status": [],
                 "supplemental_shared_condition_var_status": [],
+                "challenger_shared_condition_var_status": [],
                 "dropped_shared_vars": [
                     "education",
                     "employment_status",
@@ -6811,6 +6857,296 @@ class TestUSMicroplexPipeline:
                 ],
             }
         ]
+
+    def test_integrate_donor_sources_pe_plus_puf_native_challenger_widens_pe_surface(
+        self,
+        monkeypatch,
+        caplog,
+    ):
+        captured: list[tuple[str, ...]] = []
+
+        class FakeSynthesizer:
+            def __init__(self, *, target_vars, condition_vars, **kwargs):
+                _ = target_vars, kwargs
+                captured.append(tuple(condition_vars))
+
+            def fit(self, *args, **kwargs):
+                _ = args, kwargs
+
+            def generate(self, frame, seed=None):
+                _ = seed
+                result = frame.copy()
+                result["taxable_interest_income"] = [10.0, 20.0, 0.0, 25.0, 15.0, 0.0]
+                return result
+
+        monkeypatch.setattr("microplex_us.pipelines.us.Synthesizer", FakeSynthesizer)
+
+        cps_households = pd.DataFrame(
+            {
+                "household_id": [1, 2, 3],
+                "hh_weight": [100.0, 120.0, 90.0],
+                "state_fips": [6, 36, 12],
+                "tenure": [1, 2, 1],
+            }
+        )
+        cps_persons = pd.DataFrame(
+            {
+                "person_id": ["1:1", "1:2", "1:3", "2:1", "3:1", "3:2"],
+                "household_id": [1, 1, 1, 2, 3, 3],
+                "age": [45, 43, 12, 61, 38, 10],
+                "sex": [1, 2, 2, 1, 2, 1],
+                "education": [2, 2, 1, 2, 2, 1],
+                "employment_status": [1, 1, 0, 1, 1, 0],
+                "income": [80_000.0, 50_000.0, 0.0, 70_000.0, 55_000.0, 0.0],
+                "self_employment_income": [0.0, 2_000.0, 0.0, 0.0, 4_000.0, 0.0],
+                "rental_income": [500.0, 0.0, 0.0, 0.0, 1_500.0, 0.0],
+                "social_security_retirement": [0.0, 0.0, 0.0, 20_000.0, 0.0, 0.0],
+                "tax_unit_id": ["1001", "1001", "1001", "2001", "3001", "3001"],
+                "person_number": [1, 2, 3, 1, 1, 2],
+                "spouse_person_number": [2, 1, 0, 0, 0, 0],
+                "family_relationship": [1, 2, 3, 1, 1, 3],
+            }
+        )
+        donor_households = pd.DataFrame(
+            {
+                "household_id": [101, 102, 103],
+                "hh_weight": [80.0, 110.0, 95.0],
+                "state_fips": [6, 36, 12],
+                "tenure": [1, 2, 1],
+            }
+        )
+        donor_persons = pd.DataFrame(
+            {
+                "person_id": ["101:1", "101:2", "101:3", "102:1", "103:1", "103:2"],
+                "household_id": [101, 101, 101, 102, 103, 103],
+                "age": [46, 42, 11, 60, 39, 9],
+                "sex": [1, 2, 2, 1, 2, 1],
+                "education": [2, 2, 1, 2, 2, 1],
+                "employment_status": [1, 1, 0, 1, 1, 0],
+                "income": [70_000.0, 45_000.0, 0.0, 68_000.0, 52_000.0, 0.0],
+                "self_employment_income": [0.0, 1_000.0, 0.0, 0.0, 3_500.0, 0.0],
+                "rental_income": [400.0, 0.0, 0.0, 0.0, 1_200.0, 0.0],
+                "social_security_retirement": [0.0, 0.0, 0.0, 18_000.0, 0.0, 0.0],
+                "tax_unit_id": ["2101", "2101", "2101", "2201", "2301", "2301"],
+                "person_number": [1, 2, 3, 1, 1, 2],
+                "spouse_person_number": [2, 1, 0, 0, 0, 0],
+                "is_head": [1, 0, 0, 1, 1, 0],
+                "is_spouse": [0, 1, 0, 0, 0, 0],
+                "is_dependent": [0, 0, 1, 0, 0, 1],
+                "taxable_interest_income": [5.0, 10.0, 0.0, 12.0, 8.0, 0.0],
+            }
+        )
+
+        cps_frame = ObservationFrame(
+            source=SourceDescriptor(
+                name="cps_2024",
+                shareability=Shareability.PUBLIC,
+                time_structure=TimeStructure.REPEATED_CROSS_SECTION,
+                observations=(
+                    EntityObservation(
+                        entity=EntityType.HOUSEHOLD,
+                        weight_column="hh_weight",
+                        key_column="household_id",
+                        variable_names=("state_fips", "tenure"),
+                    ),
+                    EntityObservation(
+                        entity=EntityType.PERSON,
+                        key_column="person_id",
+                        variable_names=(
+                            "age",
+                            "sex",
+                            "education",
+                            "employment_status",
+                            "income",
+                            "self_employment_income",
+                            "rental_income",
+                            "social_security_retirement",
+                            "tax_unit_id",
+                            "person_number",
+                            "spouse_person_number",
+                            "family_relationship",
+                        ),
+                    ),
+                ),
+            ),
+            tables={
+                EntityType.HOUSEHOLD: cps_households,
+                EntityType.PERSON: cps_persons,
+            },
+            relationships=(
+                EntityRelationship(
+                    parent_entity=EntityType.HOUSEHOLD,
+                    child_entity=EntityType.PERSON,
+                    parent_key="household_id",
+                    child_key="household_id",
+                    cardinality=RelationshipCardinality.ONE_TO_MANY,
+                ),
+            ),
+        )
+        donor_frame = ObservationFrame(
+            source=SourceDescriptor(
+                name="irs_soi_puf_2024",
+                shareability=Shareability.PUBLIC,
+                time_structure=TimeStructure.REPEATED_CROSS_SECTION,
+                observations=(
+                    EntityObservation(
+                        entity=EntityType.HOUSEHOLD,
+                        weight_column="hh_weight",
+                        key_column="household_id",
+                        variable_names=("state_fips", "tenure"),
+                    ),
+                    EntityObservation(
+                        entity=EntityType.PERSON,
+                        key_column="person_id",
+                        variable_names=(
+                            "age",
+                            "sex",
+                            "education",
+                            "employment_status",
+                            "income",
+                            "self_employment_income",
+                            "rental_income",
+                            "social_security_retirement",
+                            "tax_unit_id",
+                            "person_number",
+                            "spouse_person_number",
+                            "is_head",
+                            "is_spouse",
+                            "is_dependent",
+                            "taxable_interest_income",
+                        ),
+                    ),
+                ),
+                variable_capabilities={
+                    "income": SourceVariableCapability(
+                        authoritative=False,
+                        usable_as_condition=False,
+                    ),
+                    "employment_status": SourceVariableCapability(
+                        authoritative=False,
+                        usable_as_condition=False,
+                    ),
+                    "taxable_interest_income": SourceVariableCapability(
+                        authoritative=True,
+                        usable_as_condition=True,
+                    ),
+                },
+            ),
+            tables={
+                EntityType.HOUSEHOLD: donor_households,
+                EntityType.PERSON: donor_persons,
+            },
+            relationships=(
+                EntityRelationship(
+                    parent_entity=EntityType.HOUSEHOLD,
+                    child_entity=EntityType.PERSON,
+                    parent_key="household_id",
+                    child_key="household_id",
+                    cardinality=RelationshipCardinality.ONE_TO_MANY,
+                ),
+            ),
+        )
+        pipeline = USMicroplexPipeline(
+            USMicroplexBuildConfig(
+                n_synthetic=6,
+                synthesis_backend="bootstrap",
+                calibration_backend="entropy",
+                donor_imputer_condition_selection="pe_plus_puf_native_challenger",
+                donor_imputer_max_condition_vars=1,
+            )
+        )
+        cps_input = pipeline.prepare_source_input(cps_frame)
+        donor_input = pipeline.prepare_source_input(donor_frame)
+        seed_data = pipeline.prepare_seed_data_from_source(cps_input)
+        caplog.set_level(logging.INFO, logger="microplex_us.pipelines.us")
+
+        integration = pipeline._integrate_donor_sources(
+            seed_data,
+            scaffold_input=cps_input,
+            donor_inputs=[donor_input],
+        )
+
+        assert captured == [
+            (
+                "age",
+                "is_male",
+                "tax_unit_is_joint",
+                "tax_unit_count_dependents",
+                "is_tax_unit_head",
+                "is_tax_unit_spouse",
+                "is_tax_unit_dependent",
+                "self_employment_income",
+                "rental_income",
+                "social_security_retirement",
+            )
+        ]
+        diagnostics = integration["conditioning_diagnostics"][0]
+        assert diagnostics["condition_selection"] == "pe_plus_puf_native_challenger"
+        assert diagnostics["used_condition_surface"] is False
+        assert diagnostics["requested_challenger_shared_condition_vars"] == [
+            "self_employment_income",
+            "rental_income",
+            "social_security_retirement",
+        ]
+        assert diagnostics["selected_condition_vars"] == list(captured[0])
+        assert diagnostics["raw_challenger_shared_condition_var_status"] == [
+            {
+                "variable": "self_employment_income",
+                "selected": True,
+                "in_shared_overlap": True,
+                "reason": "selected",
+            },
+            {
+                "variable": "rental_income",
+                "selected": True,
+                "in_shared_overlap": True,
+                "reason": "selected",
+            },
+            {
+                "variable": "social_security_retirement",
+                "selected": True,
+                "in_shared_overlap": True,
+                "reason": "selected",
+            },
+        ]
+        assert diagnostics["challenger_shared_condition_var_status"] == [
+            {
+                "variable": "self_employment_income",
+                "selected": True,
+                "in_shared_overlap": True,
+                "reason": "selected",
+            },
+            {
+                "variable": "rental_income",
+                "selected": True,
+                "in_shared_overlap": True,
+                "reason": "selected",
+            },
+            {
+                "variable": "social_security_retirement",
+                "selected": True,
+                "in_shared_overlap": True,
+                "reason": "selected",
+            },
+        ]
+        log_messages = [record.getMessage() for record in caplog.records]
+        assert any(
+            "US microplex donor integration: source ready" in message
+            and "donor_source=irs_soi_puf_2024" in message
+            and "blocks=1" in message
+            for message in log_messages
+        )
+        assert any(
+            "US microplex donor integration: block run" in message
+            and "block=taxable_interest_income" in message
+            and "condition_vars=10" in message
+            for message in log_messages
+        )
+        assert any(
+            "US microplex donor integration: block complete" in message
+            and "integrated_vars=1" in message
+            for message in log_messages
+        )
 
     def test_integrate_donor_sources_uses_pe_prespecified_acs_predictors(
         self,

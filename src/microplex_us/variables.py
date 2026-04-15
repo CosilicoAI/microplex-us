@@ -82,6 +82,24 @@ PUF_IRS_TAX_PREFERRED_CONDITION_VARS = (
 )
 # Keep PE-aligned PUF tax-leaf conditioning structural by default.
 PUF_IRS_TAX_SUPPLEMENTAL_SHARED_CONDITION_VARS: tuple[str, ...] = ()
+# Explicit challenger widening for live PUF tax-leaf blocks. These vars are only
+# meant for opt-in experiments that retain the PE structural backbone while
+# layering in a narrow source-native raw-overlap surface.
+PUF_DIVIDEND_INTEREST_CHALLENGER_SHARED_CONDITION_VARS = (
+    "self_employment_income",
+    "rental_income",
+    "social_security_retirement",
+)
+PUF_PENSION_CHALLENGER_SHARED_CONDITION_VARS = (
+    "social_security_retirement",
+    "social_security_disability",
+    "unemployment_compensation",
+)
+PUF_PARTNERSHIP_CHALLENGER_SHARED_CONDITION_VARS = (
+    "self_employment_income",
+    "rental_income",
+    "alimony_income",
+)
 RENTAL_INCOME_COMPONENT_PREFERRED_CONDITION_VARS = (
     "state_fips",
     "tenure",
@@ -125,6 +143,7 @@ class VariableSemanticSpec:
     donor_check: FrameSemanticCheck | None = None
     preferred_condition_vars: tuple[str, ...] = ()
     supplemental_shared_condition_vars: tuple[str, ...] = ()
+    challenger_shared_condition_vars: tuple[str, ...] = ()
     notes: str | None = None
 
     def is_redundant_given(self, variable_names: Iterable[str]) -> bool:
@@ -245,6 +264,9 @@ VARIABLE_SEMANTIC_SPECS: dict[str, VariableSemanticSpec] = {
         donor_match_strategy=DonorMatchStrategy.ZERO_INFLATED_POSITIVE,
         preferred_condition_vars=PUF_IRS_TAX_PREFERRED_CONDITION_VARS,
         supplemental_shared_condition_vars=PUF_IRS_TAX_SUPPLEMENTAL_SHARED_CONDITION_VARS,
+        challenger_shared_condition_vars=(
+            PUF_DIVIDEND_INTEREST_CHALLENGER_SHARED_CONDITION_VARS
+        ),
         notes="Dividend totals are derived from the qualified and non-qualified atomic basis.",
     ),
     "ordinary_dividend_income": VariableSemanticSpec(
@@ -273,6 +295,9 @@ VARIABLE_SEMANTIC_SPECS: dict[str, VariableSemanticSpec] = {
         donor_match_strategy=DonorMatchStrategy.ZERO_INFLATED_POSITIVE,
         preferred_condition_vars=PUF_IRS_TAX_PREFERRED_CONDITION_VARS,
         supplemental_shared_condition_vars=PUF_IRS_TAX_SUPPLEMENTAL_SHARED_CONDITION_VARS,
+        challenger_shared_condition_vars=(
+            PUF_DIVIDEND_INTEREST_CHALLENGER_SHARED_CONDITION_VARS
+        ),
     ),
     "non_qualified_dividend_income": VariableSemanticSpec(
         native_entity=EntityType.PERSON,
@@ -285,6 +310,9 @@ VARIABLE_SEMANTIC_SPECS: dict[str, VariableSemanticSpec] = {
         donor_match_strategy=DonorMatchStrategy.ZERO_INFLATED_POSITIVE,
         preferred_condition_vars=PUF_IRS_TAX_PREFERRED_CONDITION_VARS,
         supplemental_shared_condition_vars=PUF_IRS_TAX_SUPPLEMENTAL_SHARED_CONDITION_VARS,
+        challenger_shared_condition_vars=(
+            PUF_DIVIDEND_INTEREST_CHALLENGER_SHARED_CONDITION_VARS
+        ),
     ),
     "taxable_interest_income": VariableSemanticSpec(
         native_entity=EntityType.PERSON,
@@ -297,6 +325,9 @@ VARIABLE_SEMANTIC_SPECS: dict[str, VariableSemanticSpec] = {
         donor_match_strategy=DonorMatchStrategy.ZERO_INFLATED_POSITIVE,
         preferred_condition_vars=PUF_IRS_TAX_PREFERRED_CONDITION_VARS,
         supplemental_shared_condition_vars=PUF_IRS_TAX_SUPPLEMENTAL_SHARED_CONDITION_VARS,
+        challenger_shared_condition_vars=(
+            PUF_DIVIDEND_INTEREST_CHALLENGER_SHARED_CONDITION_VARS
+        ),
     ),
     "tax_exempt_interest_income": VariableSemanticSpec(
         native_entity=EntityType.PERSON,
@@ -321,6 +352,7 @@ VARIABLE_SEMANTIC_SPECS: dict[str, VariableSemanticSpec] = {
         donor_match_strategy=DonorMatchStrategy.ZERO_INFLATED_POSITIVE,
         preferred_condition_vars=PUF_IRS_TAX_PREFERRED_CONDITION_VARS,
         supplemental_shared_condition_vars=PUF_IRS_TAX_SUPPLEMENTAL_SHARED_CONDITION_VARS,
+        challenger_shared_condition_vars=PUF_PENSION_CHALLENGER_SHARED_CONDITION_VARS,
     ),
     "taxable_social_security": VariableSemanticSpec(
         native_entity=EntityType.PERSON,
@@ -429,6 +461,9 @@ VARIABLE_SEMANTIC_SPECS: dict[str, VariableSemanticSpec] = {
         donor_match_strategy=DonorMatchStrategy.ZERO_INFLATED_POSITIVE,
         preferred_condition_vars=PUF_IRS_TAX_PREFERRED_CONDITION_VARS,
         supplemental_shared_condition_vars=PUF_IRS_TAX_SUPPLEMENTAL_SHARED_CONDITION_VARS,
+        challenger_shared_condition_vars=(
+            PUF_PARTNERSHIP_CHALLENGER_SHARED_CONDITION_VARS
+        ),
     ),
     "employment_income": VariableSemanticSpec(
         native_entity=EntityType.PERSON,
@@ -510,6 +545,9 @@ VARIABLE_SEMANTIC_SPECS: dict[str, VariableSemanticSpec] = {
         donor_match_strategy=DonorMatchStrategy.ZERO_INFLATED_POSITIVE,
         preferred_condition_vars=PUF_IRS_TAX_PREFERRED_CONDITION_VARS,
         supplemental_shared_condition_vars=PUF_IRS_TAX_SUPPLEMENTAL_SHARED_CONDITION_VARS,
+        challenger_shared_condition_vars=(
+            PUF_PARTNERSHIP_CHALLENGER_SHARED_CONDITION_VARS
+        ),
     ),
     "has_medicaid": VariableSemanticSpec(
         projection_aggregation=ProjectionAggregation.MAX,

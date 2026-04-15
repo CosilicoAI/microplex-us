@@ -41,6 +41,10 @@ def test_summarize_donor_conditioning_filters_and_counts(tmp_path: Path) -> None
                                 "income",
                                 "state_fips",
                             ],
+                            "requested_challenger_shared_condition_vars": [
+                                "self_employment_income",
+                                "rental_income",
+                            ],
                             "raw_supplemental_shared_condition_var_status": [
                                 {
                                     "variable": "employment_status",
@@ -61,6 +65,20 @@ def test_summarize_donor_conditioning_filters_and_counts(tmp_path: Path) -> None
                                     "reason": "selected",
                                 },
                             ],
+                            "raw_challenger_shared_condition_var_status": [
+                                {
+                                    "variable": "self_employment_income",
+                                    "selected": True,
+                                    "in_shared_overlap": True,
+                                    "reason": "selected",
+                                },
+                                {
+                                    "variable": "rental_income",
+                                    "selected": False,
+                                    "in_shared_overlap": False,
+                                    "reason": "excluded_from_shared_overlap",
+                                },
+                            ],
                             "supplemental_shared_condition_var_status": [
                                 {
                                     "variable": "employment_status",
@@ -79,6 +97,20 @@ def test_summarize_donor_conditioning_filters_and_counts(tmp_path: Path) -> None
                                     "selected": True,
                                     "in_shared_overlap": True,
                                     "reason": "selected",
+                                },
+                            ],
+                            "challenger_shared_condition_var_status": [
+                                {
+                                    "variable": "self_employment_income",
+                                    "selected": True,
+                                    "in_shared_overlap": True,
+                                    "reason": "selected",
+                                },
+                                {
+                                    "variable": "rental_income",
+                                    "selected": False,
+                                    "in_shared_overlap": False,
+                                    "reason": "missing_current_column",
                                 },
                             ],
                             "selected_condition_vars": [
@@ -128,6 +160,14 @@ def test_summarize_donor_conditioning_filters_and_counts(tmp_path: Path) -> None
         "incompatible_condition_support": 1,
         "selected": 1,
     }
+    assert payload["raw_challenger_shared_condition_reason_frequency"] == {
+        "excluded_from_shared_overlap": 1,
+        "selected": 1,
+    }
+    assert payload["challenger_shared_condition_reason_frequency"] == {
+        "missing_current_column": 1,
+        "selected": 1,
+    }
     assert payload["blocks"][0]["donor_source"] == "irs_soi_puf_2024"
     assert payload["blocks"][0]["raw_shared_vars"] == [
         "age",
@@ -153,5 +193,23 @@ def test_summarize_donor_conditioning_filters_and_counts(tmp_path: Path) -> None
             "selected": True,
             "in_shared_overlap": True,
             "reason": "selected",
+        },
+    ]
+    assert payload["blocks"][0]["requested_challenger_shared_condition_vars"] == [
+        "self_employment_income",
+        "rental_income",
+    ]
+    assert payload["blocks"][0]["raw_challenger_shared_condition_var_status"] == [
+        {
+            "variable": "self_employment_income",
+            "selected": True,
+            "in_shared_overlap": True,
+            "reason": "selected",
+        },
+        {
+            "variable": "rental_income",
+            "selected": False,
+            "in_shared_overlap": False,
+            "reason": "excluded_from_shared_overlap",
         },
     ]

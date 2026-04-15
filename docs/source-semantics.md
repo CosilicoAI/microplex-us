@@ -83,6 +83,11 @@ two distinct selection modes:
     backbone
   - optionally admit a narrow `supplemental_shared_condition_vars` set from the
     actual shared overlap, instead of reopening the full common-predictor pool
+- `pe_plus_puf_native_challenger` selection:
+  - keep the same PE structural backbone
+  - for the explicitly marked problematic PUF tax-leaf blocks only, append a
+    narrow set of source-native raw-overlap predictors declared in semantics
+  - treat that lane as an opt-in challenger, not as a PE-alignment update
 
 For the problematic PUF tax-leaf family, the PE-aligned default is still the
 structural backbone only. The local `policyengine-us-data`
@@ -124,8 +129,11 @@ executed donor block, including:
 - selected condition vars
 - shared vars that were available but dropped
 - requested supplemental shared vars
+- requested challenger shared vars
 - raw-stage supplemental rejection reasons
+- raw-stage challenger rejection reasons
 - prepared-stage supplemental rejection reasons
+- prepared-stage challenger rejection reasons
 - whether the block used a prepared condition surface
 
 Use `python -m microplex_us.pipelines.summarize_donor_conditioning <artifact>`

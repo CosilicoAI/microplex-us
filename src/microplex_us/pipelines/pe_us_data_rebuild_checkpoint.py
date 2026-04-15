@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
+import sys
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -67,6 +69,23 @@ if TYPE_CHECKING:
 
 DEFAULT_CHECKPOINT_IMPUTATION_ABLATION_EVAL_FRACTION = 0.25
 MIN_CHECKPOINT_IMPUTATION_ABLATION_HOUSEHOLDS = 8
+LOGGER = logging.getLogger(__name__)
+
+
+def _root_logger_has_handlers() -> bool:
+    return bool(logging.getLogger().handlers)
+
+
+def _emit_checkpoint_progress(message: str, /, **context: object) -> None:
+    details = ", ".join(
+        f"{key}={value}"
+        for key, value in context.items()
+        if value is not None and value != ""
+    )
+    line = f"{message} [{details}]" if details else message
+    LOGGER.info(line)
+    if not LOGGER.handlers and not _root_logger_has_handlers():
+        print(line, file=sys.stderr, flush=True)
 
 
 def _resolve_checkpoint_calibration_target_variables(
@@ -1865,6 +1884,14 @@ def run_policyengine_us_data_rebuild_checkpoint(
         "rebuild_profile_expected": True,
         **dict(run_registry_metadata or {}),
     }
+    _emit_checkpoint_progress(
+        "PE-US-data rebuild checkpoint: starting build",
+        output_root=Path(output_root).expanduser(),
+        version_id=version_id or "auto",
+        target_profile=resolved_config.policyengine_target_profile,
+        donor_condition_selection=resolved_config.donor_imputer_condition_selection,
+        providers=",".join(provider_names),
+    )
 
     artifacts = build_and_save_versioned_us_microplex_from_source_providers(
         providers=list(resolved_providers),
@@ -1889,6 +1916,19 @@ def run_policyengine_us_data_rebuild_checkpoint(
         run_registry_metadata=resolved_registry_metadata,
         enable_child_tax_unit_agi_drift=True,
     )
+    _emit_checkpoint_progress(
+        "PE-US-data rebuild checkpoint: build complete",
+        artifact_dir=artifacts.artifact_paths.output_dir,
+        frontier_metric=frontier_metric,
+    )
+    _emit_checkpoint_progress(
+        "PE-US-data rebuild checkpoint: attaching PE evidence",
+        artifact_dir=artifacts.artifact_paths.output_dir,
+        compute_harness=not defer_policyengine_harness,
+        compute_native_scores=not defer_policyengine_native_score,
+        compute_native_audit=not defer_native_audit,
+        compute_imputation_ablation=not defer_imputation_ablation,
+    )
     evidence = attach_policyengine_us_data_rebuild_checkpoint_evidence(
         artifacts.artifact_paths.output_dir,
         build_result=artifacts.build_result,
@@ -1912,10 +1952,20 @@ def run_policyengine_us_data_rebuild_checkpoint(
         run_index_path=run_index_path,
         run_registry_metadata=resolved_registry_metadata,
     )
+    _emit_checkpoint_progress(
+        "PE-US-data rebuild checkpoint: evidence complete",
+        parity_path=evidence.parity_path,
+        native_audit_path=evidence.native_audit_path,
+        imputation_ablation_path=evidence.imputation_ablation_path,
+    )
     refreshed_artifacts = _load_checkpoint_versioned_artifacts(
         build_result=artifacts.build_result,
         artifact_root=artifacts.artifact_paths.output_dir,
         frontier_metric=frontier_metric,
+    )
+    _emit_checkpoint_progress(
+        "PE-US-data rebuild checkpoint: checkpoint ready",
+        artifact_dir=refreshed_artifacts.artifact_paths.output_dir,
     )
     return PEUSDataRebuildCheckpointResult(
         build_config=resolved_config,
@@ -1948,6 +1998,7 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--calibration-target-profile")
     parser.add_argument("--n-synthetic", type=int, default=100_000)
     parser.add_argument("--random-seed", type=int, default=42)
+    parser.add_argument("--donor-imputer-condition-selection")
     parser.add_argument("--cps-source-year", type=int, default=2023)
     parser.add_argument("--puf-target-year", type=int)
     parser.add_argument("--puf-cps-reference-year", type=int)
@@ -1983,6 +2034,15 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--require-policyengine-native-score", action="store_true")
     args = parser.parse_args(argv)
 
+    config_overrides = {
+        "n_synthetic": int(args.n_synthetic),
+        "random_seed": int(args.random_seed),
+    }
+    if args.donor_imputer_condition_selection is not None:
+        config_overrides["donor_imputer_condition_selection"] = (
+            args.donor_imputer_condition_selection
+        )
+
     result = run_policyengine_us_data_rebuild_checkpoint(
         output_root=args.output_root,
         policyengine_baseline_dataset=args.baseline_dataset,
@@ -1996,10 +2056,7 @@ def main(argv: list[str] | None = None) -> None:
         calibration_target_variables=tuple(args.calibration_target_variable),
         calibration_target_domains=tuple(args.calibration_target_domain),
         calibration_target_geo_levels=tuple(args.calibration_target_geo_level),
-        config_overrides={
-            "n_synthetic": int(args.n_synthetic),
-            "random_seed": int(args.random_seed),
-        },
+        config_overrides=config_overrides,
         cps_source_year=args.cps_source_year,
         cps_cache_dir=args.cps_cache_dir,
         cps_download=not args.no_cps_download,

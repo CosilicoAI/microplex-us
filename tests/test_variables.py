@@ -329,8 +329,11 @@ def test_partnership_income_semantics_remain_person_native():
 
 def test_sparse_irs_tax_variables_use_puf_irs_predictors():
     from microplex_us.variables import (
+        PUF_DIVIDEND_INTEREST_CHALLENGER_SHARED_CONDITION_VARS,
         PUF_IRS_TAX_PREFERRED_CONDITION_VARS,
         PUF_IRS_TAX_SUPPLEMENTAL_SHARED_CONDITION_VARS,
+        PUF_PARTNERSHIP_CHALLENGER_SHARED_CONDITION_VARS,
+        PUF_PENSION_CHALLENGER_SHARED_CONDITION_VARS,
         variable_semantic_spec_for,
     )
 
@@ -359,6 +362,26 @@ def test_sparse_irs_tax_variables_use_puf_irs_predictors():
         )
 
     assert PUF_IRS_TAX_SUPPLEMENTAL_SHARED_CONDITION_VARS == ()
+    assert (
+        variable_semantic_spec_for("taxable_interest_income")
+        .challenger_shared_condition_vars
+        == PUF_DIVIDEND_INTEREST_CHALLENGER_SHARED_CONDITION_VARS
+    )
+    assert (
+        variable_semantic_spec_for("qualified_dividend_income")
+        .challenger_shared_condition_vars
+        == PUF_DIVIDEND_INTEREST_CHALLENGER_SHARED_CONDITION_VARS
+    )
+    assert (
+        variable_semantic_spec_for("taxable_pension_income")
+        .challenger_shared_condition_vars
+        == PUF_PENSION_CHALLENGER_SHARED_CONDITION_VARS
+    )
+    assert (
+        variable_semantic_spec_for("partnership_s_corp_income")
+        .challenger_shared_condition_vars
+        == PUF_PARTNERSHIP_CHALLENGER_SHARED_CONDITION_VARS
+    )
 
 
 def test_rental_income_components_use_sparse_asset_conditioning():

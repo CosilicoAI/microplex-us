@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
@@ -12,6 +13,7 @@ import h5py
 import pandas as pd
 from microplex.core import SourceQuery
 
+import microplex_us.pipelines.pe_us_data_rebuild_checkpoint as checkpoint_module
 from microplex_us.pipelines.artifacts import (
     USMicroplexArtifactPaths,
     USMicroplexVersionedBuildArtifacts,
@@ -280,6 +282,7 @@ class _FakeProvider:
 def test_run_policyengine_us_data_rebuild_checkpoint_builds_bundle_and_parity(
     monkeypatch,
     tmp_path,
+    caplog,
 ) -> None:
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(
@@ -528,6 +531,10 @@ def test_run_policyengine_us_data_rebuild_checkpoint_builds_bundle_and_parity(
         fake_attach_policyengine_us_data_rebuild_checkpoint_evidence,
     )
 
+    caplog.set_level(
+        logging.INFO,
+        logger="microplex_us.pipelines.pe_us_data_rebuild_checkpoint",
+    )
     result = run_policyengine_us_data_rebuild_checkpoint(
         output_root=tmp_path / "artifacts",
         policyengine_baseline_dataset="/tmp/enhanced_cps_2024.h5",
@@ -599,6 +606,118 @@ def test_run_policyengine_us_data_rebuild_checkpoint_builds_bundle_and_parity(
     }
     assert result.imputation_ablation_path is None
     assert result.imputation_ablation_payload is None
+    log_messages = [record.getMessage() for record in caplog.records]
+    assert any(
+        "PE-US-data rebuild checkpoint: starting build" in message
+        and "version_id=run-1" in message
+        and "providers=fake_source" in message
+        for message in log_messages
+    )
+    assert any(
+        "PE-US-data rebuild checkpoint: build complete" in message
+        and str(artifact_dir) in message
+        for message in log_messages
+    )
+    assert any(
+        "PE-US-data rebuild checkpoint: attaching PE evidence" in message
+        and "compute_native_audit=True" in message
+        for message in log_messages
+    )
+    assert any(
+        "PE-US-data rebuild checkpoint: evidence complete" in message
+        and "pe_us_data_rebuild_parity.json" in message
+        for message in log_messages
+    )
+    assert any(
+        "PE-US-data rebuild checkpoint: checkpoint ready" in message
+        and str(artifact_dir) in message
+        for message in log_messages
+    )
+
+
+def test_emit_checkpoint_progress_falls_back_to_stderr_when_no_logger_handlers(
+    monkeypatch,
+    capsys,
+) -> None:
+    emitted: list[str] = []
+
+    class _FakeLogger:
+        handlers: list[object] = []
+
+        def info(self, message: str) -> None:
+            emitted.append(message)
+
+    monkeypatch.setattr(checkpoint_module, "LOGGER", _FakeLogger())
+    monkeypatch.setattr(checkpoint_module, "_root_logger_has_handlers", lambda: False)
+
+    checkpoint_module._emit_checkpoint_progress(
+        "PE-US-data rebuild checkpoint: starting build",
+        version_id="run-1",
+        providers="fake_source",
+    )
+
+    stderr = capsys.readouterr().err
+    assert emitted == [
+        "PE-US-data rebuild checkpoint: starting build "
+        "[version_id=run-1, providers=fake_source]"
+    ]
+    assert (
+        stderr
+        == "PE-US-data rebuild checkpoint: starting build "
+        "[version_id=run-1, providers=fake_source]\n"
+    )
+
+
+def test_main_passes_donor_condition_selection_override(monkeypatch, capsys) -> None:
+    captured: dict[str, Any] = {}
+    artifact_dir = Path("/tmp/artifacts/run-1")
+    parity_path = artifact_dir / "pe_us_data_rebuild_parity.json"
+
+    def fake_run_policyengine_us_data_rebuild_checkpoint(**kwargs):
+        captured.update(kwargs)
+        return SimpleNamespace(
+            artifacts=SimpleNamespace(
+                artifact_paths=SimpleNamespace(output_dir=artifact_dir)
+            ),
+            parity_path=parity_path,
+            parity_payload={
+                "verdict": {"hasRealPolicyEngineComparison": True},
+            },
+        )
+
+    monkeypatch.setattr(
+        checkpoint_module,
+        "run_policyengine_us_data_rebuild_checkpoint",
+        fake_run_policyengine_us_data_rebuild_checkpoint,
+    )
+
+    checkpoint_module.main(
+        [
+            "--output-root",
+            "/tmp/artifacts",
+            "--baseline-dataset",
+            "/tmp/enhanced_cps_2024.h5",
+            "--targets-db",
+            "/tmp/policy_data.db",
+            "--version-id",
+            "run-1",
+            "--donor-imputer-condition-selection",
+            "pe_plus_puf_native_challenger",
+            "--defer-native-audit",
+            "--defer-imputation-ablation",
+        ]
+    )
+
+    assert captured["config_overrides"]["donor_imputer_condition_selection"] == (
+        "pe_plus_puf_native_challenger"
+    )
+    assert captured["config_overrides"]["n_synthetic"] == 100_000
+    assert captured["config_overrides"]["random_seed"] == 42
+    assert captured["defer_native_audit"] is True
+    assert captured["defer_imputation_ablation"] is True
+    stdout = capsys.readouterr().out
+    assert "/tmp/artifacts/run-1" in stdout
+    assert "hasRealPolicyEngineComparison" in stdout
 
 
 def test_run_policyengine_us_data_rebuild_checkpoint_rejects_empty_provider_sequence(

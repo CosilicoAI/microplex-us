@@ -1813,3 +1813,50 @@ canonical description is:
     conditioning
   - treat any future widening as an explicit challenger experiment using
     source-native PUF predictors, not as a PE-alignment patch
+
+## 2026-04-14 PUF native challenger diagnostic smoke
+
+- run:
+  - `artifacts/live_pe_us_data_rebuild_checkpoint_20260414_pe_plus_puf_native_challenger_diag_smoke/puf-native-challenger-diag-smoke-v1`
+- question:
+  - if we add an explicit non-default challenger lane that keeps the PE
+    structural backbone but appends a narrow source-native PUF overlap, do
+    those vars actually enter the four problematic tax-leaf blocks on a live
+    artifact?
+- setup:
+  - `donor_imputer_condition_selection = pe_plus_puf_native_challenger`
+  - keep the PE structural predictors for the PUF IRS tax-leaf family
+  - append only explicit source-native challengers:
+    - dividend / taxable-interest blocks:
+      `self_employment_income`, `rental_income`,
+      `social_security_retirement`
+    - taxable-pension block:
+      `social_security_retirement`, `social_security_disability`,
+      `unemployment_compensation`
+    - partnership block:
+      `self_employment_income`, `rental_income`, `alimony_income`
+- read:
+  - the challenger vars now enter the live artifact for all four targeted
+    blocks
+  - selected sets were:
+    - dividend split:
+      PE structural backbone + `self_employment_income`, `rental_income`,
+      `social_security_retirement`
+    - `taxable_interest_income`:
+      PE structural backbone + `self_employment_income`, `rental_income`,
+      `social_security_retirement`
+    - `taxable_pension_income`:
+      PE structural backbone + `social_security_retirement`,
+      `social_security_disability`, `unemployment_compensation`
+    - `partnership_s_corp_income`:
+      PE structural backbone + `self_employment_income`, `rental_income`
+      while `alimony_income` failed with `incompatible_condition_support`
+- interpretation:
+  - this clears the immediate blocker from the earlier failed supplement patch:
+    we now have a real opt-in challenger lane whose native PUF predictors are
+    visible in live `donor_conditioning_diagnostics`
+  - the next real question is no longer "can the vars get in?" but "does this
+    challenger help or hurt the PE-oracle losses once we run a full checkpoint"
+- next step:
+  - run one matched broader checkpoint with this challenger mode and compare it
+    against the structural-only PE-aligned default

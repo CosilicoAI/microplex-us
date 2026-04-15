@@ -5,8 +5,9 @@ from __future__ import annotations
 import argparse
 import json
 from collections import Counter
+from collections.abc import Iterable
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 
 
 def _resolve_artifact_dir(path: str | Path) -> Path:
@@ -50,6 +51,8 @@ def summarize_donor_conditioning(
     dropped_counter: Counter[str] = Counter()
     raw_supplemental_reason_counter: Counter[str] = Counter()
     supplemental_reason_counter: Counter[str] = Counter()
+    raw_challenger_reason_counter: Counter[str] = Counter()
+    challenger_reason_counter: Counter[str] = Counter()
     block_summaries: list[dict[str, Any]] = []
     for entry in diagnostics:
         selected = list(entry.get("selected_condition_vars", []))
@@ -59,6 +62,12 @@ def summarize_donor_conditioning(
         )
         supplemental_status = list(
             entry.get("supplemental_shared_condition_var_status", [])
+        )
+        raw_challenger_status = list(
+            entry.get("raw_challenger_shared_condition_var_status", [])
+        )
+        challenger_status = list(
+            entry.get("challenger_shared_condition_var_status", [])
         )
         selected_counter.update(selected)
         dropped_counter.update(dropped)
@@ -70,6 +79,16 @@ def summarize_donor_conditioning(
         supplemental_reason_counter.update(
             status.get("reason")
             for status in supplemental_status
+            if status.get("reason") is not None
+        )
+        raw_challenger_reason_counter.update(
+            status.get("reason")
+            for status in raw_challenger_status
+            if status.get("reason") is not None
+        )
+        challenger_reason_counter.update(
+            status.get("reason")
+            for status in challenger_status
             if status.get("reason") is not None
         )
         block_summaries.append(
@@ -92,8 +111,13 @@ def summarize_donor_conditioning(
                 "requested_supplemental_shared_condition_vars": list(
                     entry.get("requested_supplemental_shared_condition_vars", [])
                 ),
+                "requested_challenger_shared_condition_vars": list(
+                    entry.get("requested_challenger_shared_condition_vars", [])
+                ),
                 "raw_supplemental_shared_condition_var_status": raw_supplemental_status,
+                "raw_challenger_shared_condition_var_status": raw_challenger_status,
                 "supplemental_shared_condition_var_status": supplemental_status,
+                "challenger_shared_condition_var_status": challenger_status,
                 "selected_condition_vars": selected,
                 "dropped_shared_vars": dropped,
             }
@@ -108,8 +132,14 @@ def summarize_donor_conditioning(
         "raw_supplemental_shared_condition_reason_frequency": dict(
             sorted(raw_supplemental_reason_counter.items())
         ),
+        "raw_challenger_shared_condition_reason_frequency": dict(
+            sorted(raw_challenger_reason_counter.items())
+        ),
         "supplemental_shared_condition_reason_frequency": dict(
             sorted(supplemental_reason_counter.items())
+        ),
+        "challenger_shared_condition_reason_frequency": dict(
+            sorted(challenger_reason_counter.items())
         ),
         "blocks": block_summaries,
     }

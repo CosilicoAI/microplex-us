@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import importlib.util
+import logging
+import sys
 import warnings
 from collections import Counter
 from collections.abc import Iterable
@@ -84,6 +86,31 @@ from microplex_us.variables import (
     social_security_retirement_compatible_amount,
     variable_semantic_spec_for,
 )
+
+LOGGER = logging.getLogger(__name__)
+
+
+def _root_logger_has_handlers() -> bool:
+    return bool(logging.getLogger().handlers)
+
+
+def _format_progress_values(values: Iterable[Any], *, limit: int = 6) -> str:
+    rendered = [str(value) for value in values]
+    if len(rendered) <= limit:
+        return ",".join(rendered)
+    return ",".join(rendered[:limit]) + f",...(+{len(rendered) - limit})"
+
+
+def _emit_us_pipeline_progress(message: str, /, **context: object) -> None:
+    details = ", ".join(
+        f"{key}={value}"
+        for key, value in context.items()
+        if value is not None and value != ""
+    )
+    line = f"{message} [{details}]" if details else message
+    LOGGER.info(line)
+    if not LOGGER.handlers and not _root_logger_has_handlers():
+        print(line, file=sys.stderr, flush=True)
 
 STATE_FIPS = {
     1: "AL",
@@ -662,7 +689,6 @@ def _build_policyengine_calibration_target_ledger(
     materialization_failures: dict[str, str],
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     min_required_households = max(1, int(min_active_households))
-    compiled_target_names = {target.name for target in compiled_targets}
     structurally_unsupported_names = {
         target.name for target in structurally_unsupported_targets
     }
@@ -1408,7 +1434,10 @@ class USMicroplexBuildConfig:
     donor_imputer_qrf_n_estimators: int = 100
     donor_imputer_qrf_zero_threshold: float = 0.05
     donor_imputer_condition_selection: Literal[
-        "all_shared", "top_correlated", "pe_prespecified"
+        "all_shared",
+        "top_correlated",
+        "pe_prespecified",
+        "pe_plus_puf_native_challenger",
     ] = "top_correlated"
     donor_imputer_max_condition_vars: int | None = 8
     donor_imputer_excluded_variables: tuple[str, ...] = ("filing_status_code",)
@@ -3934,8 +3963,20 @@ class USMicroplexPipeline:
             "is_dependent",
         }
         rng = np.random.default_rng(self.config.random_seed)
+        _emit_us_pipeline_progress(
+            "US microplex donor integration: start",
+            donor_sources=len(donor_inputs),
+            seed_rows=len(current),
+            condition_selection=self.config.donor_imputer_condition_selection,
+        )
 
         for donor_input in donor_inputs:
+            donor_source_name = donor_input.frame.source.name
+            _emit_us_pipeline_progress(
+                "US microplex donor integration: source start",
+                donor_source=donor_source_name,
+                current_rows=len(current),
+            )
             donor_seed = self.prepare_seed_data_from_source(donor_input)
             donor_observed = prune_redundant_variables(
                 donor_input.fusion_plan.variables_for(EntityType.HOUSEHOLD)
@@ -3994,9 +4035,24 @@ class USMicroplexPipeline:
             )
             donor_target_vars = sorted(set(donor_only_vars) | set(donor_override_vars))
             if not shared_vars or not donor_target_vars:
+                _emit_us_pipeline_progress(
+                    "US microplex donor integration: source skipped",
+                    donor_source=donor_source_name,
+                    donor_rows=len(donor_seed),
+                    shared_vars=len(shared_vars),
+                    donor_target_vars=len(donor_target_vars),
+                )
                 continue
 
             donor_block_specs = donor_imputation_block_specs(donor_target_vars)
+            _emit_us_pipeline_progress(
+                "US microplex donor integration: source ready",
+                donor_source=donor_source_name,
+                donor_rows=len(donor_seed),
+                shared_vars=len(shared_vars),
+                donor_target_vars=len(donor_target_vars),
+                blocks=len(donor_block_specs),
+            )
             required_entities = {
                 donor_block_spec.native_entity
                 for donor_block_spec in donor_block_specs
@@ -4013,15 +4069,27 @@ class USMicroplexPipeline:
                 )
 
             for donor_block_spec in donor_block_specs:
+                block_label = _format_progress_values(
+                    donor_block_spec.model_variables,
+                    limit=4,
+                )
+                _emit_us_pipeline_progress(
+                    "US microplex donor integration: block start",
+                    donor_source=donor_source_name,
+                    block=block_label,
+                    restored=_format_progress_values(
+                        donor_block_spec.restored_variables,
+                        limit=4,
+                    ),
+                )
                 prepared_inputs = PE_SOURCE_IMPUTE_BLOCK_ENGINE.prepare_block_inputs(
                     donor_seed=donor_seed,
                     current_frame=current,
                     shared_vars=shared_vars,
                     donor_block_spec=donor_block_spec,
-                    donor_source_name=donor_input.frame.source.name,
+                    donor_source_name=donor_source_name,
                     prepare_pe_surface=(
-                        self.config.donor_imputer_condition_selection
-                        == "pe_prespecified"
+                        self._uses_pe_condition_surface()
                     ),
                     can_project_to_entity=self._can_project_donor_block_to_entity,
                     project_frame_to_entity=self._project_frame_to_entity,
@@ -4033,35 +4101,116 @@ class USMicroplexPipeline:
                 entity_key = prepared_inputs.entity_key
                 donor_condition_source = donor_fit_source
                 current_condition_source = current_generation_source
-                if prepared_inputs.condition_surface is not None:
-                    result = PE_SOURCE_IMPUTE_BLOCK_ENGINE.run_prepared_block(
-                        surface=prepared_inputs.condition_surface,
-                        request=PESourceImputeBlockRunRequest(
-                            donor_block_spec=donor_block_spec,
-                            donor_fit_source=donor_fit_source,
-                            current_generation_source=current_generation_source,
-                            current_frame=current,
-                            entity_key=entity_key,
-                        ),
-                        build_imputer=self._build_donor_imputer,
-                        rank_match=self._rank_match_donor_values,
-                        compatibility_fn=self._is_compatible_donor_condition,
-                        fit_kwargs={
-                            "epochs": self.config.donor_imputer_epochs,
-                            "batch_size": self.config.donor_imputer_batch_size,
-                            "learning_rate": self.config.donor_imputer_learning_rate,
-                            "verbose": False,
-                        },
-                        seed=self.config.random_seed,
-                        rng=rng,
+                requested_supplemental_vars = (
+                    self._resolve_requested_supplemental_shared_condition_vars(
+                        donor_block_spec.model_variables
                     )
-                    if result is not None:
-                        selected_condition_vars = list(result.condition_vars)
-                        requested_supplemental_vars = (
-                            self._resolve_requested_supplemental_shared_condition_vars(
-                                donor_block_spec.model_variables
+                )
+                requested_challenger_vars = (
+                    self._resolve_requested_challenger_shared_condition_vars(
+                        donor_block_spec.model_variables,
+                        donor_source_name=donor_source_name,
+                    )
+                )
+                if prepared_inputs.condition_surface is not None:
+                    surface = prepared_inputs.condition_surface
+                    if (
+                        self.config.donor_imputer_condition_selection
+                        == "pe_plus_puf_native_challenger"
+                    ):
+                        donor_condition_source = surface.donor_frame.copy()
+                        current_condition_source = surface.current_frame.copy()
+                        challenger_condition_vars = (
+                            self._resolve_challenger_shared_condition_vars(
+                                donor_frame=donor_fit_source,
+                                current_frame=current_generation_source,
+                                shared_vars=shared_vars_for_block,
+                                donor_block=donor_block_spec.model_variables,
+                                donor_source_name=donor_source_name,
                             )
                         )
+                        for variable in challenger_condition_vars:
+                            donor_condition_source[variable] = donor_fit_source[variable]
+                            current_condition_source[variable] = (
+                                current_generation_source[variable]
+                            )
+                        donor_condition_vars = list(
+                            dict.fromkeys(
+                                surface.compatible_predictors(
+                                    compatibility_fn=self._is_compatible_donor_condition,
+                                )
+                                + challenger_condition_vars
+                            )
+                        )
+                        _emit_us_pipeline_progress(
+                            "US microplex donor integration: block run",
+                            donor_source=donor_source_name,
+                            block=block_label,
+                            condition_vars=len(donor_condition_vars),
+                            donor_rows=len(donor_fit_source),
+                            current_rows=len(current_generation_source),
+                        )
+                        result = PE_SOURCE_IMPUTE_BLOCK_ENGINE.run_conditioned_block(
+                            request=PESourceImputeConditionedBlockRunRequest(
+                                block_request=PESourceImputeBlockRunRequest(
+                                    donor_block_spec=donor_block_spec,
+                                    donor_fit_source=donor_fit_source,
+                                    current_generation_source=current_generation_source,
+                                    current_frame=current,
+                                    entity_key=entity_key,
+                                ),
+                                donor_condition_source=donor_condition_source,
+                                current_condition_source=current_condition_source,
+                                condition_vars=tuple(donor_condition_vars),
+                            ),
+                            build_imputer=self._build_donor_imputer,
+                            rank_match=self._rank_match_donor_values,
+                            fit_kwargs={
+                                "epochs": self.config.donor_imputer_epochs,
+                                "batch_size": self.config.donor_imputer_batch_size,
+                                "learning_rate": self.config.donor_imputer_learning_rate,
+                                "verbose": False,
+                            },
+                            seed=self.config.random_seed,
+                            rng=rng,
+                        )
+                    else:
+                        donor_condition_source = surface.donor_frame
+                        current_condition_source = surface.current_frame
+                        compatible_predictors = surface.compatible_predictors(
+                            compatibility_fn=self._is_compatible_donor_condition,
+                        )
+                        _emit_us_pipeline_progress(
+                            "US microplex donor integration: block run",
+                            donor_source=donor_source_name,
+                            block=block_label,
+                            condition_vars=len(compatible_predictors),
+                            donor_rows=len(donor_fit_source),
+                            current_rows=len(current_generation_source),
+                        )
+                        result = PE_SOURCE_IMPUTE_BLOCK_ENGINE.run_prepared_block(
+                            surface=surface,
+                            request=PESourceImputeBlockRunRequest(
+                                donor_block_spec=donor_block_spec,
+                                donor_fit_source=donor_fit_source,
+                                current_generation_source=current_generation_source,
+                                current_frame=current,
+                                entity_key=entity_key,
+                            ),
+                            build_imputer=self._build_donor_imputer,
+                            rank_match=self._rank_match_donor_values,
+                            compatibility_fn=self._is_compatible_donor_condition,
+                            fit_kwargs={
+                                "epochs": self.config.donor_imputer_epochs,
+                                "batch_size": self.config.donor_imputer_batch_size,
+                                "learning_rate": self.config.donor_imputer_learning_rate,
+                                "verbose": False,
+                            },
+                            seed=self.config.random_seed,
+                            rng=rng,
+                        )
+                    if result is not None:
+                        selected_condition_vars = list(result.condition_vars)
                         conditioning_diagnostics.append(
                             {
                                 "donor_source": donor_input.frame.source.name,
@@ -4097,6 +4246,9 @@ class USMicroplexPipeline:
                                 "requested_supplemental_shared_condition_vars": (
                                     requested_supplemental_vars
                                 ),
+                                "requested_challenger_shared_condition_vars": (
+                                    requested_challenger_vars
+                                ),
                                 "raw_supplemental_shared_condition_var_status": (
                                     self._summarize_requested_raw_condition_var_status(
                                         donor_frame=donor_seed,
@@ -4110,6 +4262,19 @@ class USMicroplexPipeline:
                                         requested_vars=requested_supplemental_vars,
                                     )
                                 ),
+                                "raw_challenger_shared_condition_var_status": (
+                                    self._summarize_requested_raw_condition_var_status(
+                                        donor_frame=donor_seed,
+                                        current_frame=current,
+                                        scaffold_source=scaffold_input.frame.source,
+                                        donor_source=donor_input.frame.source,
+                                        numeric_current=numeric_current,
+                                        numeric_donor=numeric_donor,
+                                        shared_var_set=raw_shared_var_set,
+                                        excluded=excluded,
+                                        requested_vars=requested_challenger_vars,
+                                    )
+                                ),
                                 "supplemental_shared_condition_var_status": (
                                     self._summarize_requested_condition_var_status(
                                         donor_frame=donor_condition_source,
@@ -4119,10 +4284,25 @@ class USMicroplexPipeline:
                                         requested_vars=requested_supplemental_vars,
                                     )
                                 ),
+                                "challenger_shared_condition_var_status": (
+                                    self._summarize_requested_condition_var_status(
+                                        donor_frame=donor_condition_source,
+                                        current_frame=current_condition_source,
+                                        shared_vars=shared_vars_for_block,
+                                        selected_condition_vars=selected_condition_vars,
+                                        requested_vars=requested_challenger_vars,
+                                    )
+                                ),
                             }
                         )
                         current = result.updated_frame
                         integrated_variables.extend(result.integrated_variables)
+                        _emit_us_pipeline_progress(
+                            "US microplex donor integration: block complete",
+                            donor_source=donor_source_name,
+                            block=block_label,
+                            integrated_vars=len(result.integrated_variables),
+                        )
                     continue
                 donor_condition_source = (
                     self._augment_donor_condition_frame_for_targets(
@@ -4141,10 +4321,25 @@ class USMicroplexPipeline:
                     current_condition_source,
                     shared_vars_for_block,
                     donor_block_spec.model_variables,
+                    donor_source_name=donor_source_name,
                 )
                 if not donor_condition_vars:
+                    _emit_us_pipeline_progress(
+                        "US microplex donor integration: block skipped",
+                        donor_source=donor_source_name,
+                        block=block_label,
+                        reason="no_condition_vars",
+                    )
                     continue
 
+                _emit_us_pipeline_progress(
+                    "US microplex donor integration: block run",
+                    donor_source=donor_source_name,
+                    block=block_label,
+                    condition_vars=len(donor_condition_vars),
+                    donor_rows=len(donor_fit_source),
+                    current_rows=len(current_generation_source),
+                )
                 result = PE_SOURCE_IMPUTE_BLOCK_ENGINE.run_conditioned_block(
                     request=PESourceImputeConditionedBlockRunRequest(
                         block_request=PESourceImputeBlockRunRequest(
@@ -4171,11 +4366,6 @@ class USMicroplexPipeline:
                 )
                 if result is not None:
                     selected_condition_vars = list(result.condition_vars)
-                    requested_supplemental_vars = (
-                        self._resolve_requested_supplemental_shared_condition_vars(
-                            donor_block_spec.model_variables
-                        )
-                    )
                     conditioning_diagnostics.append(
                         {
                             "donor_source": donor_input.frame.source.name,
@@ -4205,6 +4395,9 @@ class USMicroplexPipeline:
                             "requested_supplemental_shared_condition_vars": (
                                 requested_supplemental_vars
                             ),
+                            "requested_challenger_shared_condition_vars": (
+                                requested_challenger_vars
+                            ),
                             "raw_supplemental_shared_condition_var_status": (
                                 self._summarize_requested_raw_condition_var_status(
                                     donor_frame=donor_seed,
@@ -4218,6 +4411,19 @@ class USMicroplexPipeline:
                                     requested_vars=requested_supplemental_vars,
                                 )
                             ),
+                            "raw_challenger_shared_condition_var_status": (
+                                self._summarize_requested_raw_condition_var_status(
+                                    donor_frame=donor_seed,
+                                    current_frame=current,
+                                    scaffold_source=scaffold_input.frame.source,
+                                    donor_source=donor_input.frame.source,
+                                    numeric_current=numeric_current,
+                                    numeric_donor=numeric_donor,
+                                    shared_var_set=raw_shared_var_set,
+                                    excluded=excluded,
+                                    requested_vars=requested_challenger_vars,
+                                )
+                            ),
                             "supplemental_shared_condition_var_status": (
                                 self._summarize_requested_condition_var_status(
                                     donor_frame=donor_condition_source,
@@ -4227,10 +4433,25 @@ class USMicroplexPipeline:
                                     requested_vars=requested_supplemental_vars,
                                 )
                             ),
+                            "challenger_shared_condition_var_status": (
+                                self._summarize_requested_condition_var_status(
+                                    donor_frame=donor_condition_source,
+                                    current_frame=current_condition_source,
+                                    shared_vars=shared_vars_for_block,
+                                    selected_condition_vars=selected_condition_vars,
+                                    requested_vars=requested_challenger_vars,
+                                )
+                            ),
                         }
                     )
                     current = result.updated_frame
                     integrated_variables.extend(result.integrated_variables)
+                    _emit_us_pipeline_progress(
+                        "US microplex donor integration: block complete",
+                        donor_source=donor_source_name,
+                        block=block_label,
+                        integrated_vars=len(result.integrated_variables),
+                    )
 
         return {
             "seed_data": current,
@@ -4276,12 +4497,19 @@ class USMicroplexPipeline:
             seed_data[variable] = adjusted
         return seed_data
 
+    def _uses_pe_condition_surface(self) -> bool:
+        return self.config.donor_imputer_condition_selection in {
+            "pe_prespecified",
+            "pe_plus_puf_native_challenger",
+        }
+
     def _select_donor_condition_vars(
         self,
         donor_frame: pd.DataFrame,
         current_frame: pd.DataFrame,
         shared_vars: list[str],
         donor_block: tuple[str, ...],
+        donor_source_name: str | None = None,
     ) -> list[str]:
         condition_vars = [
             variable for variable in shared_vars if variable in donor_frame.columns
@@ -4290,13 +4518,29 @@ class USMicroplexPipeline:
             return condition_vars
 
         max_condition_vars = self.config.donor_imputer_max_condition_vars
-        if self.config.donor_imputer_condition_selection == "pe_prespecified":
+        if self.config.donor_imputer_condition_selection in {
+            "pe_prespecified",
+            "pe_plus_puf_native_challenger",
+        }:
             preferred_condition_vars = self._resolve_preferred_donor_condition_vars(
                 donor_frame=donor_frame,
                 current_frame=current_frame,
                 shared_vars=shared_vars,
                 donor_block=donor_block,
             )
+            if (
+                self.config.donor_imputer_condition_selection
+                == "pe_plus_puf_native_challenger"
+            ):
+                for variable in self._resolve_challenger_shared_condition_vars(
+                    donor_frame=donor_frame,
+                    current_frame=current_frame,
+                    shared_vars=shared_vars,
+                    donor_block=donor_block,
+                    donor_source_name=donor_source_name,
+                ):
+                    if variable not in preferred_condition_vars:
+                        preferred_condition_vars.append(variable)
             if preferred_condition_vars:
                 return preferred_condition_vars
         if (
@@ -4397,6 +4641,62 @@ class USMicroplexPipeline:
                 ).supplemental_shared_condition_vars
             )
         )
+
+    def _resolve_requested_challenger_shared_condition_vars(
+        self,
+        donor_block: tuple[str, ...],
+        *,
+        donor_source_name: str | None,
+    ) -> list[str]:
+        if (
+            self.config.donor_imputer_condition_selection
+            != "pe_plus_puf_native_challenger"
+            or donor_source_name is None
+            or not donor_source_name.startswith("irs_soi_puf")
+        ):
+            return []
+        return list(
+            dict.fromkeys(
+                variable
+                for target_variable in donor_block
+                for variable in variable_semantic_spec_for(
+                    target_variable
+                ).challenger_shared_condition_vars
+            )
+        )
+
+    def _resolve_challenger_shared_condition_vars(
+        self,
+        *,
+        donor_frame: pd.DataFrame,
+        current_frame: pd.DataFrame,
+        shared_vars: list[str] | None = None,
+        donor_block: tuple[str, ...],
+        donor_source_name: str | None,
+    ) -> list[str]:
+        requested_vars = self._resolve_requested_challenger_shared_condition_vars(
+            donor_block,
+            donor_source_name=donor_source_name,
+        )
+        if not requested_vars:
+            return []
+        shared_var_set = set(shared_vars or ())
+        resolved: list[str] = []
+        for variable in requested_vars:
+            if (
+                variable not in shared_var_set
+                or variable not in donor_frame.columns
+                or variable not in current_frame.columns
+                or not pd.api.types.is_numeric_dtype(donor_frame[variable])
+                or not pd.api.types.is_numeric_dtype(current_frame[variable])
+                or not self._is_compatible_donor_condition(
+                    current_frame[variable],
+                    donor_frame[variable],
+                )
+            ):
+                continue
+            resolved.append(variable)
+        return resolved
 
     def _summarize_requested_condition_var_status(
         self,
