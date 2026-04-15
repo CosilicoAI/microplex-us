@@ -74,6 +74,17 @@ def test_default_policyengine_us_data_rebuild_config_uses_incumbent_defaults() -
     assert config.synthesis_backend == "seed"
     assert config.calibration_backend == "entropy"
     assert config.policyengine_calibration_min_active_households == 20
+    assert config.policyengine_calibration_deferred_stage_min_active_households == (
+        10,
+        1,
+    )
+    assert config.policyengine_calibration_deferred_stage_max_constraints == 24
+    assert (
+        config.policyengine_calibration_deferred_stage_min_full_oracle_capped_mean_abs_relative_error
+        is None
+    )
+    assert config.policyengine_calibration_deferred_stage_top_family_count == 7
+    assert config.policyengine_calibration_deferred_stage_top_geography_count == 4
     assert config.donor_imputer_backend == "qrf"
     assert config.donor_imputer_condition_selection == "pe_prespecified"
     assert config.donor_imputer_excluded_variables == ()

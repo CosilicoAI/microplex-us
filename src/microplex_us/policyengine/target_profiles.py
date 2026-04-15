@@ -244,6 +244,7 @@ PE_NATIVE_BROAD_TARGET_CELLS: tuple[PolicyEngineUSTargetCell, ...] = (
         domain_variable="medical_expense_deduction",
     ),
     PolicyEngineUSTargetCell("net_capital_gains", geo_level="state", domain_variable="net_capital_gains"),
+    PolicyEngineUSTargetCell("person_count", geo_level="state", domain_variable="aca_ptc"),
     PolicyEngineUSTargetCell("person_count", geo_level="state", domain_variable="adjusted_gross_income"),
     PolicyEngineUSTargetCell("person_count", geo_level="state", domain_variable="age"),
     PolicyEngineUSTargetCell("person_count", geo_level="state", domain_variable="medicaid_enrolled"),
@@ -274,6 +275,7 @@ PE_NATIVE_BROAD_TARGET_CELLS: tuple[PolicyEngineUSTargetCell, ...] = (
         domain_variable="tax_exempt_interest_income",
     ),
     PolicyEngineUSTargetCell("tax_unit_count", geo_level="state", domain_variable="aca_ptc"),
+    PolicyEngineUSTargetCell("tax_unit_count", geo_level="state", domain_variable="adjusted_gross_income"),
     PolicyEngineUSTargetCell("tax_unit_count", geo_level="state", domain_variable="dividend_income"),
     PolicyEngineUSTargetCell("tax_unit_count", geo_level="state", domain_variable="eitc_child_count"),
     PolicyEngineUSTargetCell("tax_unit_count", geo_level="state", domain_variable="income_tax"),
@@ -374,8 +376,28 @@ PE_NATIVE_BROAD_TARGET_CELLS: tuple[PolicyEngineUSTargetCell, ...] = (
     ),
 )
 
+_PE_NATIVE_BROAD_NO_STATE_ACA_EXCLUDED_CELLS = frozenset(
+    {
+        ("aca_ptc", "state", "aca_ptc", None),
+        ("tax_unit_count", "state", "aca_ptc", None),
+    }
+)
+
+PE_NATIVE_BROAD_NO_STATE_ACA_TARGET_CELLS: tuple[PolicyEngineUSTargetCell, ...] = tuple(
+    cell
+    for cell in PE_NATIVE_BROAD_TARGET_CELLS
+    if (
+        cell.variable,
+        cell.geo_level,
+        cell.domain_variable,
+        cell.geographic_id,
+    )
+    not in _PE_NATIVE_BROAD_NO_STATE_ACA_EXCLUDED_CELLS
+)
+
 _TARGET_PROFILES: dict[str, tuple[PolicyEngineUSTargetCell, ...]] = {
     "pe_native_broad": PE_NATIVE_BROAD_TARGET_CELLS,
+    "pe_native_broad_no_state_aca": PE_NATIVE_BROAD_NO_STATE_ACA_TARGET_CELLS,
 }
 
 

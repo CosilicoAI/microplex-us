@@ -15,6 +15,8 @@ from microplex_us.pipelines.seed_stage_parity import (
     SeedStageBooleanLandingFeatureSpec,
     SeedStageCategoricalLandingFeatureSpec,
     SeedStageFocusVariableSpec,
+    _normalize_seed_ids_for_policyengine_support,
+    _seed_tax_unit_support_payload,
     build_us_seed_stage_parity_audit,
     write_us_seed_stage_parity_audit,
 )
@@ -310,3 +312,104 @@ assert callable(mod.build_us_seed_stage_parity_audit)
         check=False,
     )
     assert result.returncode == 0, result.stderr
+
+
+def test_seed_tax_unit_support_payload_sorts_largest_gaps_first() -> None:
+    payload = _seed_tax_unit_support_payload(
+        seed_path=Path("/tmp/seed.parquet"),
+        reference_path=Path("/tmp/reference.h5"),
+        period=2024,
+        support_audit={
+            "candidate": {
+                "filing_status_weighted_counts": {
+                    "SINGLE": {"weighted_count": 120.0},
+                    "JOINT": {"weighted_count": 80.0},
+                    "SEPARATE": {"weighted_count": 5.0},
+                    "HEAD_OF_HOUSEHOLD": {"weighted_count": 30.0},
+                    "SURVIVING_SPOUSE": {"weighted_count": 2.0},
+                },
+                "mfs_high_agi_support": [
+                    {
+                        "agi_bin": "75k_to_100k",
+                        "weighted_count": 10.0,
+                        "weighted_agi": 850000.0,
+                    },
+                    {
+                        "agi_bin": "500k_plus",
+                        "weighted_count": 0.0,
+                        "weighted_agi": 0.0,
+                    },
+                ],
+            },
+            "baseline": {
+                "filing_status_weighted_counts": {
+                    "SINGLE": {"weighted_count": 100.0},
+                    "JOINT": {"weighted_count": 60.0},
+                    "SEPARATE": {"weighted_count": 15.0},
+                    "HEAD_OF_HOUSEHOLD": {"weighted_count": 20.0},
+                    "SURVIVING_SPOUSE": {"weighted_count": 3.0},
+                },
+                "mfs_high_agi_support": [
+                    {
+                        "agi_bin": "75k_to_100k",
+                        "weighted_count": 20.0,
+                        "weighted_agi": 1700000.0,
+                    },
+                    {
+                        "agi_bin": "500k_plus",
+                        "weighted_count": 4.0,
+                        "weighted_agi": 4000000.0,
+                    },
+                ],
+            },
+            "comparisons": {
+                "filing_status_weighted_delta": [
+                    {"filing_status": "SINGLE", "weighted_count_delta": 12.0},
+                    {"filing_status": "JOINT", "weighted_count_delta": 20.0},
+                    {"filing_status": "SEPARATE", "weighted_count_delta": -10.0},
+                    {"filing_status": "HEAD_OF_HOUSEHOLD", "weighted_count_delta": 10.0},
+                    {"filing_status": "SURVIVING_SPOUSE", "weighted_count_delta": -1.0},
+                ],
+                "mfs_high_agi_delta": [
+                    {
+                        "agi_bin": "75k_to_100k",
+                        "weighted_count_delta": -10.0,
+                        "weighted_agi_delta": -850000.0,
+                    },
+                    {
+                        "agi_bin": "500k_plus",
+                        "weighted_count_delta": -4.0,
+                        "weighted_agi_delta": -4000000.0,
+                    },
+                ],
+            },
+        },
+    )
+
+    assert payload["comparisonStage"] == "seed_tax_unit_support"
+    filing_rows = payload["comparisons"]["filing_status_weighted_delta"]
+    mfs_rows = payload["comparisons"]["mfs_high_agi_delta"]
+
+    assert abs(filing_rows[0]["weighted_count_delta"]) >= abs(
+        filing_rows[1]["weighted_count_delta"]
+    )
+    assert mfs_rows[0]["agi_bin"] == "500k_plus"
+    assert payload["verdictHints"]["largestFilingStatusGap"] == filing_rows[0]["filing_status"]
+    assert payload["verdictHints"]["largestMFSAgiGap"] == "500k_plus"
+
+
+def test_normalize_seed_ids_for_policyengine_support_factorizes_string_ids() -> None:
+    normalized = _normalize_seed_ids_for_policyengine_support(
+        pd.DataFrame(
+            {
+                "person_id": ["14:1", "14:2", "22:1"],
+                "household_id": ["14", "14", "22"],
+                "tax_unit_id": ["14", "14", "22"],
+            }
+        )
+    )
+
+    assert normalized["person_id"].dtype.kind in {"i", "u"}
+    assert normalized["household_id"].dtype.kind in {"i", "u"}
+    assert normalized["tax_unit_id"].dtype.kind in {"i", "u"}
+    assert normalized["household_id"].tolist() == [0, 0, 1]

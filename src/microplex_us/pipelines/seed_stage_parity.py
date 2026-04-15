@@ -280,6 +280,49 @@ def write_us_seed_stage_parity_audit(
     return output
 
 
+def build_us_seed_tax_unit_support_audit(
+    seed_data: str | Path,
+    reference_dataset: str | Path,
+    *,
+    period: int = 2024,
+) -> dict[str, Any]:
+    """Compare seed-derived tax-unit support against a PE reference dataset."""
+
+    seed_path = Path(seed_data).resolve()
+    reference_path = Path(reference_dataset).resolve()
+    support_audit = _compute_seed_tax_unit_support_audit(
+        pd.read_parquet(seed_path),
+        reference_path=reference_path,
+        period=period,
+    )
+    return _seed_tax_unit_support_payload(
+        seed_path=seed_path,
+        reference_path=reference_path,
+        period=period,
+        support_audit=support_audit,
+    )
+
+
+def write_us_seed_tax_unit_support_audit(
+    seed_data: str | Path,
+    reference_dataset: str | Path,
+    output_path: str | Path,
+    *,
+    period: int = 2024,
+) -> Path:
+    """Persist one seed tax-unit support audit as JSON."""
+
+    output = Path(output_path).resolve()
+    payload = build_us_seed_tax_unit_support_audit(
+        seed_data,
+        reference_dataset,
+        period=period,
+    )
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+    return output
+
+
 def _seed_focus_variable_audit(
     *,
     seed_rows: pd.DataFrame,
@@ -679,6 +722,219 @@ def _undefined_ratio_case(candidate_value: float, reference_value: float) -> str
     if float(candidate_value) != 0.0:
         return "candidate_nonzero_reference_zero"
     return "both_zero"
+
+
+def _compute_seed_tax_unit_support_audit(
+    seed_rows: pd.DataFrame,
+    *,
+    reference_path: Path,
+    period: int,
+) -> dict[str, Any]:
+    import tempfile
+
+    from microplex_us.pipelines.pe_native_scores import (
+        compute_us_pe_native_support_audit,
+    )
+    from microplex_us.pipelines.us import (
+        USMicroplexBuildConfig,
+        USMicroplexBuildResult,
+        USMicroplexPipeline,
+        USMicroplexTargets,
+    )
+
+    pipeline = USMicroplexPipeline(
+        USMicroplexBuildConfig(policyengine_dataset_year=int(period))
+    )
+    working_seed = _normalize_seed_ids_for_policyengine_support(seed_rows)
+    tables = pipeline.build_policyengine_entity_tables(working_seed)
+    result = USMicroplexBuildResult(
+        config=pipeline.config,
+        seed_data=working_seed,
+        synthetic_data=working_seed.copy(),
+        calibrated_data=working_seed.copy(),
+        targets=USMicroplexTargets(marginal={}, continuous={}),
+        calibration_summary={},
+        policyengine_tables=tables,
+    )
+    with tempfile.TemporaryDirectory(prefix="microplex-seed-tax-unit-") as tmpdir:
+        dataset_path = Path(tmpdir) / "seed_policyengine_us.h5"
+        pipeline.export_policyengine_dataset(
+            result,
+            dataset_path,
+            period=int(period),
+        )
+        return compute_us_pe_native_support_audit(
+            candidate_dataset_path=dataset_path,
+            baseline_dataset_path=reference_path,
+            period=int(period),
+        )
+
+
+def _normalize_seed_ids_for_policyengine_support(seed_rows: pd.DataFrame) -> pd.DataFrame:
+    """Normalize saved seed IDs into PE-exportable integer keys for auditing."""
+
+    normalized = seed_rows.copy()
+    for column in (
+        "person_id",
+        "household_id",
+        "tax_unit_id",
+        "family_id",
+        "spm_unit_id",
+        "marital_unit_id",
+    ):
+        if column not in normalized.columns:
+            continue
+        values = normalized[column]
+        if pd.api.types.is_integer_dtype(values):
+            continue
+        codes, _ = pd.factorize(values.astype("string").fillna(""), sort=False)
+        normalized[column] = codes.astype(np.int64)
+    return normalized
+
+
+def _seed_tax_unit_support_payload(
+    *,
+    seed_path: Path,
+    reference_path: Path,
+    period: int,
+    support_audit: dict[str, Any],
+) -> dict[str, Any]:
+    candidate_snapshot = support_audit["candidate"]
+    reference_snapshot = support_audit["baseline"]
+    candidate_total_weight = float(
+        sum(
+            float(row.get("weighted_count", 0.0))
+            for row in candidate_snapshot["filing_status_weighted_counts"].values()
+        )
+    )
+    reference_total_weight = float(
+        sum(
+            float(row.get("weighted_count", 0.0))
+            for row in reference_snapshot["filing_status_weighted_counts"].values()
+        )
+    )
+    reference_scale = _safe_ratio(reference_total_weight, candidate_total_weight)
+    filing_status_rows = []
+    for status in (
+        "SINGLE",
+        "JOINT",
+        "SEPARATE",
+        "HEAD_OF_HOUSEHOLD",
+        "SURVIVING_SPOUSE",
+    ):
+        candidate_row = candidate_snapshot["filing_status_weighted_counts"].get(
+            status,
+            {"weighted_count": 0.0},
+        )
+        reference_row = reference_snapshot["filing_status_weighted_counts"].get(
+            status,
+            {"weighted_count": 0.0},
+        )
+        candidate_weighted_count = float(candidate_row.get("weighted_count", 0.0))
+        candidate_reference_scaled_weighted_count = (
+            candidate_weighted_count * reference_scale
+        )
+        baseline_weighted_count = float(reference_row.get("weighted_count", 0.0))
+        filing_status_rows.append(
+            {
+                "filing_status": status,
+                "candidate_weighted_count": candidate_weighted_count,
+                "candidate_reference_scaled_weighted_count": (
+                    candidate_reference_scaled_weighted_count
+                ),
+                "baseline_weighted_count": baseline_weighted_count,
+                "weighted_count_delta": (
+                    candidate_reference_scaled_weighted_count
+                    - baseline_weighted_count
+                ),
+            }
+        )
+    filing_status_rows.sort(
+        key=lambda row: abs(float(row["weighted_count_delta"])),
+        reverse=True,
+    )
+
+    baseline_mfs = {
+        row["agi_bin"]: row for row in reference_snapshot["mfs_high_agi_support"]
+    }
+    mfs_rows = []
+    for row in candidate_snapshot["mfs_high_agi_support"]:
+        baseline_row = baseline_mfs.get(
+            row["agi_bin"],
+            {"weighted_count": 0.0, "weighted_agi": 0.0},
+        )
+        candidate_weighted_count = float(row.get("weighted_count", 0.0))
+        candidate_weighted_agi = float(row.get("weighted_agi", 0.0))
+        candidate_reference_scaled_weighted_count = (
+            candidate_weighted_count * reference_scale
+        )
+        candidate_reference_scaled_weighted_agi = (
+            candidate_weighted_agi * reference_scale
+        )
+        baseline_weighted_count = float(baseline_row.get("weighted_count", 0.0))
+        baseline_weighted_agi = float(baseline_row.get("weighted_agi", 0.0))
+        mfs_rows.append(
+            {
+                "agi_bin": row["agi_bin"],
+                "candidate_weighted_count": candidate_weighted_count,
+                "candidate_reference_scaled_weighted_count": (
+                    candidate_reference_scaled_weighted_count
+                ),
+                "baseline_weighted_count": baseline_weighted_count,
+                "weighted_count_delta": (
+                    candidate_reference_scaled_weighted_count
+                    - baseline_weighted_count
+                ),
+                "candidate_weighted_agi": candidate_weighted_agi,
+                "candidate_reference_scaled_weighted_agi": (
+                    candidate_reference_scaled_weighted_agi
+                ),
+                "baseline_weighted_agi": baseline_weighted_agi,
+                "weighted_agi_delta": (
+                    candidate_reference_scaled_weighted_agi - baseline_weighted_agi
+                ),
+            }
+        )
+    mfs_rows.sort(
+        key=lambda row: abs(float(row["weighted_agi_delta"])),
+        reverse=True,
+    )
+    return {
+        "schemaVersion": 1,
+        "comparisonStage": "seed_tax_unit_support",
+        "period": int(period),
+        "seedData": str(seed_path),
+        "referenceDataset": str(reference_path),
+        "weightScale": {
+            "candidate_total_tax_unit_weight": candidate_total_weight,
+            "reference_total_tax_unit_weight": reference_total_weight,
+            "reference_to_candidate_tax_unit_scale": reference_scale,
+        },
+        "candidateSnapshot": {
+            "filing_status_weighted_counts": candidate_snapshot[
+                "filing_status_weighted_counts"
+            ],
+            "mfs_high_agi_support": candidate_snapshot["mfs_high_agi_support"],
+        },
+        "referenceSnapshot": {
+            "filing_status_weighted_counts": reference_snapshot[
+                "filing_status_weighted_counts"
+            ],
+            "mfs_high_agi_support": reference_snapshot["mfs_high_agi_support"],
+        },
+        "comparisons": {
+            "filing_status_weighted_delta": filing_status_rows,
+            "mfs_high_agi_delta": mfs_rows,
+        },
+        "verdictHints": {
+            "largestFilingStatusGap": (
+                filing_status_rows[0]["filing_status"] if filing_status_rows else None
+            ),
+            "largestMFSAgiGap": (
+                mfs_rows[0]["agi_bin"] if mfs_rows else None
+            ),
+        },
+    }
 
 
 def _transform_profile_series(series: pd.Series, transform: str) -> pd.Series:

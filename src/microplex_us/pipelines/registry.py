@@ -10,6 +10,8 @@ from pathlib import Path
 from typing import Any, Literal
 
 FrontierMetric = Literal[
+    "full_oracle_capped_mean_abs_relative_error",
+    "full_oracle_mean_abs_relative_error",
     "candidate_composite_parity_loss",
     "candidate_mean_abs_relative_error",
     "mean_abs_relative_error_delta",
@@ -35,6 +37,8 @@ class USMicroplexRunRegistryEntry:
     source_names: tuple[str, ...] = ()
     rows: dict[str, int] = field(default_factory=dict)
     weights: dict[str, float | int] = field(default_factory=dict)
+    full_oracle_capped_mean_abs_relative_error: float | None = None
+    full_oracle_mean_abs_relative_error: float | None = None
     candidate_mean_abs_relative_error: float | None = None
     baseline_mean_abs_relative_error: float | None = None
     mean_abs_relative_error_delta: float | None = None
@@ -85,6 +89,12 @@ class USMicroplexRunRegistryEntry:
             "source_names": list(self.source_names),
             "rows": dict(self.rows),
             "weights": dict(self.weights),
+            "full_oracle_capped_mean_abs_relative_error": (
+                self.full_oracle_capped_mean_abs_relative_error
+            ),
+            "full_oracle_mean_abs_relative_error": (
+                self.full_oracle_mean_abs_relative_error
+            ),
             "candidate_mean_abs_relative_error": self.candidate_mean_abs_relative_error,
             "baseline_mean_abs_relative_error": self.baseline_mean_abs_relative_error,
             "mean_abs_relative_error_delta": self.mean_abs_relative_error_delta,
@@ -137,6 +147,12 @@ class USMicroplexRunRegistryEntry:
             source_names=tuple(payload.get("source_names", [])),
             rows=dict(payload.get("rows", {})),
             weights=dict(payload.get("weights", {})),
+            full_oracle_capped_mean_abs_relative_error=payload.get(
+                "full_oracle_capped_mean_abs_relative_error"
+            ),
+            full_oracle_mean_abs_relative_error=payload.get(
+                "full_oracle_mean_abs_relative_error"
+            ),
             candidate_mean_abs_relative_error=payload.get(
                 "candidate_mean_abs_relative_error"
             ),
@@ -219,6 +235,10 @@ def select_us_microplex_frontier_entry(
     """Select the current best run from the registry using one summary metric."""
     entries = load_us_microplex_run_registry(_resolve_run_registry_path(path))
     metric_values = {
+        "full_oracle_capped_mean_abs_relative_error": (
+            lambda entry: entry.full_oracle_capped_mean_abs_relative_error
+        ),
+        "full_oracle_mean_abs_relative_error": lambda entry: entry.full_oracle_mean_abs_relative_error,
         "candidate_composite_parity_loss": lambda entry: entry.candidate_composite_parity_loss,
         "candidate_mean_abs_relative_error": lambda entry: entry.candidate_mean_abs_relative_error,
         "mean_abs_relative_error_delta": lambda entry: entry.mean_abs_relative_error_delta,
@@ -292,9 +312,16 @@ def build_us_microplex_run_registry_entry(
     harness_metadata = dict(harness_payload.get("metadata", {}))
     calibration_summary = dict(manifest.get("calibration", {}))
     native_summary = dict(manifest.get("policyengine_native_scores", {}))
+    diagnostics = dict(manifest.get("diagnostics", {}))
     created_at = manifest.get("created_at") or datetime.now(UTC).isoformat()
     config = dict(manifest.get("config", {}))
     synthesis = dict(manifest.get("synthesis", {}))
+    calibration_oracle_loss = dict(calibration_summary.get("oracle_loss", {}))
+    full_oracle_summary = dict(calibration_oracle_loss.get("full_oracle", {}))
+    merged_metadata = dict(metadata or {})
+    child_tax_unit_agi_drift = diagnostics.get("child_tax_unit_agi_drift")
+    if child_tax_unit_agi_drift is not None:
+        merged_metadata.setdefault("child_tax_unit_agi_drift", child_tax_unit_agi_drift)
 
     return USMicroplexRunRegistryEntry(
         created_at=created_at,
@@ -314,6 +341,14 @@ def build_us_microplex_run_registry_entry(
         source_names=tuple(synthesis.get("source_names", [])),
         rows={key: int(value) for key, value in dict(manifest.get("rows", {})).items()},
         weights=dict(manifest.get("weights", {})),
+        full_oracle_capped_mean_abs_relative_error=calibration_summary.get(
+            "full_oracle_capped_mean_abs_relative_error",
+            full_oracle_summary.get("capped_mean_abs_relative_error"),
+        ),
+        full_oracle_mean_abs_relative_error=calibration_summary.get(
+            "full_oracle_mean_abs_relative_error",
+            full_oracle_summary.get("mean_abs_relative_error"),
+        ),
         candidate_mean_abs_relative_error=harness_summary.get(
             "candidate_mean_abs_relative_error"
         ),
@@ -368,7 +403,7 @@ def build_us_microplex_run_registry_entry(
         policyengine_us_runtime_version=harness_metadata.get(
             "policyengine_us_runtime_version"
         ),
-        metadata=dict(metadata or {}),
+        metadata=merged_metadata,
     )
 
 

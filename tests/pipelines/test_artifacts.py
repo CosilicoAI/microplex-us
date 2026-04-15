@@ -372,6 +372,134 @@ class TestSaveUSMicroplexArtifacts:
         snapshot = json.loads(paths.data_flow_snapshot.read_text())
         assert snapshot["runtime"]["scaffoldSource"] == "cps_asec_parquet"
 
+    def test_writes_child_tax_unit_agi_drift_summary(self, tmp_path):
+        result = USMicroplexBuildResult(
+            config=USMicroplexBuildConfig(
+                n_synthetic=2,
+                synthesis_backend="seed",
+                calibration_backend="entropy",
+                policyengine_dataset_year=2024,
+            ),
+            seed_data=pd.DataFrame(
+                {
+                    "person_id": [1, 2],
+                    "tax_unit_id": [10, 10],
+                    "age": [40.0, 10.0],
+                    "is_tax_unit_dependent": [0, 1],
+                    "employment_income": [30_000.0, 0.0],
+                    "wage_income": [28_000.0, 0.0],
+                    "taxable_interest_income": [100.0, 0.0],
+                }
+            ),
+            synthetic_data=pd.DataFrame(
+                {
+                    "person_id": [1, 2],
+                    "tax_unit_id": [10, 10],
+                    "age": [40.0, 10.0],
+                    "is_tax_unit_dependent": [0, 1],
+                    "employment_income": [30_000.0, 0.0],
+                    "wage_income": [28_000.0, 0.0],
+                    "taxable_interest_income": [100.0, 0.0],
+                    "weight": [1.0, 1.0],
+                }
+            ),
+            calibrated_data=pd.DataFrame(
+                {
+                    "person_id": [1, 2],
+                    "tax_unit_id": [10, 10],
+                    "age": [40.0, 10.0],
+                    "is_tax_unit_dependent": [0, 1],
+                    "employment_income": [30_000.0, 0.0],
+                    "wage_income": [28_000.0, 0.0],
+                    "taxable_interest_income": [100.0, 0.0],
+                    "weight": [1.0, 1.0],
+                }
+            ),
+            targets=USMicroplexTargets(marginal={}, continuous={"income": 10.0}),
+            calibration_summary={"max_error": 0.01, "mean_error": 0.005},
+            synthesis_metadata={"backend": "seed"},
+            synthesizer=None,
+            policyengine_tables=PolicyEngineUSEntityTableBundle(
+                households=pd.DataFrame(
+                    {
+                        "household_id": [1],
+                        "household_weight": [2.0],
+                        "state_fips": [6],
+                        "snap": [100.0],
+                    }
+                ),
+                persons=pd.DataFrame(
+                    {
+                        "person_id": [1, 2],
+                        "household_id": [1, 1],
+                        "tax_unit_id": [10, 10],
+                        "spm_unit_id": [20, 20],
+                        "family_id": [30, 30],
+                        "marital_unit_id": [40, 40],
+                        "age": [40.0, 10.0],
+                        "income": [30_000.0, 0.0],
+                    }
+                ),
+                tax_units=pd.DataFrame(
+                    {
+                        "tax_unit_id": [10],
+                        "household_id": [1],
+                        "filing_status": ["JOINT"],
+                    }
+                ),
+                spm_units=pd.DataFrame({"spm_unit_id": [20], "household_id": [1]}),
+                families=pd.DataFrame({"family_id": [30], "household_id": [1]}),
+                marital_units=pd.DataFrame({"marital_unit_id": [40], "household_id": [1]}),
+            ),
+        )
+        baseline_dataset = _write_baseline_dataset(
+            tmp_path / "baseline.h5",
+            result.policyengine_tables,
+        )
+        provider = StaticTargetProvider(
+            TargetSet(
+                [
+                    TargetSpec(
+                        name="snap_total",
+                        entity=EntityType.HOUSEHOLD,
+                        value=100.0,
+                        period=2024,
+                        measure="snap",
+                        aggregation="sum",
+                    ),
+                ]
+            )
+        )
+
+        paths = save_us_microplex_artifacts(
+            result,
+            tmp_path / "bundle",
+            policyengine_target_provider=provider,
+            policyengine_baseline_dataset=baseline_dataset,
+            policyengine_harness_slices=(
+                PolicyEngineUSHarnessSlice(
+                    name="snap",
+                    description="SNAP parity",
+                    query=TargetQuery(period=2024, names=("snap_total",)),
+                ),
+            ),
+            policyengine_harness_metadata={"baseline_dataset": baseline_dataset.name},
+            enable_child_tax_unit_agi_drift=True,
+        )
+
+        assert paths.child_tax_unit_agi_drift is not None
+        assert paths.child_tax_unit_agi_drift.exists()
+        manifest = json.loads(paths.manifest.read_text())
+        assert (
+            manifest["artifacts"]["child_tax_unit_agi_drift"]
+            == "child_tax_unit_agi_drift.json"
+        )
+        assert "child_tax_unit_agi_drift" in manifest.get("diagnostics", {})
+        registry_entries = load_us_microplex_run_registry(
+            paths.run_registry or tmp_path / "run_registry.jsonl"
+        )
+        assert registry_entries[-1].metadata.get("child_tax_unit_agi_drift") is not None
+
     def test_writes_policyengine_harness_when_baseline_and_targets_are_provided(
         self, tmp_path
     ):

@@ -203,6 +203,7 @@ SAFE_POLICYENGINE_US_EXPORT_VARIABLES: set[str] = {
     "short_term_capital_gains",
     "long_term_capital_gains_before_response",
     "partnership_s_corp_income",
+    "partnership_se_income",
     "estate_income",
     "farm_income",
     "farm_operations_income",
@@ -213,6 +214,7 @@ SAFE_POLICYENGINE_US_EXPORT_VARIABLES: set[str] = {
     "is_separated",
     "is_surviving_spouse",
     "net_worth",
+    "ssn_card_type",
     "taxable_private_pension_income",
     "taxable_public_pension_income",
     "tax_exempt_private_pension_income",
@@ -225,6 +227,10 @@ SAFE_POLICYENGINE_US_EXPORT_VARIABLES: set[str] = {
 
 POLICYENGINE_US_EXPORT_COLUMN_ALIASES: dict[str, str] = {
     "race": "cps_race",
+}
+
+POLICYENGINE_US_EXPORT_DEFAULTS: dict[str, Any] = {
+    "ssn_card_type": "CITIZEN",
 }
 
 
@@ -528,7 +534,7 @@ class PolicyEngineUSDBTargetProvider:
             params.extend(geo_levels)
         if domain_variables:
             domain_clauses = [
-                "instr(coalesce(tv.domain_variable, ''), ?) > 0"
+                "instr(',' || coalesce(tv.domain_variable, '') || ',', ',' || ? || ',') > 0"
                 for _ in domain_variables
             ]
             clauses.append("(" + " OR ".join(domain_clauses) + ")")
@@ -658,7 +664,9 @@ class PolicyEngineUSDBTargetProvider:
                 if cell.domain_variable is None:
                     subclauses.append("coalesce(tv.domain_variable, '') = ''")
                 else:
-                    subclauses.append("coalesce(tv.domain_variable, '') = ?")
+                    subclauses.append(
+                        "instr(',' || coalesce(tv.domain_variable, '') || ',', ',' || ? || ',') > 0"
+                    )
                     params.append(cell.domain_variable)
             if cell.geographic_id is not None:
                 subclauses.append("coalesce(tv.geographic_id, '') = ?")
@@ -2035,6 +2043,16 @@ def _evaluate_constraint_mask(
     if aligned is not None:
         return _apply_constraint_filter(aligned, constraint)
 
+    aligned_mask = _align_related_entity_constraint_mask(
+        target_rows=target_rows,
+        target_binding=target_binding,
+        constraint_binding=constraint_binding,
+        constraint=constraint,
+        tables=tables,
+    )
+    if aligned_mask is not None:
+        return aligned_mask
+
     if target_binding.entity is EntityType.HOUSEHOLD:
         aligned = _evaluate_constraint_on_households(
             constraint=constraint,
@@ -2075,6 +2093,38 @@ def _align_related_entity_constraint_values(
     )
     related_values = related_table.set_index(related_id_column)[constraint_column]
     return target_rows[related_id_column].map(related_values)
+
+
+def _align_related_entity_constraint_mask(
+    *,
+    target_rows: pd.DataFrame,
+    target_binding: PolicyEngineUSVariableBinding,
+    constraint_binding: PolicyEngineUSVariableBinding,
+    constraint: PolicyEngineUSConstraint | TargetFilter,
+    tables: PolicyEngineUSEntityTableBundle,
+) -> pd.Series | None:
+    if constraint_binding.entity is not EntityType.PERSON:
+        return None
+    if target_binding.entity not in {
+        EntityType.TAX_UNIT,
+        EntityType.SPM_UNIT,
+        EntityType.FAMILY,
+    }:
+        return None
+    persons = tables.persons
+    if persons is None:
+        return None
+    related_id_column = _entity_primary_id_column(target_binding.entity)
+    if related_id_column not in target_rows.columns or related_id_column not in persons.columns:
+        return None
+    constraint_column = _require_binding_column(
+        constraint_binding,
+        feature=_constraint_feature(constraint),
+    )
+    person_matches = _apply_constraint_filter(persons[constraint_column], constraint)
+    group_matches = person_matches.groupby(persons[related_id_column]).any()
+    aligned = target_rows[related_id_column].map(group_matches).fillna(False)
+    return pd.Series(aligned.to_numpy(dtype=bool), index=target_rows.index, dtype=bool)
 
 
 def _evaluate_constraint_on_households(
@@ -2806,8 +2856,19 @@ def _project_table_to_time_period_arrays(
             continue
         if source_column not in table.columns:
             raise ValueError(f"Projection source column not found: {source_column}")
+        values = pd.Series(table[source_column])
+        has_default = target_variable in POLICYENGINE_US_EXPORT_DEFAULTS
+        if has_default:
+            default_value = POLICYENGINE_US_EXPORT_DEFAULTS[target_variable]
+            values = values.where(values.notna(), other=default_value)
+            if isinstance(default_value, str):
+                string_values = values.astype("string")
+                values = string_values.where(
+                    string_values.notna() & string_values.ne(""),
+                    other=default_value,
+                )
         arrays[target_variable] = {
-            period_key: _normalize_h5_value(table[source_column]),
+            period_key: _normalize_h5_value(values),
         }
     return arrays
 

@@ -17,6 +17,8 @@ def _manifest(
     candidate_error: float,
     baseline_error: float,
     delta: float,
+    full_oracle_error: float | None = None,
+    full_oracle_capped_error: float | None = None,
     candidate_composite_loss: float | None = None,
     baseline_composite_loss: float | None = None,
     composite_delta: float | None = None,
@@ -50,6 +52,14 @@ def _manifest(
         "calibration": {
             "converged": calibration_converged,
             "weight_collapse_suspected": weight_collapse_suspected,
+            "full_oracle_capped_mean_abs_relative_error": (
+                candidate_error
+                if full_oracle_capped_error is None
+                else full_oracle_capped_error
+            ),
+            "full_oracle_mean_abs_relative_error": (
+                candidate_error if full_oracle_error is None else full_oracle_error
+            ),
         },
         "policyengine_harness": {
             "candidate_mean_abs_relative_error": candidate_error,
@@ -186,6 +196,8 @@ def test_append_and_load_us_microplex_run_registry(tmp_path):
     assert entries[0].policyengine_us_runtime_version == "1.587.0"
     assert entries[0].supported_target_rate == 1.0
     assert entries[0].tag_summaries["national"]["supported_target_rate"] == 1.0
+    assert entries[0].full_oracle_capped_mean_abs_relative_error == 0.20
+    assert entries[0].full_oracle_mean_abs_relative_error == 0.20
     assert entries[0].candidate_composite_parity_loss == 0.20
     assert entries[0].parity_scorecard["overall"]["candidate_beats_baseline"] is True
     assert entries[0].metadata["git_commit"] == "abc123"
@@ -257,6 +269,57 @@ def test_default_frontier_metric_prefers_composite_parity_loss(tmp_path):
             metric="candidate_mean_abs_relative_error",
         ).artifact_id
         == "run-1"
+    )
+
+
+def test_full_oracle_capped_frontier_selection(tmp_path):
+    from microplex_us.pipelines.registry import select_us_microplex_frontier_entry
+
+    registry_path = tmp_path / "runs.jsonl"
+
+    append_us_microplex_run_registry_entry(
+        registry_path,
+        build_us_microplex_run_registry_entry(
+            artifact_dir=tmp_path / "run-1",
+            manifest_path=tmp_path / "run-1" / "manifest.json",
+            manifest=_manifest(
+                created_at="2026-03-25T12:00:00+00:00",
+                synthesis_backend="bootstrap",
+                calibration_backend="entropy",
+                candidate_error=0.10,
+                baseline_error=0.30,
+                delta=-0.20,
+                full_oracle_capped_error=0.22,
+                full_oracle_error=0.25,
+            ),
+            policyengine_harness_payload=_harness_payload(),
+        ),
+    )
+    append_us_microplex_run_registry_entry(
+        registry_path,
+        build_us_microplex_run_registry_entry(
+            artifact_dir=tmp_path / "run-2",
+            manifest_path=tmp_path / "run-2" / "manifest.json",
+            manifest=_manifest(
+                created_at="2026-03-25T13:00:00+00:00",
+                synthesis_backend="bootstrap",
+                calibration_backend="entropy",
+                candidate_error=0.10,
+                baseline_error=0.30,
+                delta=-0.20,
+                full_oracle_capped_error=0.12,
+                full_oracle_error=0.15,
+            ),
+            policyengine_harness_payload=_harness_payload(),
+        ),
+    )
+
+    assert (
+        select_us_microplex_frontier_entry(
+            registry_path,
+            metric="full_oracle_capped_mean_abs_relative_error",
+        ).artifact_id
+        == "run-2"
     )
 
 

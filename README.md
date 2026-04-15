@@ -8,6 +8,7 @@ built on top of the generic `microplex` engine.
 - [Docs index](./docs/README.md)
 - [Architecture](./docs/architecture.md)
 - [Source semantics](./docs/source-semantics.md)
+- [Imputation conditioning contract](./docs/imputation-conditioning-contract.md)
 - [Benchmarking](./docs/benchmarking.md)
 - [Methodology ledger](./docs/methodology-ledger.md)
 - [PolicyEngine oracle compatibility path](./docs/policyengine-oracle-compatibility.md)

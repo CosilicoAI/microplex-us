@@ -207,6 +207,7 @@ PE_STYLE_SOCIAL_SECURITY_QRF_PREDICTORS = (
     "is_tax_unit_dependent",
 )
 MIN_PE_STYLE_SOCIAL_SECURITY_QRF_TRAINING_RECORDS = 100
+PE_PUF_PERSON_EXPANSION_RANDOM_SEED = 64
 
 JOINT_HEAD_SHARE_ALLOCATION = {
     "employment_income": 0.6,
@@ -933,12 +934,18 @@ def _impute_age(
     return age
 
 
-def _decode_puf_filer_age(age_range: int | float | None, *, fallback: float = 40.0) -> int:
+def _decode_puf_filer_age(
+    age_range: int | float | None,
+    *,
+    fallback: float = 40.0,
+    rng: np.random.Generator | None = None,
+) -> int:
+    resolved_fallback = 40.0 if fallback is None or pd.isna(fallback) else fallback
     if age_range is None or pd.isna(age_range):
-        return int(fallback)
+        return int(resolved_fallback)
     age_code = int(age_range)
     if age_code == 0:
-        return int(fallback)
+        return int(resolved_fallback)
     age_decode = {
         1: 18,
         2: 26,
@@ -950,12 +957,20 @@ def _decode_puf_filer_age(age_range: int | float | None, *, fallback: float = 40
     }
     lower = age_decode.get(age_code)
     upper = age_decode.get(age_code + 1)
-    if lower is None or upper is None:
-        return int(fallback)
+    if lower is None:
+        return int(resolved_fallback)
+    if upper is None or upper <= lower:
+        return int(lower)
+    if rng is not None:
+        return int(rng.integers(low=lower, high=upper, endpoint=False))
     return int(lower + (upper - lower) / 2)
 
 
-def _decode_puf_dependent_age(age_range: int | float | None) -> int:
+def _decode_puf_dependent_age(
+    age_range: int | float | None,
+    *,
+    rng: np.random.Generator | None = None,
+) -> int:
     if age_range is None or pd.isna(age_range):
         return 0
     age_code = int(age_range)
@@ -975,10 +990,17 @@ def _decode_puf_dependent_age(age_range: int | float | None) -> int:
     upper = age_decode.get(age_code + 1, lower)
     if upper <= lower:
         return int(lower)
+    if rng is not None:
+        return int(rng.integers(low=lower, high=upper, endpoint=False))
     return int(lower + (upper - lower) / 2)
 
 
-def _puf_joint_head_share(row: pd.Series, *, default: float = 0.6) -> float:
+def _puf_joint_head_share(
+    row: pd.Series,
+    *,
+    default: float = 0.6,
+    rng: np.random.Generator | None = None,
+) -> float:
     earnsplit = row.get("_puf_earnsplit")
     if earnsplit is None or pd.isna(earnsplit):
         return default
@@ -996,7 +1018,32 @@ def _puf_joint_head_share(row: pd.Series, *, default: float = 0.6) -> float:
     upper = split_decodes.get(split_code + 1)
     if lower is None or upper is None:
         return default
+    if rng is not None:
+        frac = (upper - lower) * rng.random() + lower
+        return float(1.0 - frac)
     return float(1.0 - ((lower + upper) / 2.0))
+
+
+def _puf_spouse_is_male(
+    gender_code: int | float | None,
+    *,
+    rng: np.random.Generator | None = None,
+) -> float:
+    if gender_code is None or pd.isna(gender_code):
+        return 0.0
+    resolved_gender = int(gender_code)
+    if rng is None:
+        return float(resolved_gender != 1)
+    is_opposite_gender = bool(rng.random() < 0.96)
+    opposite_gender_code = 0.0 if resolved_gender == 1 else 1.0
+    same_gender_code = 1.0 - opposite_gender_code
+    return opposite_gender_code if is_opposite_gender else same_gender_code
+
+
+def _puf_dependent_is_male(*, rng: np.random.Generator | None = None) -> float:
+    if rng is None:
+        return 0.0
+    return float(rng.choice([0, 1]))
 
 
 def _is_puf_numeric_split_column(df: pd.DataFrame, column: str) -> bool:
@@ -1306,19 +1353,43 @@ def _load_pe_extended_cps_pre_tax_training_frame(
         )
 
     with h5py.File(dataset_path, "r") as h5:
-        period_key = str(int(training_year))
-        if period_key not in h5["pre_tax_contributions"]:
-            period_key = sorted(h5["pre_tax_contributions"].keys())[-1]
         train = pd.DataFrame(
             {
                 "employment_income": np.asarray(
-                    h5["employment_income"][period_key], dtype=float
+                    h5["employment_income"][str(int(training_year))], dtype=float
+                )
+                if str(int(training_year)) in h5["employment_income"]
+                else np.asarray(
+                    h5["employment_income"][sorted(h5["employment_income"].keys())[-1]],
+                    dtype=float,
                 ),
-                "age": np.asarray(h5["age"][period_key], dtype=float),
+                "age": np.asarray(
+                    h5["age"][str(int(training_year))], dtype=float
+                )
+                if str(int(training_year)) in h5["age"]
+                else np.asarray(
+                    h5["age"][sorted(h5["age"].keys())[-1]],
+                    dtype=float,
+                ),
                 "is_male": 1.0
-                - np.asarray(h5["is_female"][period_key], dtype=float),
+                - np.asarray(
+                    h5["is_female"][str(int(training_year))], dtype=float
+                )
+                if str(int(training_year)) in h5["is_female"]
+                else 1.0
+                - np.asarray(
+                    h5["is_female"][sorted(h5["is_female"].keys())[-1]],
+                    dtype=float,
+                ),
                 "pre_tax_contributions": np.asarray(
-                    h5["pre_tax_contributions"][period_key], dtype=float
+                    h5["pre_tax_contributions"][str(int(training_year))], dtype=float
+                )
+                if str(int(training_year)) in h5["pre_tax_contributions"]
+                else np.asarray(
+                    h5["pre_tax_contributions"][
+                        sorted(h5["pre_tax_contributions"].keys())[-1]
+                    ],
+                    dtype=float,
                 ),
             }
         )
@@ -1593,6 +1664,7 @@ def expand_to_persons(df: pd.DataFrame) -> pd.DataFrame:
     """
     records = []
     split_columns = [column for column in df.columns if _is_puf_numeric_split_column(df, column)]
+    pe_rng = np.random.default_rng(PE_PUF_PERSON_EXPANSION_RANDOM_SEED)
 
     for idx, row in df.iterrows():
         filing_status = row.get("filing_status", "SINGLE")
@@ -1611,7 +1683,10 @@ def expand_to_persons(df: pd.DataFrame) -> pd.DataFrame:
         head["person_id"] = f"{pe_tax_unit_id}:1" if has_pe_demographics else f"{idx}_head"
         head["tax_unit_id"] = pe_tax_unit_id if has_pe_demographics else str(idx)
         if has_pe_demographics:
-            head["age"] = _decode_puf_filer_age(row.get("_puf_agerange"), fallback=row.get("age", 40.0))
+            head["age"] = _decode_puf_filer_age(
+                row.get("_puf_agerange"),
+                fallback=row.get("age", 40.0),
+            )
             if pd.notna(row.get("_puf_gender")):
                 head["is_male"] = float(int(row.get("_puf_gender")) == 1)
         records.append(head)
@@ -1627,10 +1702,15 @@ def expand_to_persons(df: pd.DataFrame) -> pd.DataFrame:
             spouse["is_surviving_spouse"] = False
 
             if has_pe_demographics:
-                spouse["age"] = _decode_puf_filer_age(row.get("_puf_agerange"), fallback=row.get("age", 40.0))
+                spouse["age"] = _decode_puf_filer_age(
+                    row.get("_puf_agerange"),
+                    fallback=row.get("age", 40.0),
+                )
                 if pd.notna(row.get("_puf_gender")):
-                    spouse["is_male"] = float(int(row.get("_puf_gender")) != 1)
-                head_share = _puf_joint_head_share(row)
+                    spouse["is_male"] = _puf_spouse_is_male(
+                        row.get("_puf_gender"),
+                    )
+                head_share = _puf_joint_head_share(row, rng=pe_rng)
                 for column in split_columns:
                     amount = float(pd.to_numeric(row.get(column), errors="coerce") or 0.0)
                     head[column] = amount * head_share
@@ -1651,9 +1731,9 @@ def expand_to_persons(df: pd.DataFrame) -> pd.DataFrame:
                 dependent["person_id"] = f"{pe_tax_unit_id}:{dependent_idx + 3}"
                 dependent["tax_unit_id"] = pe_tax_unit_id
                 dependent["age"] = _decode_puf_dependent_age(
-                    row.get(f"_puf_agedp{dependent_idx + 1}")
+                    row.get(f"_puf_agedp{dependent_idx + 1}"),
                 )
-                dependent["is_male"] = 0.0
+                dependent["is_male"] = _puf_dependent_is_male()
                 dependent["is_surviving_spouse"] = False
                 for column in split_columns:
                     dependent[column] = 0.0
@@ -1802,9 +1882,17 @@ def _sample_tax_units(
     if sample_n is None or sample_n >= len(tax_units):
         return tax_units.reset_index(drop=True)
     sample_weights: pd.Series | None = None
-    if "weight" in tax_units.columns:
+    weight_column = next(
+        (
+            candidate
+            for candidate in ("weight", "S006", "household_weight")
+            if candidate in tax_units.columns
+        ),
+        None,
+    )
+    if weight_column is not None:
         candidate_weights = (
-            pd.to_numeric(tax_units["weight"], errors="coerce")
+            pd.to_numeric(tax_units[weight_column], errors="coerce")
             .fillna(0.0)
             .clip(lower=0.0)
         )

@@ -2,6 +2,447 @@
 
 Append-only notes for agents working in `microplex-us`.
 
+## 2026-04-11
+
+- Corrected upstream EITC-recipient oracle semantics:
+  - the active PE targets DB now builds IRS SOI EITC child-count strata with
+    `eitc > 0` in addition to `eitc_child_count`
+  - Microplex's PE target-provider matching now treats `domain_variable` as a
+    set-membership field for target-cell selection, so corrected rows like
+    `eitc,eitc_child_count` still match the intended target profile
+- Fresh evidence after the EITC-recipient oracle fix:
+  - corrected-oracle apples-to-apples reevaluation of the pre-fix large
+    no-donor artifact:
+    - artifact:
+      `artifacts/live_pe_us_data_rebuild_checkpoint_20260411_cross_entity_fix_large_nodonors/large-nodonors-cross-entity-fix-v1`
+    - corrected capped full-oracle loss `1.0149`
+    - corrected full-oracle loss `1.3233`
+  - matched large no-donor source rerun against the corrected oracle:
+    - artifact:
+      `artifacts/live_pe_us_data_rebuild_checkpoint_20260411_eitc_recipient_oracle_large_nodonors/large-nodonors-eitc-recipient-oracle-v2`
+    - `4609` calibrated rows
+    - capped full-oracle loss `0.9729`
+    - full-oracle loss `1.2352`
+    - active-solve capped loss `1.2345`
+    - `420` active constraints
+    - deferred stage still skipped
+  - focused deferred-stage confirmations:
+    - matched large no-donor source rerun with a forced narrow stage 2:
+      `artifacts/live_pe_us_data_rebuild_checkpoint_20260411_age_agi_forced_stage2_large_nodonors/large-nodonors-age-agi-forced-stage2-v1`
+      - capped full-oracle loss improves from `0.9729` to `0.9498`
+      - active-solve capped loss improves from `1.2345` to `1.1237`
+      - stage 2 selects `24` constraints from the top 3 deferred families and
+        top 4 deferred geographies
+    - matched large donor-inclusive source rerun with the same narrow stage 2:
+      `artifacts/live_pe_us_data_rebuild_checkpoint_20260411_age_agi_forced_stage2_large_donors/large-donors-age-agi-forced-stage2-v1`
+      - capped full-oracle loss improves from `0.9730` to `0.9502`
+      - active-solve capped loss improves from `1.2333` to `1.1238`
+      - stage 2 again selects `24` constraints from the same focused set
+    - fresh canonical donor-inclusive checkpoint through the default entrypoint:
+      `artifacts/live_pe_us_data_rebuild_checkpoint_20260411_default_stage2_large_donors/large-donors-default-stage2-v1`
+      - reproduces the same donor-stage result exactly
+      - `trigger_threshold` is now `null`
+      - stage 2 keeps the same `24` focused constraints and the same
+        `0.9502` capped full-oracle loss
+    - broader canonical donor-inclusive checkpoint:
+      `artifacts/live_pe_us_data_rebuild_checkpoint_20260411_broader_default_stage2_donors/broader-donors-default-stage2-v1`
+      - `5000` CPS + `5000` PUF source sample
+      - `12092` calibrated rows
+      - stage 1 reaches `0.9080` capped full-oracle loss
+      - stage 2 still helps, improving to `0.8933`
+      - the focused deferred geographies shift to `KY`, `MS`, `WV`, and `DC`
+    - matched broader canonical no-donor checkpoint:
+      `artifacts/live_pe_us_data_rebuild_checkpoint_20260411_broader_default_stage2_nodonors/broader-nodonors-default-stage2-v1`
+      - `5000` CPS + `5000` PUF source sample
+      - `12092` calibrated rows
+      - stage 1 reaches `0.9056` capped full-oracle loss
+      - stage 2 still helps, improving to `0.8909`
+      - the focused deferred geographies are `KY`, `MS`, `WV`, and `AZ`
+      - donor surveys remain effectively neutral at this broader scale, with a
+        slight edge to the no-donor run:
+        - donors: `0.8933`
+        - no donors: `0.8909`
+    - broader no-donor row-level drilldown and selector check:
+      - drilldown artifact:
+        `artifacts/tmp_broader_nodonor_oracle_drilldown_20260411.json`
+      - age and AGI remain the dominant deferred families
+      - ACA is the next family down and its worst rows are capped at `10.0`,
+        but widening deferred family focus from 3 to 4 does nothing under the
+        current `24`-constraint cap
+      - matched top-4-family run:
+        `artifacts/live_pe_us_data_rebuild_checkpoint_20260411_broader_nodonor_top4family/broader-nodonors-top4family-v1`
+      - result is identical to the default broader no-donor run:
+        - capped full-oracle loss `0.8909`
+        - active-solve capped loss `0.8950`
+    - deferred selector switched from family/geography-share-only priority to
+      row-level deferred capped error plus family/geography loss share within
+      the same focused stage-2 cap
+      - focused regression coverage:
+        - `python -m py_compile src/microplex_us/pipelines/us.py tests/pipelines/test_us.py`
+        - `uv run pytest tests/pipelines/test_us.py -q -k 'prioritizes_target_level_loss or deferred_stage or feasibility_constraint_budget or materialization_failures_audit_only'`
+        - `uv run pytest tests/pipelines/test_pe_us_data_rebuild.py tests/pipelines/test_pe_us_data_rebuild_checkpoint.py -q`
+      - matched medium no-donor rerun:
+        `artifacts/live_pe_us_data_rebuild_checkpoint_20260411_medium_rowrank_nodonors/medium-nodonors-rowrank-v1`
+        - unchanged headline result vs the prior medium default:
+          `1.0298017982 -> 1.0291445335`
+      - matched broader no-donor rerun:
+        `artifacts/live_pe_us_data_rebuild_checkpoint_20260411_broader_rowrank_nodonors/broader-nodonors-rowrank-v1`
+        - capped full-oracle loss improves from `0.8908588020` to
+          `0.8907527501`
+        - active-solve capped loss worsens slightly from `0.8950` to `0.9152`,
+          but the default objective is full-oracle capped loss
+      - matched broader donor-inclusive rerun:
+        `artifacts/live_pe_us_data_rebuild_checkpoint_20260411_broader_rowrank_donors/broader-donors-rowrank-v1`
+        - capped full-oracle loss improves from `0.8932869027` to
+          `0.8782556650`
+        - active-solve capped loss improves from `0.8969` to `0.8814`
+      - read:
+        - the surrounding stage-2 policy was already right; the missed piece was
+          which rows got the fixed `24` slots
+        - keep the row-aware selector and stop spending time on wider family
+          admission experiments for now
+    - medium no-donor source rerun with the same narrow stage 2:
+      `artifacts/live_pe_us_data_rebuild_checkpoint_20260411_age_agi_forced_stage2_medium_nodonors/medium-nodonors-age-agi-forced-stage2-v1`
+      - capped full-oracle loss improves from `1.0298` to `1.0291`
+      - active-solve capped loss improves from `0.7356` to `0.7048`
+      - stage 2 only finds `7` eligible focused constraints and still helps
+    - extra ultra-thin support-1 deferred stage after the row-aware stage 2:
+      - matched broader donor-inclusive rerun:
+        `artifacts/live_pe_us_data_rebuild_checkpoint_20260411_broader_stage3_donors/broader-donors-stage3-v1`
+        - capped full-oracle loss improves from `0.8782556650` to
+          `0.8212707783`
+        - active-solve capped loss improves from `0.8813634527` to
+          `0.8343080918`
+      - matched broader no-donor rerun:
+        `artifacts/live_pe_us_data_rebuild_checkpoint_20260411_broader_stage3_nodonors/broader-nodonors-stage3-v1`
+        - capped full-oracle loss improves from `0.8907527501` to
+          `0.8362042462`
+        - active-solve capped loss improves from `0.9151883609` to
+          `0.8766713154`
+      - matched medium no-donor rerun:
+        `artifacts/live_pe_us_data_rebuild_checkpoint_20260411_medium_stage3_nodonors/medium-nodonors-stage3-v1`
+        - capped full-oracle loss improves from `1.0291445335` to
+          `1.0028694956`
+        - active-solve capped loss worsens slightly from `0.7047951546` to
+          `0.7148843510`, but the full-oracle objective still improves
+      - fresh default-entrypoint medium no-donor confirmation:
+        `artifacts/live_pe_us_data_rebuild_checkpoint_20260411_medium_default_stage3_nodonors/medium-nodonors-default-stage3-v1`
+        - reproduces the same three-stage result exactly
+      - read:
+        - the support-1 pass is now doing real work on the residual
+          ultra-thin age and AGI cells, not just adding noisy extra constraints
+        - promote the default deferred-stage schedule from `(10,)` to `(10, 1)`
+    - deferred family focus widened from `3` to `4` after the new stage-3
+      residual drilldown showed ACA PTC as the next supported deferred family:
+      - added capped-error-mass rankings to the oracle drilldown helper so
+        family prioritization is based on loss contribution, not row counts
+      - broader donor-inclusive rerun with top-4 deferred families:
+        `artifacts/live_pe_us_data_rebuild_checkpoint_20260411_broader_stage3_top4family_donors/broader-donors-stage3-top4family-v1`
+        - capped full-oracle loss improves from `0.8212707783` to
+          `0.7908917500`
+      - broader no-donor rerun with top-4 deferred families:
+        `artifacts/live_pe_us_data_rebuild_checkpoint_20260411_broader_stage3_top4family_nodonors/broader-nodonors-stage3-top4family-v1`
+        - capped full-oracle loss improves from `0.8362042462` to
+          `0.7995775732`
+      - medium no-donor rerun with top-4 deferred families:
+        `artifacts/live_pe_us_data_rebuild_checkpoint_20260411_medium_stage3_top4family_nodonors/medium-nodonors-stage3-top4family-v1`
+        - capped full-oracle loss improves from `1.0028694956` to
+          `0.9968822972`
+      - fresh default-entrypoint medium no-donor confirmation:
+        `artifacts/live_pe_us_data_rebuild_checkpoint_20260411_medium_default_top4family_nodonors/medium-nodonors-default-top4family-v1`
+        - reproduces the same top-4-family result exactly
+      - read:
+        - once stage 3 is in place, ACA is no longer a side issue; it is the
+          next admitted high-support deferred family
+        - promote the default deferred family focus from `3` to `4`
+    - fresh broader donor-inclusive default-entrypoint confirmation:
+      - `artifacts/live_pe_us_data_rebuild_checkpoint_20260412_broader_default_top4family_donors_rerun/broader-donors-default-top4family-v2`
+      - reproduces the existing broader donor default exactly at
+        `0.7908917500` capped full-oracle loss
+    - rejected wider deferred geography focus:
+      - `artifacts/live_pe_us_data_rebuild_checkpoint_20260412_broader_geo8_donors/broader-donors-geo8-v1`
+      - widening deferred geographies from `4` to `8` worsens capped
+        full-oracle loss from `0.7908917500` to `0.7991939177`
+      - read:
+        - the current deferred calibration policy is stable on the broader donor
+          default path
+        - stop widening calibration focus and move upstream to age/AGI structure
+    - fresh broader donor drilldown:
+      - `artifacts/tmp_broader_default_top4family_donor_drilldown_20260412.json`
+      - capped-error mass is still led by `person_count|domain=age`,
+        `person_count|domain=adjusted_gross_income`,
+        `tax_unit_count|domain=adjusted_gross_income`, and
+        `aca_ptc|domain=aca_ptc`
+    - state-floor source-sampling prototype:
+      - added optional source-side `state_floor` sampling support for CPS and
+        donor household samplers
+      - matched broader donor rerun with `state_floor=2` on CPS and donor
+        sources:
+        `artifacts/live_pe_us_data_rebuild_checkpoint_20260412_broader_statefloor2_donors/broader-donors-statefloor2-v1`
+      - read:
+        - this is a no-op at the current broader `5000/5000` scale; the big
+          metric, selected constraints, and deferred geographies are identical
+          to the current default artifact
+        - the remaining age/AGI problem is therefore not plain state-level
+          undercoverage; if we stay upstream, the next sharper idea is
+          state-by-age or state-by-AGI support structure rather than a generic
+          state floor
+    - raw PUF checkpoint sampling should use `S006` weights:
+      - fixed `_sample_tax_units()` so checkpoint-scale PUF samples respect raw
+        `S006` weights before variable mapping instead of uniformly sampling raw
+        PUF rows
+      - matched broader donor rerun:
+        `artifacts/live_pe_us_data_rebuild_checkpoint_20260412_broader_puf_weight_donors/broader-donors-puf-weight-v1`
+        - improves capped full-oracle loss from `0.7908917500` to
+          `0.7681656356`
+      - matched broader no-donor rerun:
+        `artifacts/live_pe_us_data_rebuild_checkpoint_20260412_broader_puf_weight_nodonors/broader-nodonors-puf-weight-v1`
+        - improves capped full-oracle loss from `0.7995775732` to
+          `0.7683205208`
+      - read:
+        - this is a direct incumbent-alignment fix, not a challenger modeling
+          tweak
+        - it improves the big metric more than the recent calibration-planner
+          experiments
+        - after the fix, age and AGI still dominate capped-error mass, but the
+          worst individual cells shift toward ACA PTC and rental/interest tails
+    - experiment index:
+      - created `artifacts/experiment_index.jsonl`
+      - records the intervention artifact, baseline artifact, big metric delta,
+        and kept/rejected decision for the recent matched experiments
+    - top-3 deferred families is now rejected again under the improved upstream
+      source sample:
+      - `artifacts/live_pe_us_data_rebuild_checkpoint_20260412_broader_puf_weight_top3family_donors/broader-donors-puf-weight-top3family-v1`
+      - regresses capped full-oracle loss from `0.7681656356` to
+        `0.8021818710`
+      - read:
+        - ACA still belongs in the focused deferred family set under the new
+          source sample, even though ACA-family loss itself remains ugly
+    - CPS `state x age-band` checkpoint floor:
+      - added optional `state_age_floor` support to CPS checkpoint sampling and
+        promoted `state_age_floor=1` into the default checkpoint query builder
+      - matched broader donor rerun:
+        `artifacts/live_pe_us_data_rebuild_checkpoint_20260412_broader_cps_stateage1_donors/broader-donors-cps-stateage1-v1`
+        - improves capped full-oracle loss from `0.7681656356` to
+          `0.7329149849`
+      - matched broader no-donor rerun:
+        `artifacts/live_pe_us_data_rebuild_checkpoint_20260412_broader_cps_stateage1_nodonors/broader-nodonors-cps-stateage1-v1`
+        - improves capped full-oracle loss from `0.7683205208` to
+          `0.7368409543`
+      - stage attribution on the broader donor artifact:
+        `artifacts/live_pe_us_data_rebuild_checkpoint_20260412_broader_puf_weight_donors/tmp_broader_puf_weight_donor_stage_attribution_20260412.json`
+      - read:
+        - `seed` and `synthetic` are identical on the PE oracle for this path,
+          so the remaining age/AGI miss is entering before synthesis
+        - calibration still reduces age/AGI/EITC substantially, but it worsens
+          ACA and rental
+        - the state-age floor is the first upstream CPS support tweak that
+          materially improves the big metric on both donor and no-donor runs
+  - comparative read:
+    - this is a real improvement under the corrected oracle, not a stale-manifest
+      artifact
+    - `tax_unit_count|domain=eitc_child_count` drops out of the top-3 residual
+      families after the rerun
+    - the remaining leading families are now age counts and AGI count families,
+      with leading geographies `OR`, `WI`, and `MI`
+- Durable comparison artifact:
+  - `artifacts/tmp_eitc_recipient_oracle_large_nodonors_comparison_20260411.json`
+
+- Corrected full-oracle accounting:
+  - `full_oracle_*` metrics now include explicit penalty mass for unsupported
+    targets instead of silently scoring only the supported subset
+  - supported-only summaries remain available as separate diagnostics
+- Corrected deferred-stage control flow:
+  - a skipped deferred stage no longer aborts later scheduled stages
+- Current default PE-oracle rebuild policy:
+  - dense first calibration pass
+  - one deferred support-10 pass
+  - deferred-pass cap `24`
+  - deferred pass always considered
+  - deferred pass focused to the top 3 deferred families and top 4 deferred
+    geographies
+  - deferred pass only retained if capped full-oracle loss improves
+- Fresh evidence after the correction:
+  - medium source checkpoint:
+    - artifact:
+      `artifacts/live_pe_us_data_rebuild_checkpoint_20260411_corrected_oracle_source_medium/medium-source-corrected-oracle-v1`
+    - `918` calibrated rows
+    - capped full-oracle loss `2.3931`
+    - stage 2 skipped under the new `2.45` trigger
+  - donor-inclusive source checkpoint:
+    - artifact:
+      `artifacts/live_pe_us_data_rebuild_checkpoint_20260411_corrected_oracle_source_donors/donors-source-corrected-oracle-v1`
+    - `918` calibrated rows
+    - capped full-oracle loss `2.3940`
+    - active-solve capped loss `2.0969`
+    - stage 2 also skipped under the new `2.45` trigger
+  - larger donor-inclusive source checkpoint:
+    - artifact:
+      `artifacts/live_pe_us_data_rebuild_checkpoint_20260411_corrected_oracle_source_large_donors/large-donors-source-corrected-oracle-v1`
+    - source mix:
+      `cps_asec_2023 + irs_soi_puf_2024 + acs_2022 + sipp_tips_2023 + sipp_assets_2023 + scf_2022`
+    - `4859` calibrated rows
+    - `490` active constraints after the feasibility filter
+    - capped full-oracle loss `2.4331`
+    - active-solve capped loss `2.7178`
+    - deferred stage still skipped under the new `2.45` trigger
+  - matched larger no-donor source checkpoint:
+    - artifact:
+      `artifacts/live_pe_us_data_rebuild_checkpoint_20260411_corrected_oracle_source_large_nodonors/large-nodonors-source-corrected-oracle-v1`
+    - source mix:
+      `cps_asec_2023 + irs_soi_puf_2024`
+    - `4859` calibrated rows
+    - `487` active constraints after the feasibility filter
+    - capped full-oracle loss `2.4329`
+    - active-solve capped loss `2.7284`
+    - deferred stage also skipped under the new `2.45` trigger
+- larger replayed saved artifacts:
+  - `4859` rows: capped full-oracle loss `0.6803`, stage 2 skipped
+  - `24686` rows: capped full-oracle loss `1.9845`, stage 2 skipped
+- Current interpretation:
+  - the corrected metric still preserves the useful tiny-run stage-2 gain
+  - at medium and above, the deferred pass should usually not fire under the
+    current incumbent-compatible default
+  - the fresh `4859`-row donor-inclusive source build lands very close to the
+    trigger, so `2.45` now looks like a real boundary value rather than a loose
+    conservative skip rule
+  - at this `2000/2000` source scale, donor surveys are basically neutral on
+    corrected full-oracle loss:
+    - donors: `2.4331`
+    - no donors: `2.4329`
+    - donors slightly improve active-solve loss but do not improve the
+      full-oracle score
+  - follow-up compiler diagnosis:
+    - the dominant remaining full-oracle families were not actually calibration
+      misses; they were `tax_unit_count` targets with person-entity domain
+      filters such as `dividend_income > 0` and `tax_unit_is_filer == 1`
+    - PE defines those domain variables on `person`, while the old compiler only
+      supported cross-entity filters for household targets
+    - extending the compiler to align `person -> tax_unit/family/spm_unit`
+      boolean filters removes that structural unsupported wall
+  - replay after the compiler fix on the saved `4859`-row large source
+    artifacts:
+    - supported targets move from `4070` to `4642`
+    - unsupported targets drop from `572` to `0`
+    - capped full-oracle replay loss falls from about `2.43` to about `1.33`
+    - donor vs no-donor remains effectively neutral on the replayed full-oracle
+      metric:
+      - donors: `1.3267`
+      - no donors: `1.3264`
+  - fresh large no-donor source rerun after the compiler fix:
+    - artifact:
+      `artifacts/live_pe_us_data_rebuild_checkpoint_20260411_cross_entity_fix_large_nodonors/large-nodonors-cross-entity-fix-v1`
+    - active constraints rise from `487` to `540`
+    - supported targets rise from `487` to `540` within the solve
+    - unsupported targets drop from `572` to `0` on the full oracle
+    - capped full-oracle loss falls from `2.4329` to `1.3274`
+    - active-solve capped loss improves slightly from `2.7284` to `2.6923`
+    - deferred stage still skips, now because the trigger metric is
+      `1.3274 < 2.45`
+  - fresh large donor-inclusive source rerun after the compiler fix:
+    - artifact:
+      `artifacts/live_pe_us_data_rebuild_checkpoint_20260411_cross_entity_fix_large_donors/large-donors-cross-entity-fix-v1`
+    - capped full-oracle loss lands at `1.3277`
+    - active-solve capped loss lands at `2.6825`
+    - unsupported targets remain `0`
+    - donor inclusion is still basically neutral on the broad oracle at this scale
+  - added saved-artifact oracle summaries:
+    - recurring family/geography summary:
+      `artifacts/tmp_policyengine_oracle_regressions_cross_entity_fix_20260411.json`
+    - exact worst-cell drilldown:
+      `artifacts/tmp_policyengine_oracle_target_drilldown_cross_entity_fix_20260411.json`
+  - residual reading after the compiler fix:
+    - the largest remaining full-oracle families are now
+      `person_count|domain=age`,
+      `tax_unit_count|domain=eitc_child_count`,
+      `person_count|domain=adjusted_gross_income`,
+      `tax_unit_count|domain=adjusted_gross_income`,
+      `tax_unit_count|domain=salt`, and `aca_ptc|domain=aca_ptc`
+    - the leading geographies are `state:OR`, `state:GA`, and `state:MO`
+    - concrete worst cells inside those geographies include:
+      - `tax_exempt_interest_income` in `OR`
+      - AGI count targets in `OR` and `MO`
+      - ACA PTC in `OR`, `GA`, and `MO`
+      - EITC child-count and SALT targets in `GA`
+      - pass-through income in `MO`
+  - next work should target those residual families/geographies directly, not
+    more deferred-stage threshold tuning
+  - controlled smoke A/B on stored-input tails:
+    - accepted interest/rental conditioning change:
+      `artifacts/live_pe_us_data_rebuild_checkpoint_20260411_asset_tail_conditioning_smoke_nodonors_current/smoke-nodonors-asset-tail-conditioning-current-v1`
+    - matched old-semantics baseline:
+      `artifacts/live_pe_us_data_rebuild_checkpoint_20260411_asset_tail_conditioning_smoke_nodonors_oldsemantics/smoke-nodonors-asset-tail-old-semantics-v1`
+    - rejected property-cost extension:
+      `artifacts/live_pe_us_data_rebuild_checkpoint_20260411_asset_tail_conditioning_smoke_nodonors_v2/smoke-nodonors-asset-tail-conditioning-v2`
+    - outcome:
+      - the accepted change is a small honest win on the smoke A/B:
+        capped full-oracle loss improves from `1.4417803` to `1.4414441`
+      - active-solve capped loss also improves from `1.8878380` to `1.8829362`
+      - the capped stored-input mass attributed to
+        `tax_exempt_interest_income` in the top drilldown falls from `40` to `20`
+      - extending the same pattern to property-tax variables was worse and was
+        reverted: capped full-oracle loss rose to `1.4489770`
+  - tested a separate interest-family decomposition path and rejected it:
+    - medium no-donor candidate:
+      `artifacts/live_pe_us_data_rebuild_checkpoint_20260411_interest_family_medium_nodonors/medium-nodonors-interest-family-v1`
+    - matched large no-donor confirmation:
+      `artifacts/live_pe_us_data_rebuild_checkpoint_20260411_interest_family_large_nodonors/large-nodonors-interest-family-v1`
+    - matched large no-donor baseline:
+      `artifacts/live_pe_us_data_rebuild_checkpoint_20260411_cross_entity_fix_large_nodonors/large-nodonors-cross-entity-fix-v1`
+    - reading:
+      - the idea looked good at medium scale
+      - it does not hold at `2000/2000`
+      - capped full-oracle loss worsens from `1.3274` to `1.3555`
+      - raw full-oracle loss worsens from `2256.6` to `16980.7`
+      - active-solve capped loss worsens from `2.6923` to `2.8229`
+      - reverted the code change; default path stays on separate
+        `taxable_interest_income` and `tax_exempt_interest_income`
+  - tested donor-support sampling without replacement and rejected it:
+    - rejected smoke artifact:
+      `artifacts/live_pe_us_data_rebuild_checkpoint_20260411_donor_support_sampling_smoke_nodonors/smoke-nodonors-donor-support-sampling-v1`
+    - baseline smoke artifact:
+      `artifacts/live_pe_us_data_rebuild_checkpoint_20260411_asset_tail_conditioning_smoke_nodonors_current/smoke-nodonors-asset-tail-conditioning-current-v1`
+    - reading:
+      - capped full-oracle loss worsens from `1.4414` to `1.6369`
+      - active-solve capped loss worsens from `1.8829` to `2.7402`
+      - keep donor-support sampling with replacement
+  - rejected rental export normalization from donor-integrated components:
+    - the saved large no-donor seed already carries
+      `rental_income_positive` and `rental_income_negative`
+    - replaying that saved seed with export-side normalization looked promising:
+      - capped full-oracle loss improves from `1.3274` to `1.3169`
+      - active-solve capped loss improves from `2.6923` to `2.6877`
+    - but the fresh `2000/2000` large no-donor source checkpoint failed:
+      - baseline:
+        `artifacts/live_pe_us_data_rebuild_checkpoint_20260411_cross_entity_fix_large_nodonors/large-nodonors-cross-entity-fix-v1`
+      - candidate:
+        `artifacts/live_pe_us_data_rebuild_checkpoint_20260411_rental_export_large_nodonors/large-nodonors-rental-export-v1`
+      - capped full-oracle loss worsens from `1.3274` to `1.3874`
+      - active-solve capped loss worsens from `2.6923` to `2.7722`
+      - active constraints fall from `540` to `522`
+    - verdict: do not keep this change in the default path; source checkpoints
+      override replay-only wins
+  - rejected direct zero-support-mask propagation in zero-inflated donor rank
+    matching:
+    - idea:
+      - the QRF path already trains a zero model for zero-inflated positives
+      - let final donor rank matching use the generated `scores > 0` support mask
+        instead of donor positive-rate counts
+    - rationale:
+      - this looked like a clean way to stop final rank matching from
+        reintroducing positive tail support after the zero model had already
+        predicted zeros
+    - but the fresh `2000/2000` large no-donor source checkpoint failed:
+      - baseline:
+        `artifacts/live_pe_us_data_rebuild_checkpoint_20260411_cross_entity_fix_large_nodonors/large-nodonors-cross-entity-fix-v1`
+      - candidate:
+        `artifacts/live_pe_us_data_rebuild_checkpoint_20260411_zero_support_mask_large_nodonors/large-nodonors-zero-support-mask-v1`
+      - capped full-oracle loss worsens from `1.3274` to `1.9223`
+      - active-solve capped loss worsens from `2.6923` to `4.3296`
+      - active constraints rise from `540` to `703`
+    - verdict: reject; do not replace donor-rate positive counts with the
+      generated zero mask in the default path
+
 ## 2026-03-28
 
 - The US country pack now consumes more shared core benchmark infrastructure.
@@ -1804,3 +2245,889 @@ Append-only notes for agents working in `microplex-us`.
 - Read:
   - this is a safe source-backed fix and should stay
   - it may help some SNAP / expense surfaces, but it is not expected to explain the full `statusfix` gap by itself
+
+## 2026-04-12 reject checkpoint CPS `state x household-income-band` floor
+
+- Code:
+  - no retained code changes; the temporary `state_income_floor` experiment in
+    `src/microplex_us/data_sources/cps.py` and
+    `src/microplex_us/pipelines/pe_us_data_rebuild_checkpoint.py` was reverted
+    after the benchmark run regressed
+- Why:
+  - the next clean AGI-side upstream hypothesis was to mirror the accepted CPS
+    `state x age-band` support floor with a coarse `state x household-income-band`
+    floor during checkpoint sampling
+  - this stayed within the same architecture: better sampled source support
+    before synthesis/calibration, same PE oracle, same downstream calibration
+    planner
+- Focused verification:
+  - `python -m py_compile src/microplex_us/data_sources/cps.py src/microplex_us/pipelines/pe_us_data_rebuild_checkpoint.py tests/test_cps_source_provider.py tests/pipelines/test_pe_us_data_rebuild_checkpoint.py`
+  - `uv run pytest tests/test_cps_source_provider.py tests/pipelines/test_pe_us_data_rebuild_checkpoint.py -q -k 'state_age_floor or default_policyengine_us_data_rebuild_queries'`
+- Artifact:
+  - `artifacts/live_pe_us_data_rebuild_checkpoint_20260412_broader_cps_stateage1_income_donors/broader-donors-cps-stateage1-income-v1`
+- Read:
+  - the hypothesis lost on the mission metric and should not stay in the code
+    surface
+  - matched broader donor baseline with the accepted CPS age floor:
+    `full_oracle_capped_mean_abs_relative_error = 0.7329149849`
+  - candidate with the added income-band floor:
+    `full_oracle_capped_mean_abs_relative_error = 0.7554346215`
+  - delta: `+0.0225196366` worse
+  - the candidate also worsened active-solve capped loss (`0.8499 -> 0.8586`)
+    while increasing selected constraints (`1059 -> 1086`)
+  - conclusion: keep the accepted checkpoint CPS `state x age-band` floor, and
+    do not add the `state x household-income-band` floor
+
+## 2026-04-12 reject checkpoint CPS `state x tax-unit-income-band` floor
+
+- Code:
+  - no retained code changes; the temporary `state_tax_unit_income_floor`
+    experiment in `src/microplex_us/data_sources/cps.py` and
+    `src/microplex_us/pipelines/pe_us_data_rebuild_checkpoint.py` was reverted
+    after the benchmark run
+- Why:
+  - the household-income analogue was too blunt, so the next cleaner AGI-side
+    upstream hypothesis was a CPS `state x tax-unit-income-band` floor built
+    from summed `total_person_income` within each CPS tax unit
+  - this is closer to the PE AGI target surface than household income while
+    still staying entirely in checkpoint-scale source sampling
+- Focused verification:
+  - `python -m py_compile src/microplex_us/data_sources/cps.py src/microplex_us/pipelines/pe_us_data_rebuild_checkpoint.py tests/test_cps_source_provider.py tests/pipelines/test_pe_us_data_rebuild_checkpoint.py`
+  - `uv run pytest tests/test_cps_source_provider.py tests/pipelines/test_pe_us_data_rebuild_checkpoint.py -q -k 'state_age_floor or default_policyengine_us_data_rebuild_queries'`
+- Artifact:
+  - `artifacts/live_pe_us_data_rebuild_checkpoint_20260412_broader_cps_stateage1_taxunitincome_donors/broader-donors-cps-stateage1-taxunitincome-v1`
+- Read:
+  - this was a near miss but still not a keeper on the mission metric
+  - matched broader donor baseline with the accepted CPS age floor:
+    `full_oracle_capped_mean_abs_relative_error = 0.7329149849`
+  - candidate with the added tax-unit-income floor:
+    `full_oracle_capped_mean_abs_relative_error = 0.7372298992`
+  - delta: `+0.0043149143` worse
+  - unlike the household-income version, this candidate did improve some
+    secondary diagnostics:
+    - `full_oracle_mean_abs_relative_error`: `0.8169 -> 0.8134`
+    - `active_solve_capped_mean_abs_relative_error`: `0.8499 -> 0.8047`
+  - conclusion: still reject for the current frontier objective; if this idea
+    comes back later, it should come back with tighter AGI-band design or a
+    clearer target-family-specific objective rather than as a default checkpoint
+    support rule
+
+## 2026-04-12 reject PolicyEngine-style CPS tax-leaf splits on the broader donor checkpoint
+
+- Code:
+  - no retained runtime code changes from this lane
+  - the temporary CPS-source leaf-input materialization and the temporary
+    export-side split fallback were both reverted after the benchmark runs
+  - retained code state only bumps the CPS processed-cache version in
+    `src/microplex_us/data_sources/cps.py` to avoid reusing the rejected
+    source-side cache schema
+- Why:
+  - the next direct AGI-alignment hypothesis was to reuse the same CPS tax-input
+    split assumptions as `policyengine-us-data` for interest, dividends, and
+    pension income
+  - two boundaries were tested:
+    - source-side: materialize those leaf inputs directly in the CPS provider
+      before Microplex donor integration
+    - export-side: keep the CPS source on gross aggregates but apply the same
+      split only when building the final PolicyEngine export surface
+- Focused verification:
+  - source/provider and semantic regression slice:
+    `uv run pytest tests/test_cps_source_provider.py tests/test_variables.py tests/pipelines/test_us.py -q -k 'policyengine_value_inputs or atomic_variable_semantics or prune_redundant_variables or sparse_irs_tax_variables_use_puf_irs_predictors or person_native_irs_semantics or derives_tax_input_columns or fallback_employment_excludes_transfer_income'`
+  - after reversion: `7 passed`
+- Artifacts:
+  - source-side candidate:
+    `artifacts/live_pe_us_data_rebuild_checkpoint_20260412_cps_pe_agi_donors/broader-donors-cps-pe-agi-v1`
+  - export-side candidate:
+    `artifacts/live_pe_us_data_rebuild_checkpoint_20260412_pe_export_cps_agi_donors/broader-donors-pe-export-cps-agi-v1`
+  - matched incumbent baseline:
+    `artifacts/live_pe_us_data_rebuild_checkpoint_20260412_broader_cps_stateage1_donors/broader-donors-cps-stateage1-v1`
+- Read:
+  - the source-side version is clearly wrong for the mixed-source Microplex
+    pipeline:
+    - baseline capped full-oracle loss: `0.7329149849`
+    - source-side candidate: `0.9164981002`
+    - delta: `+0.1835831153` worse
+    - top residual families now included
+      `tax_unit_count|domain=tax_exempt_interest_income` and
+      `tax_exempt_interest_income|domain=tax_exempt_interest_income`, which is
+      a strong sign that the source surface was polluted by estimated leafs too
+      early
+  - the export-side version is better than the source-side one but still not a
+    keeper:
+    - export-side candidate: `0.7998451134`
+    - delta vs baseline: `+0.0669301285` worse
+  - conclusion:
+    - do not promote PE-style CPS tax leafs into the source provider
+    - do not apply the export-side split by default either
+    - the clean alignment boundary for this lane is still unresolved, so the
+      default path stays on gross CPS tax aggregates for now
+
+## 2026-04-12 keep donor checkpoint `state x age-band` floor
+
+- Code:
+  - keep donor survey checkpoint sampling support for `state_age_floor` in
+    `src/microplex_us/data_sources/donor_surveys.py`
+  - keep the default checkpoint query builder passing `state_age_floor=1` to
+    donor survey providers in
+    `src/microplex_us/pipelines/pe_us_data_rebuild_checkpoint.py`
+  - keep the new donor sampling/query regressions in
+    `tests/test_donor_survey_source_providers.py` and
+    `tests/pipelines/test_pe_us_data_rebuild_checkpoint.py`
+- Why:
+  - after accepting the CPS checkpoint `state x age-band` floor, donor-inclusive
+    checkpoints still had an upstream asymmetry: CPS sampling guaranteed
+    `state x age` coverage, donor survey sampling only guaranteed a plain state
+    floor
+  - the next clean test was to mirror the same age-band support floor on donor
+    survey checkpoint sampling, but only keep it if the full-oracle metric moved
+- Focused verification:
+  - `python -m py_compile src/microplex_us/data_sources/donor_surveys.py src/microplex_us/pipelines/pe_us_data_rebuild_checkpoint.py tests/test_donor_survey_source_providers.py tests/pipelines/test_pe_us_data_rebuild_checkpoint.py`
+  - `uv run pytest tests/test_donor_survey_source_providers.py tests/pipelines/test_pe_us_data_rebuild_checkpoint.py -q -k 'state_age_floor or default_policyengine_us_data_rebuild_queries or forwards_state_age_floor'`
+- Artifacts:
+  - baseline:
+    `artifacts/live_pe_us_data_rebuild_checkpoint_20260412_broader_cps_stateage1_donors/broader-donors-cps-stateage1-v1`
+  - candidate:
+    `artifacts/live_pe_us_data_rebuild_checkpoint_20260412_broader_donor_stateage1_donors/broader-donors-donor-stateage1-v1`
+- Read:
+  - the gain is small but real on the deterministic broader donor benchmark
+  - baseline capped full-oracle loss: `0.7329149849`
+  - candidate capped full-oracle loss: `0.7327632809`
+  - delta: `-0.0001517041`
+  - active-solve capped loss also improved slightly: `0.8498782563 -> 0.8495978941`
+  - selected constraints stayed flat at `1059`
+  - conclusion: keep this as a low-risk checkpoint-default refinement, not as a
+    headline methodological change
+
+## 2026-04-12 keep PE-style PUF person-expansion randomness
+
+- Code:
+  - `src/microplex_us/data_sources/puf.py`
+  - `tests/test_puf_source_provider.py`
+  - `artifacts/experiment_index.jsonl`
+  - `docs/methodology-ledger.md`
+- Why:
+  - the PE-demographics branch in Microplex was decoding `_puf_agerange`,
+    `_puf_agedp*`, and `_puf_earnsplit` to fixed midpoints, while
+    `policyengine-us-data` samples inside those coded bins and also randomizes
+    spouse/dependent sex assignment
+  - that is a direct upstream parity bug, not a new modeling idea
+- Focused verification:
+  - `python -m py_compile src/microplex_us/data_sources/puf.py tests/test_puf_source_provider.py`
+  - `uv run pytest tests/test_puf_source_provider.py -q -k 'expand_to_persons or sample_tax_units'`
+  - `uv run pytest tests/test_puf_source_provider.py -q -k 'not pre_tax_contributions_via_policyengine_subprocess'`
+- Artifacts:
+  - source-stage parity candidate:
+    `artifacts/tmp_puf_source_stage_parity_personexpansion_20260412.json`
+  - donor checkpoint:
+    `artifacts/live_pe_us_data_rebuild_checkpoint_20260412_broader_puf_personexpansion_donors/broader-donors-puf-personexpansion-v1`
+  - no-donor checkpoint:
+    `artifacts/live_pe_us_data_rebuild_checkpoint_20260412_broader_puf_personexpansion_nodonors/broader-nodonors-puf-personexpansion-v1`
+- Read:
+  - raw PUF source-stage parity improved materially on the direct PE boundary:
+    - age weighted-mean ratio: `1.0367 -> 1.0275`
+    - employment-income weighted-mean ratio: `1.2196 -> 0.9996`
+    - taxable-interest weighted-mean ratio: `2.2495 -> 1.1774`
+  - matched broader no-donor checkpoint improved on the mission metric:
+    - `0.7368409543 -> 0.7336528770`
+    - active-solve capped loss: `0.8497778115 -> 0.8005940161`
+  - matched broader donor checkpoint regressed slightly on capped full-oracle
+    loss while still improving active-solve loss:
+    - `0.7327632809 -> 0.7342149723`
+    - active-solve capped loss: `0.8495978941 -> 0.8037192584`
+  - conclusion:
+    - keep the parity fix
+    - log the donor-path regression explicitly
+    - treat the donor interaction as the next thing to explain, not as a reason
+      to restore the old midpoint-decoding bug
+
+## 2026-04-12 split PUF person-expansion parity fix; keep only `EARNSPLIT`
+
+- Code:
+  - `src/microplex_us/data_sources/puf.py`
+  - `tests/test_puf_source_provider.py`
+  - `artifacts/experiment_index.jsonl`
+  - `docs/methodology-ledger.md`
+- Why:
+  - the bundled parity fix was too coarse; it mixed age/sex randomization with
+    income-split randomization, and the broader donor checkpoint gave only a
+    slightly negative net result
+  - the next direct move was a matched ablation, not more speculation
+- Focused verification:
+  - `python -m py_compile src/microplex_us/data_sources/puf.py tests/test_puf_source_provider.py`
+  - `uv run pytest tests/test_puf_source_provider.py -q -k 'expand_to_persons or sample_tax_units'`
+  - `uv run pytest tests/test_puf_source_provider.py -q -k 'not pre_tax_contributions_via_policyengine_subprocess'`
+- Artifacts:
+  - donor baseline:
+    `artifacts/live_pe_us_data_rebuild_checkpoint_20260412_broader_donor_stateage1_donors/broader-donors-donor-stateage1-v1`
+  - age/sex-only ablation:
+    `artifacts/live_pe_us_data_rebuild_checkpoint_20260412_broader_puf_personexpansion_ageonly_donors/broader-donors-puf-personexpansion-ageonly-v1`
+  - earnsplit-only ablation:
+    `artifacts/live_pe_us_data_rebuild_checkpoint_20260412_broader_puf_personexpansion_earnsplitonly_donors/broader-donors-puf-personexpansion-earnsplitonly-v1`
+  - real code-path confirmation:
+    `artifacts/live_pe_us_data_rebuild_checkpoint_20260412_broader_puf_personexpansion_default_donors/broader-donors-puf-personexpansion-default-v2`
+- Read:
+  - age/sex-only is clearly harmful on the broader donor frontier:
+    - `0.7327632809 -> 0.7463902007`
+  - earnsplit-only is clearly beneficial:
+    - `0.7327632809 -> 0.7176041064`
+    - active-solve capped loss: `0.8495978941 -> 0.7726915403`
+  - the real code-path rerun matches the earnsplit-only ablation exactly
+  - conclusion:
+    - keep PE-style `EARNSPLIT` randomization in the default path
+    - revert PE-style age/sex randomization for now
+    - treat age-bin randomization as an unresolved parity lane, not a current
+      default
+
+## 2026-04-12 widen deferred family focus to 7 after `EARNSPLIT`
+
+- Code:
+  - `src/microplex_us/pipelines/pe_us_data_rebuild.py`
+  - `tests/pipelines/test_pe_us_data_rebuild.py`
+  - `tests/pipelines/test_pe_us_data_rebuild_checkpoint.py`
+  - `artifacts/experiment_index.jsonl`
+  - `docs/methodology-ledger.md`
+- Why:
+  - after the accepted `EARNSPLIT` fix, the strongest surviving individual
+    rows were ACA PTC and rental tails, but the staged selector was still
+    filling its family slots with AGI and EITC pairs
+  - the clean test was a one-axis rerun with wider deferred family focus, not
+    another ad hoc selector change
+- Artifacts:
+  - donor baseline:
+    `artifacts/live_pe_us_data_rebuild_checkpoint_20260412_broader_puf_personexpansion_default_donors/broader-donors-puf-personexpansion-default-v2`
+  - donor family-7 rerun:
+    `artifacts/live_pe_us_data_rebuild_checkpoint_20260412_broader_puf_personexpansion_family7_donors/broader-donors-puf-personexpansion-family7-v1`
+  - donor-free baseline:
+    `artifacts/live_pe_us_data_rebuild_checkpoint_20260412_broader_puf_personexpansion_default_nodonors/broader-nodonors-puf-personexpansion-default-v2`
+  - donor-free confirmation:
+    `artifacts/live_pe_us_data_rebuild_checkpoint_20260412_broader_puf_personexpansion_family7_nodonors/broader-nodonors-puf-personexpansion-family7-v1`
+- Read:
+  - donor run improves on the mission metric:
+    - `0.7176041064 -> 0.7044626415`
+  - donor-free broader run also improves:
+    - `0.7170633141 -> 0.7039665310`
+  - the widened focus set includes `aca_ptc` and `rental_income` in both
+    deferred passes
+  - fresh residual drilldown now shows:
+    - ACA/rental mass down sharply
+    - remaining mass led again by age, AGI, and EITC families
+    - top individual rows still concentrated in ACA amount and eligibility cells
+  - conclusion:
+    - promote `policyengine_calibration_deferred_stage_top_family_count = 7`
+      into the default rebuild policy
+    - keep the geography gate at `4`
+
+## 2026-04-12 reject full PUF age/sex randomization again on top of family-7
+
+- Code:
+  - `src/microplex_us/data_sources/puf.py` was restored to the earnsplit-only
+    default after the retest
+  - `tests/test_puf_source_provider.py` was restored to the incumbent
+    earnsplit-only regression expectations
+  - `artifacts/experiment_index.jsonl`
+  - `docs/methodology-ledger.md`
+- Verification:
+  - `uv run pytest tests/test_puf_source_provider.py -q -k 'expand_to_persons_uses_pe_demographic_helpers_when_present or expand_to_persons_preserves_joint_tax_unit_monetary_totals or expand_to_persons_splits_negative_joint_self_employment_losses or expand_to_persons_clears_status_flags_for_non_head_members'`
+- Artifacts:
+  - current donor incumbent:
+    `artifacts/live_pe_us_data_rebuild_checkpoint_20260412_broader_puf_personexpansion_family7_donors/broader-donors-puf-personexpansion-family7-v1`
+  - full-rng retest:
+    `artifacts/live_pe_us_data_rebuild_checkpoint_20260412_broader_puf_personexpansion_rng_donors/broader-donors-puf-personexpansion-rng-v1`
+- Read:
+  - broader donor default still loses with full age/sex randomization:
+    - `0.7044626415 -> 0.7111876263`
+  - conclusion:
+    - keep earnsplit-only PUF person expansion in the default path
+    - do not reopen this same parity lane until there is a new interaction
+      hypothesis stronger than “try the rejected thing again”
+
+## 2026-04-12 keep CPS tax-unit structure at the source boundary
+
+- implemented source-layer CPS tax-unit role derivation keyed by raw `TAX_ID`
+  in `src/microplex_us/data_sources/cps.py`
+  - derive:
+    - `is_tax_unit_head`
+    - `is_tax_unit_spouse`
+    - `is_tax_unit_dependent`
+    - `tax_unit_is_joint`
+    - `tax_unit_count_dependents`
+  - added a focused provider regression in
+    `tests/test_cps_source_provider.py`
+- focused verification:
+  - `python -m py_compile src/microplex_us/data_sources/cps.py tests/test_cps_source_provider.py`
+  - `uv run pytest tests/test_cps_source_provider.py -q -k 'derives_tax_unit_roles_from_tax_id or caches_household_geography_on_persons or derives_survivor_and_dependent_social_security or loads_observation_frame or canonical_income_alias'`
+- artifact comparison:
+  - incumbent broader donor default:
+    `artifacts/live_pe_us_data_rebuild_checkpoint_20260412_broader_puf_personexpansion_family7_donors/broader-donors-puf-personexpansion-family7-v1`
+  - source-structure rerun:
+    `artifacts/live_pe_us_data_rebuild_checkpoint_20260412_broader_cps_taxunit_structure_donors/broader-donors-cps-taxunit-structure-v1`
+- read:
+  - capped full-oracle loss is exactly unchanged:
+    - `0.7044626415 -> 0.7044626415`
+  - conclusion:
+    - keep this change because it moves CPS tax-unit semantics to the correct
+      source boundary and removes downstream reconstruction pressure
+    - do not sell it as a frontier gain; it is architecture cleanup
+
+## 2026-04-12 reject direct CPS student flag on the broader donor checkpoint
+
+- tested a narrow EITC-side parity hypothesis:
+  - materialize `is_full_time_college_student` directly from CPS `A_HSCOL`
+    in the processed CPS cache
+- result on the matched broader donor rerun:
+  - incumbent:
+    `artifacts/live_pe_us_data_rebuild_checkpoint_20260412_broader_puf_personexpansion_family7_donors/broader-donors-puf-personexpansion-family7-v1`
+  - student-input rerun:
+    `artifacts/live_pe_us_data_rebuild_checkpoint_20260412_broader_cps_student_donors/broader-donors-cps-student-v1`
+  - capped full-oracle loss:
+    - `0.7044626415 -> 0.7815651801`
+- action:
+  - reverted the student-field addition in `src/microplex_us/data_sources/cps.py`
+    and the temporary student assertions in `tests/test_cps_source_provider.py`
+  - reran the focused CPS verification slice after the revert
+- interpretation:
+  - this is another case where a direct PE CPS input is not automatically
+    plug-compatible with the current mixed-source broader Microplex path
+  - next upstream work should stay on age/AGI/EITC structure, but not through
+    this direct student-field promotion
+
+## 2026-04-12 reject partial preserved tax units as the broader donor default
+
+- implemented a mixed-preservation path in `src/microplex_us/pipelines/us.py`
+  - households with complete source `tax_unit_id` values can now keep those IDs
+  - unresolved households still fall back to `TaxUnitOptimizer`
+  - added a mixed-household regression in `tests/pipelines/test_us.py`
+- focused verification:
+  - `python -m py_compile src/microplex_us/pipelines/us.py tests/pipelines/test_us.py`
+  - `uv run pytest tests/pipelines/test_us.py -q -k 'preserve_existing_tax_unit_ids or falls_back_when_existing_tax_unit_ids_cross_households or partially_preserves_existing_tax_unit_ids'`
+- artifact comparison:
+  - incumbent broader donor default:
+    `artifacts/live_pe_us_data_rebuild_checkpoint_20260412_broader_puf_personexpansion_family7_donors/broader-donors-puf-personexpansion-family7-v1`
+  - partial-preservation rerun:
+    `artifacts/live_pe_us_data_rebuild_checkpoint_20260412_partial_preserve_taxunits_donors/broader-donors-partial-preserve-taxunits-v1`
+- read:
+  - capped full-oracle loss regresses slightly:
+    - `0.7044626415 -> 0.7055670761`
+  - active-solve capped loss improves:
+    - `0.7909211525 -> 0.7648463685`
+  - conclusion:
+    - do not flip the broader default to preserved tax units
+    - keep the code path available for future targeted runs, but move the next
+      upstream work off this boundary and back to AGI/EITC inputs
+
+## 2026-04-12 keep PE-style CPS `ssn_card_type`
+
+- changed:
+  - derive PE-style CPS `ssn_card_type` from raw CPS immigration / benefits /
+    work / housing-assistance fields in
+    `src/microplex_us/data_sources/cps.py`
+  - add mixed-source export support plus `CITIZEN` fallback in
+    `src/microplex_us/policyengine/us.py`
+  - bump the processed CPS cache version so the new column is materialized in
+    rebuilt caches
+  - add focused regressions in
+    `tests/test_cps_source_provider.py`
+    and
+    `tests/policyengine/test_us.py`
+- verification:
+  - `python -m py_compile src/microplex_us/data_sources/cps.py src/microplex_us/policyengine/us.py tests/test_cps_source_provider.py tests/policyengine/test_us.py`
+  - `uv run pytest tests/test_cps_source_provider.py -q -k 'ssn_card_type or derives_tax_unit_roles_from_tax_id'`
+  - `uv run pytest tests/policyengine/test_us.py -q -k 'default_policyengine_us_export_surface or defaults_missing_ssn_card_type_to_citizen'`
+- artifact comparison:
+  - incumbent broader donor default:
+    `artifacts/live_pe_us_data_rebuild_checkpoint_20260412_broader_puf_personexpansion_family7_donors/broader-donors-puf-personexpansion-family7-v1`
+  - `ssn_card_type` rerun:
+    `artifacts/live_pe_us_data_rebuild_checkpoint_20260412_broader_ssn_card_type_donors/broader-donors-ssn-card-type-v1`
+- read:
+  - capped full-oracle loss improves:
+    - `0.7044626415 -> 0.6955460`
+  - active-solve capped loss improves:
+    - `0.7909211525 -> 0.7813926586`
+  - direct `ssn_card_type` family improves sharply:
+    - `1.0000 -> 0.3786`
+  - EITC child-count families improve:
+    - `0.8283 -> 0.7499`
+    - `0.8154 -> 0.7408`
+  - aggregate `eitc` gets worse:
+    - `0.1066 -> 0.2954`
+- conclusion:
+  - keep it
+  - interpret it narrowly as an identification / child-count improvement
+    rather than a blanket EITC win
+
+## 2026-04-12 reject PE-style EITC take-up and voluntary filing inputs
+
+- prototyped PE-style `takes_up_eitc` and
+  `would_file_taxes_voluntarily` tax-unit inputs in
+  `src/microplex_us/pipelines/us.py`, exposed them in
+  `src/microplex_us/policyengine/us.py`, and added review-driven fallback and
+  determinism checks before the checkpoint
+- verification before the run:
+  - `python -m py_compile src/microplex_us/pipelines/us.py src/microplex_us/policyengine/us.py tests/pipelines/test_us.py tests/policyengine/test_us.py`
+  - `uv run pytest tests/pipelines/test_us.py -q -k 'build_policyengine_entity_tables'`
+  - `uv run pytest tests/policyengine/test_us.py -q -k 'default_policyengine_us_export_surface or defaults_missing_ssn_card_type_to_citizen'`
+- artifact comparison:
+  - incumbent:
+    `artifacts/live_pe_us_data_rebuild_checkpoint_20260412_broader_ssn_card_type_donors/broader-donors-ssn-card-type-v1`
+  - candidate:
+    `artifacts/live_pe_us_data_rebuild_checkpoint_20260412_broader_takeup_donors/broader-donors-takeup-v1`
+- metric read:
+  - capped full-oracle loss:
+    - `0.6955460 -> 0.7041134`
+  - active-solve capped loss:
+    - `0.7813927 -> 0.7896826`
+  - EITC child-count families improved, but aggregate `eitc` worsened:
+    - `0.2954 -> 0.4010`
+  - ACA amount / count families also worsened:
+    - `2.3488 -> 2.5737`
+    - `1.1521 -> 1.3708`
+- action:
+  - revert the take-up / voluntary-filing code path
+  - keep `broader-donors-ssn-card-type-v1` as the incumbent broader donor
+    runtime
+  - do not read this as “drop the concept”; the separation between filing
+    propensity and EITC take-up remains a structural requirement, but the
+    attempted late export-layer implementation is not good enough yet
+
+## 2026-04-12 reject `state_age_floor = 2` on broader donor checkpoints
+
+- tested a matched broader donor checkpoint with:
+  - `cps_state_age_floor = 2`
+  - `donor_state_age_floor = 2`
+- artifact comparison:
+  - incumbent:
+    `artifacts/live_pe_us_data_rebuild_checkpoint_20260412_broader_ssn_card_type_donors/broader-donors-ssn-card-type-v1`
+  - candidate:
+    `artifacts/live_pe_us_data_rebuild_checkpoint_20260412_broader_stateage2_donors/broader-donors-stateage2-v1`
+- metric read:
+  - capped full-oracle loss:
+    - `0.6955460 -> 0.7361964`
+  - active-solve capped loss:
+    - `0.7813927 -> 0.8371045`
+  - age improves slightly:
+    - `0.4681 -> 0.4480`
+  - but AGI, EITC child-count, and ACA all regress hard enough to dominate
+    the frontier:
+    - `0.7119 -> 0.7553`
+    - `0.6372 -> 0.6618`
+    - `0.7499 -> 0.8880`
+    - `0.7408 -> 0.8755`
+    - `2.3488 -> 2.9982`
+- action:
+  - reject stronger checkpoint age-floor heuristics
+  - keep the accepted floor-1 incumbent
+  - move the next experiment to upstream PUF age/AGI construction instead
+
+## 2026-04-12 reject high-AGI-preserving PUF checkpoint samples
+
+- prototyped a checkpoint-only PUF sampler that preserved the top AGI tail
+  whenever `sample_n` was active, then ran the matched broader donor checkpoint
+- artifact comparison:
+  - incumbent:
+    `artifacts/live_pe_us_data_rebuild_checkpoint_20260412_broader_ssn_card_type_donors/broader-donors-ssn-card-type-v1`
+  - candidate:
+    `artifacts/live_pe_us_data_rebuild_checkpoint_20260412_broader_puf_agi_tail_donors/broader-donors-puf-agi-tail-v1`
+- metric read:
+  - capped full-oracle loss:
+    - `0.6955460 -> 1.1132009`
+  - active-solve capped loss:
+    - `0.7813927 -> 1.9290`
+- action:
+  - reject it
+  - revert the sampler path completely
+  - treat the fast source-stage improvement on dividends / interest as a false
+    friend unless it survives the real broader checkpoint
+
+## 2026-04-12 reject standalone ACA take-up construction patch
+
+- traced the ACA residual lane and confirmed that
+  `takes_up_aca_if_eligible` is a real PE construction input, not a made-up
+  Microplex feature
+- implemented the narrow probe in `src/microplex_us/pipelines/us.py` and
+  exposed it in `src/microplex_us/policyengine/us.py`, then verified the local
+  code path with focused `py_compile` and pytest slices
+- because disk pressure made a fresh broader rerun unreliable, reevaluated the
+  incumbent broader donor synthetic population in memory against the shared
+  oracle and saved the readout in
+  `artifacts/tmp_broader_aca_takeup_recalibration_20260412.json`
+- read:
+  - capped full-oracle loss:
+    - `0.6955460 -> 0.8211989`
+  - active-solve capped loss:
+    - `0.7813927 -> 0.7013644`
+  - ACA families improve sharply:
+    - `aca_ptc|domain=aca_ptc`
+    - `2.3488 -> 0.5529`
+    - `tax_unit_count|domain=aca_ptc`
+    - `1.1521 -> 0.7112`
+    - `person_count|domain=aca_ptc,is_aca_ptc_eligible`
+    - `1.0994 -> 0.7771`
+- action:
+  - revert the patch from the default path
+  - keep the concept documented as required future parity work
+  - interpret this as “wrong implementation boundary right now,” not “wrong
+    concept”
+
+## 2026-04-12 ACA child gap is mostly Medicaid crowd-out, not missing ACA knobs
+
+- ACA-specific review conclusion:
+  - beyond raw `has_marketplace_health_coverage` / `has_esi`, the only real
+    ACA-specific upstream input is `takes_up_aca_if_eligible`
+  - so there is no large hidden ACA-specific construction surface still
+    missing from Microplex
+- diagnostic comparison:
+  - compared the incumbent broader donor artifact
+    `artifacts/live_pe_us_data_rebuild_checkpoint_20260412_broader_ssn_card_type_donors/broader-donors-ssn-card-type-v1/policyengine_us.h5`
+    against PE's `enhanced_cps_2024.h5`
+  - saved readout:
+    `artifacts/tmp_broader_aca_eligibility_decomposition_20260412.json`
+- read:
+  - the incumbent has higher under-20 Medicaid/CHIP eligibility than the PE
+    baseline:
+    - `eligible_share_under20`: `0.4909 -> 0.6094`
+    - `medicaid_share_under20`: `0.3930 -> 0.5278`
+  - the key driver is much lower child-unit `medicaid_income_level` in the
+    incumbent:
+    - median under-20 `medicaid_income_level`:
+      `15.1512 -> 1.6054`
+    - p75 under-20 `medicaid_income_level`:
+      `364.3831 -> 3.9464`
+  - filing-status mix is not the main failure mode; child tax units are simply
+    too low-income relative to the PE baseline
+- action:
+  - move the next lane to AGI / tax-unit construction and imputation for child
+    units
+  - stop treating ACA as primarily an ACA-specific export/input problem
+
+## 2026-04-13 child-unit income miss is already present before synthesis
+
+- stage-localized the incumbent broader donor artifact by comparing
+  `seed_data.parquet`, `synthetic_data.parquet`, and `calibrated_data.parquet`
+  on under-20 tax-unit income aggregates
+- read:
+  - `seed` and `synthetic` are effectively identical on the child-unit income
+    surface:
+    - weighted mean under-20 tax-unit income:
+      `110304.6 -> 110304.6`
+    - weighted mean under-20 tax-unit employment income:
+      `68829.3 -> 68829.3`
+  - calibration only nudges those values:
+    - weighted mean under-20 tax-unit income:
+      `110304.6 -> 108967.8`
+    - weighted mean under-20 tax-unit employment income:
+      `68829.3 -> 65923.5`
+- action:
+  - treat the current child-unit AGI / Medicaid-income miss as entering in the
+    seeded integrated microdata before synthesis
+  - keep the next debugging lane on upstream construction / source-impute
+    parity rather than calibration
+
+## 2026-04-13 reject source tax-unit preservation as the broader donor default
+
+- tested:
+  - flipped `policyengine_prefer_existing_tax_unit_ids=True` only in the
+    canonical PE rebuild default
+  - left the generic build-config default unchanged
+  - ran the focused rebuild/checkpoint config tests
+  - got an explorer review; no concrete code-level regressions were identified
+- synthetic proxy read:
+  - preserving source tax-unit IDs still looked slightly better on the cached
+    synthetic-policyengine comparison:
+    - `0.63654 -> 0.63583`
+- real decision run:
+  - incumbent:
+    `artifacts/live_pe_us_data_rebuild_checkpoint_20260412_broader_ssn_card_type_donors/broader-donors-ssn-card-type-v1`
+  - candidate:
+    `artifacts/live_pe_us_data_rebuild_checkpoint_20260413_preserve_taxunits_default_donors/broader-donors-preserve-taxunits-default-v1`
+- read:
+  - capped full-oracle loss regresses slightly:
+    - `0.6955 -> 0.6977`
+  - active-solve capped loss improves:
+    - `0.7814 -> 0.7624`
+  - selected constraints fall slightly:
+    - `1031 -> 1019`
+- action:
+  - reverted the default flip in `src/microplex_us/pipelines/pe_us_data_rebuild.py`
+    and the matching config assertions in the rebuild/checkpoint tests
+  - kept the optional preservation path available in `src/microplex_us/pipelines/us.py`
+- interpretation:
+  - the structural clue is still real, but the broader donor frontier metric
+    does not justify making this the default rebuild path yet
+  - keep the next lane on upstream child-unit AGI / Medicaid-income
+    construction and source-impute parity
+
+## 2026-04-13 reject minor-household source tax-unit preservation
+
+- tested:
+  - added an opt-in experiment flag that preserved source `tax_unit_id` values
+    only for households containing a minor and left adult-only households on
+    the optimizer rebuild path
+  - added a focused preservation regression in `tests/pipelines/test_us.py`
+- real decision run:
+  - incumbent:
+    `artifacts/live_pe_us_data_rebuild_checkpoint_20260412_broader_ssn_card_type_donors/broader-donors-ssn-card-type-v1`
+  - candidate:
+    `artifacts/live_pe_us_data_rebuild_checkpoint_20260413_minorhousehold_preserve_taxunits_donors/broader-donors-minorhousehold-preserve-taxunits-v1`
+- read:
+  - the child symptom improves sharply:
+    - under-20 singleton-tax-unit share:
+      `0.1538 -> 0.0345`
+    - under-20 mean `medicaid_income_level`:
+      `2.7279 -> 3.0408`
+  - but the broader donor frontier metric still regresses:
+    - capped full-oracle loss:
+      `0.6955 -> 0.6985`
+    - active-solve capped loss:
+      `0.7814 -> 0.7614`
+- action:
+  - reverted the experiment flag and its targeted test
+- interpretation:
+  - preserving child tax-unit structure helps, but it is not the main blocker
+    anymore
+  - the next upstream lane has to be AGI component construction for child-linked
+    tax units
+
+## 2026-04-13 under-20 AGI miss is now clearly a component-construction problem
+
+- compared PE baseline, the incumbent broader donor artifact, and the rejected
+  minor-household-preservation rerun on person-mapped under-20 tax-unit
+  aggregates
+- read:
+  - under-20 mapped AGI / Medicaid MAGI improve with the rejected structure
+    probe, but remain far below the PE baseline:
+    - `adjusted_gross_income`:
+      `137623.5` (PE) vs `85755.2` (incumbent) vs `98230.0` (minor-preserve)
+    - `medicaid_magi`:
+      `140533.9` (PE) vs `86338.8` (incumbent) vs `98586.5` (minor-preserve)
+  - the remaining miss is in AGI composition:
+    - `tax_unit_partnership_s_corp_income` stays far too low:
+      `23323.0` (PE) vs `9568.7` vs `10710.1`
+    - `net_capital_gains` stays far too low:
+      `3200.0` (PE) vs `534.3` vs `945.7`
+    - `qualified_dividend_income` remains zero in both Microplex artifacts
+    - `tax_exempt_interest_income` remains zero in both Microplex artifacts
+- action:
+  - move the next direct-path work off tax-unit-preservation variants and onto
+    AGI component construction / source-impute parity for child-linked units
+
+## 2026-04-13 reject PE-style sequential PUF joint-QRF imputation in the current donor runtime
+
+- tested:
+  - added a non-default `sequential_qrf` donor-imputer backend for the main PUF
+    AGI leaf lane and grouped the key tax variables into one joint block when
+    that backend was selected
+  - added focused regressions, verified the challenger path locally, then ran
+    matched medium and broader donor checkpoints
+- real decision runs:
+  - medium candidate:
+    `artifacts/live_pe_us_data_rebuild_checkpoint_20260413_sequential_puf_joint_medium/medium-donors-sequential-puf-joint-v1`
+  - broader candidate:
+    `artifacts/live_pe_us_data_rebuild_checkpoint_20260413_sequential_puf_joint_donors/broader-donors-sequential-puf-joint-v1`
+  - incumbent baseline:
+    `artifacts/live_pe_us_data_rebuild_checkpoint_20260412_broader_ssn_card_type_donors/broader-donors-ssn-card-type-v1`
+- read:
+  - the broader donor frontier metric regresses:
+    - capped full-oracle loss:
+      `0.6955 -> 0.7190`
+    - active-solve capped loss:
+      `0.7814 -> 0.7757`
+    - selected constraints:
+      `1031 -> 999`
+  - the medium donor rerun is also not attractive:
+    - capped full-oracle loss:
+      `0.9426`
+    - active-solve capped loss:
+      `0.6618`
+  - a direct matched CPS+PUF stage probe on a `1000/1000` sample shows the
+    challenger changes child-linked AGI composition aggressively rather than
+    cleanly fixing the miss:
+    - under-20 linked `qualified_dividend_income`:
+      `40.0 -> 1199.0`
+    - under-20 linked `taxable_interest_income`:
+      `507.2 -> 1634.6`
+    - under-20 linked `tax_exempt_interest_income`:
+      `4.66 -> 249.4`
+    - under-20 linked `taxable_pension_income`:
+      `9118.5 -> 19317.6`
+- action:
+  - rejected the challenger, reverted the experiment code, and kept the
+    incumbent donor-impute backend
+- interpretation:
+  - the parity clue is still useful because PolicyEngine really does use a more
+    joint QRF architecture for this lane
+  - but the direct port into the current donor/rank-match runtime is not
+    numerically safe enough to keep
+  - the next lane remains narrower AGI component construction / source-impute
+    parity for child-linked tax units, not a backend replacement
+
+## 2026-04-13 reject post-donor zeroing of PUF tax leaves on dependent rows
+
+- tested:
+  - added a post-donor semantic guard that zeroed selected PE-style PUF tax
+    leaves on rows with `is_tax_unit_dependent > 0`
+  - rationale: raw expanded PUF dependents already carry zero for these leaves,
+    while the incumbent broader donor seed artifact was assigning large
+    dependent-row mass on `partnership_s_corp_income`,
+    `taxable_pension_income`, and `taxable_interest_income`
+- local diagnostic read:
+  - the guard did what it was intended to do on the incumbent seed artifact:
+    - under-20 `partnership_s_corp_income`:
+      `4.09M -> 87.3k`
+    - under-20 `taxable_pension_income`:
+      `17.77M -> 172.6k`
+    - under-20 `taxable_interest_income`:
+      `33.98k -> 3.28k`
+- real decision run:
+  - candidate:
+    `artifacts/live_pe_us_data_rebuild_checkpoint_20260413_dependent_zero_tax_leaves_donors/broader-donors-dependent-zero-tax-leaves-v1`
+  - incumbent baseline:
+    `artifacts/live_pe_us_data_rebuild_checkpoint_20260412_broader_ssn_card_type_donors/broader-donors-ssn-card-type-v1`
+- read:
+  - the broader donor frontier metric regresses badly:
+    - capped full-oracle loss:
+      `0.6955 -> 1.1372`
+    - active-solve capped loss:
+      `0.7814 -> 1.6581`
+  - the run starts from a much worse first calibration stage:
+    - post-stage-1 capped full-oracle loss:
+      `1.3660`
+  - deferred stages improve that bad candidate but do not rescue it:
+    - post-stage-2 capped full-oracle loss:
+      `1.2460`
+    - final capped full-oracle loss:
+      `1.1372`
+- action:
+  - rejected the guard and reverted the code
+- interpretation:
+  - the structural clue is still useful because the dependent-row mass is being
+    created during donor integration, not in raw PUF expansion
+  - but blunt post-donor zeroing is the wrong repair and should not stay in the
+    default path
+  - the next lane remains narrower donor-impute/source-impute parity for these
+    child-linked tax leaves
+
+## 2026-04-13 reject dependent-role partitioning inside donor imputation
+
+- tested:
+  - added an exact-match partition on `is_tax_unit_dependent` for the three PUF
+    leaves that were actually exploding on child-linked rows:
+    `partnership_s_corp_income`, `taxable_pension_income`,
+    `taxable_interest_income`
+  - rationale: move the repair to the actual failure point inside donor
+    imputation, instead of zeroing rows after integration
+- real decision run:
+  - candidate:
+    `artifacts/live_pe_us_data_rebuild_checkpoint_20260413_dependent_partition_tax_leaves_donors/broader-donors-dependent-partition-tax-leaves-v1`
+  - incumbent baseline:
+    `artifacts/live_pe_us_data_rebuild_checkpoint_20260412_broader_ssn_card_type_donors/broader-donors-ssn-card-type-v1`
+- read:
+  - the broader donor frontier metric regresses even more:
+    - capped full-oracle loss:
+      `0.6955 -> 1.2406`
+    - active-solve capped loss:
+      `0.7814 -> 1.6943`
+  - the child-dependent mass is strongly suppressed, but that still does not
+    help the shared objective:
+    - under-20 `partnership_s_corp_income`:
+      `74.5k`
+    - under-20 `taxable_pension_income`:
+      `257.4k`
+    - under-20 `taxable_interest_income`:
+      `3.33k`
+- review:
+  - an independent review also found correctness risks in the partition
+    implementation:
+    - null partition keys would fall through to a global donor fallback
+    - projected partition labels were lossy after entity projection
+    - empty donor partitions silently disabled exact-match isolation
+- action:
+  - rejected the experiment and reverted the code
+- interpretation:
+  - the failure point is still donor integration
+  - but role-suppression heuristics, even inside donor fitting/matching, are not
+    the right repair
+  - the next lane should move closer to PE source-impute structure for these AGI
+    leaves rather than adding more support heuristics
+
+## 2026-04-13 reject richer singleton condition surfaces for the PUF child-linked tax leaves
+
+- tested:
+  - expanded the preferred donor-condition surface for
+    `partnership_s_corp_income`, `taxable_interest_income`, and
+    `taxable_pension_income` beyond the PE-style demographic predictors to also
+    use current income state
+  - kept the current donor backend and singleton block structure unchanged
+  - added focused regressions that the richer predictors resolved only for these
+    leaves and that `income` was actually added to the resolved condition set
+    when available
+- verification:
+  - `python -m py_compile src/microplex_us/variables.py tests/test_variables.py tests/pipelines/test_us.py`
+  - `uv run pytest tests/test_variables.py tests/pipelines/test_us.py -q -k 'puf_irs_predictors or pe_style_puf_predictors_for_generic_irs_vars or donor_imputation_block_specs or augment_donor_condition_frame_for_targets_derives_pe_style_puf_predictors'`
+- real decision run:
+  - candidate:
+    `artifacts/live_pe_us_data_rebuild_checkpoint_20260413_income_aware_puf_tax_leaves_donors/broader-donors-income-aware-puf-tax-leaves-v1`
+  - incumbent baseline:
+    `artifacts/live_pe_us_data_rebuild_checkpoint_20260412_broader_ssn_card_type_donors/broader-donors-ssn-card-type-v1`
+- read:
+  - the broader donor frontier metric regresses:
+    - capped full-oracle loss:
+      `0.6955 -> 0.7420`
+    - active-solve capped loss:
+      `0.7814 -> 0.8499`
+    - selected constraints:
+      `1031 -> 1027`
+  - the candidate does improve across deferred stages, but never catches the
+    incumbent:
+    - post-stage-1 capped full-oracle loss:
+      `0.8326`
+    - post-stage-2 capped full-oracle loss:
+      `0.7879`
+    - final capped full-oracle loss:
+      `0.7420`
+- PE code read:
+  - this explains why the shortcut loses: PolicyEngine does not solve these
+    leaves with richer singleton donor surfaces
+  - they live inside one sequential PUF QRF pass, with only
+    `taxable_pension_income` also touching the separate ACS donor path
+- action:
+  - rejected the richer singleton condition-surface patch and reverted the code
+- interpretation:
+  - widening singleton condition surfaces is still the wrong abstraction for
+    this lane
+  - local code read confirms these are PUF-native leaves entering the build
+    through the PUF provider before the donor-survey sources, not current
+    explicit direct-override variables
+  - the next step should move toward the real structure gap in how PUF tax
+    leaves enter the build, not pile more predictors onto the generic donor path
+
+## 2026-04-13 reject standalone PUF-native QRF hook for three child-linked AGI leaves
+
+- tested:
+  - added a temporary PUF-provider QRF hook at tax-unit load time for
+    `partnership_s_corp_income`, `taxable_interest_income`, and
+    `taxable_pension_income`
+  - kept the rest of the donor integration and calibration path unchanged
+- verification:
+  - focused `py_compile` passed
+  - focused `tests/test_puf_source_provider.py` slices passed before the real
+    rerun
+- real decision run:
+  - candidate:
+    `artifacts/live_pe_us_data_rebuild_checkpoint_20260413_puf_tax_leaf_qrf_donors/broader-donors-puf-tax-leaf-qrf-v1`
+  - incumbent baseline:
+    `artifacts/live_pe_us_data_rebuild_checkpoint_20260412_broader_ssn_card_type_donors/broader-donors-ssn-card-type-v1`
+- read:
+  - the broader donor frontier metric regresses hard:
+    - capped full-oracle loss:
+      `0.6955 -> 0.8729`
+    - active-solve capped loss:
+      `0.7814 -> 1.1545`
+    - selected constraints:
+      `1031 -> 1064`
+- action:
+  - rejected the provider-hook experiment and reverted the code
+- interpretation:
+  - the right lesson is not “more QRF earlier”
+  - a standalone PUF-side QRF hook, without the rest of PolicyEngine’s
+    sequential clone/impute structure, is still the wrong runtime shape for
+    this lane

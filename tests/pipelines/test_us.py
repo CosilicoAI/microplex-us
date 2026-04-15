@@ -27,9 +27,16 @@ from microplex_us.pipelines.us import (
     USMicroplexBuildResult,
     USMicroplexPipeline,
     USMicroplexTargets,
+    _policyengine_target_loss_geography_key,
+    _select_policyengine_deferred_stage_constraints,
     _select_feasible_policyengine_calibration_constraints,
+    _summarize_policyengine_target_fit_report,
     _summarize_weight_diagnostics,
     build_us_microplex,
+)
+from microplex_us.policyengine.comparison import (
+    PolicyEngineUSTargetEvaluation,
+    PolicyEngineUSTargetEvaluationReport,
 )
 from microplex_us.policyengine.us import (
     PolicyEngineUSConstraint,
@@ -129,7 +136,6 @@ def _create_policyengine_calibration_db(path) -> None:
 
 
 def _create_policyengine_calibration_db_with_unsupported_target(path) -> None:
-    unsupported_constraints = (PolicyEngineUSConstraint("age", ">=", "18"),)
     conn = sqlite3.connect(path)
     conn.executescript(
         """
@@ -167,19 +173,8 @@ def _create_policyengine_calibration_db_with_unsupported_target(path) -> None:
         """,
         [
             (1, compute_policyengine_us_definition_hash(()), None),
-            (2, compute_policyengine_us_definition_hash(unsupported_constraints), None),
+            (2, compute_policyengine_us_definition_hash(()), None),
         ],
-    )
-    conn.execute(
-        """
-        INSERT INTO stratum_constraints (
-            stratum_id,
-            constraint_variable,
-            operation,
-            value
-        ) VALUES (?, ?, ?, ?)
-        """,
-        (2, "age", ">=", "18"),
     )
     conn.executemany(
         """
@@ -211,15 +206,15 @@ def _create_policyengine_calibration_db_with_unsupported_target(path) -> None:
             ),
             (
                 11,
-                "tax_unit_count",
+                "income_tax",
                 2024,
                 2,
                 0,
-                2.0,
+                0.0,
                 1,
                 0.0,
                 "test",
-                "Adult tax units",
+                "Income tax total",
             ),
         ],
     )
@@ -238,6 +233,30 @@ class TestUSMicroplexBuildConfig:
         assert config.n_synthetic == 100_000
         assert config.random_seed == 42
         assert config.donor_imputer_authoritative_override_variables == ()
+        assert config.policyengine_calibration_deferred_stage_min_active_households == ()
+        assert config.policyengine_calibration_deferred_stage_max_constraints == 24
+        assert (
+            config.policyengine_calibration_deferred_stage_min_full_oracle_capped_mean_abs_relative_error
+            is None
+        )
+        assert config.policyengine_calibration_deferred_stage_top_family_count == 8
+        assert config.policyengine_calibration_deferred_stage_top_geography_count == 8
+        assert config.dependent_tax_leaf_soft_cap_multiplier is None
+        assert config.dependent_tax_leaf_soft_cap_base_variables == (
+            "employment_income",
+            "wage_income",
+            "self_employment_income",
+        )
+        assert config.dependent_tax_leaf_soft_cap_variables == (
+            "taxable_interest_income",
+            "tax_exempt_interest_income",
+            "taxable_pension_income",
+            "dividend_income",
+            "qualified_dividend_income",
+            "non_qualified_dividend_income",
+            "partnership_s_corp_income",
+            "rental_income",
+        )
 
     def test_custom_values(self):
         config = USMicroplexBuildConfig(
@@ -265,6 +284,7 @@ class TestUSMicroplexBuildConfig:
         assert config.policyengine_selection_tol == 1e-7
         assert config.policyengine_selection_l2_penalty == 1e-5
         assert config.policyengine_selection_target_total_weight == 150_000_000.0
+        assert config.policyengine_oracle_relative_error_cap == 10.0
 
     def test_can_opt_into_authoritative_donor_overrides(self):
         config = USMicroplexBuildConfig(
@@ -296,9 +316,243 @@ class TestUSMicroplexBuildConfig:
                 policyengine_calibration_rescale_to_target_total_weight=True
             )
 
+    def test_rejects_nonpositive_oracle_relative_error_cap(self):
+        with pytest.raises(ValueError, match="must be positive"):
+            USMicroplexBuildConfig(policyengine_oracle_relative_error_cap=0.0)
+
+    def test_rejects_nonpositive_deferred_stage_support_floor(self):
+        with pytest.raises(ValueError, match="must contain only positive"):
+            USMicroplexBuildConfig(
+                policyengine_calibration_deferred_stage_min_active_households=(0,)
+            )
+
+    def test_rejects_negative_deferred_stage_family_focus_limit(self):
+        with pytest.raises(ValueError, match="must be nonnegative"):
+            USMicroplexBuildConfig(
+                policyengine_calibration_deferred_stage_top_family_count=-1
+            )
+
+    def test_rejects_negative_deferred_stage_geography_focus_limit(self):
+        with pytest.raises(ValueError, match="must be nonnegative"):
+            USMicroplexBuildConfig(
+                policyengine_calibration_deferred_stage_top_geography_count=-1
+            )
+
+    def test_rejects_nonpositive_deferred_stage_constraint_cap(self):
+        with pytest.raises(ValueError, match="must be positive"):
+            USMicroplexBuildConfig(
+                policyengine_calibration_deferred_stage_max_constraints=0
+            )
+
+    def test_rejects_nonpositive_deferred_stage_trigger_threshold(self):
+        with pytest.raises(ValueError, match="must be positive"):
+            USMicroplexBuildConfig(
+                policyengine_calibration_deferred_stage_min_full_oracle_capped_mean_abs_relative_error=0.0
+            )
+
+    def test_rejects_negative_dependent_tax_leaf_soft_cap_multiplier(self):
+        with pytest.raises(ValueError, match="must be non-negative"):
+            USMicroplexBuildConfig(dependent_tax_leaf_soft_cap_multiplier=-0.01)
+
+
+def test_apply_dependent_tax_leaf_soft_caps_only_for_dependents():
+    config = USMicroplexBuildConfig(dependent_tax_leaf_soft_cap_multiplier=0.5)
+    pipeline = USMicroplexPipeline(config)
+    seed_data = pd.DataFrame(
+        {
+            "is_tax_unit_dependent": [1, 0],
+            "employment_income": [100.0, 100.0],
+            "wage_income": [0.0, 20.0],
+            "self_employment_income": [0.0, 0.0],
+            "taxable_interest_income": [80.0, 80.0],
+            "rental_income": [120.0, 120.0],
+        }
+    )
+
+    updated = pipeline._apply_dependent_tax_leaf_soft_caps(seed_data.copy())
+
+    assert updated.loc[0, "taxable_interest_income"] == pytest.approx(50.0)
+    assert updated.loc[0, "rental_income"] == pytest.approx(50.0)
+    assert updated.loc[1, "taxable_interest_income"] == pytest.approx(80.0)
+    assert updated.loc[1, "rental_income"] == pytest.approx(120.0)
+
+
+def test_summarize_policyengine_target_fit_report_caps_relative_error():
+    target = TargetSpec(
+        name="tiny_target",
+        entity=EntityType.HOUSEHOLD,
+        period=2024,
+        measure="state_income_tax",
+        aggregation=TargetAggregation.SUM,
+        value=0.0,
+        source="test",
+        metadata={},
+    )
+    report = PolicyEngineUSTargetEvaluationReport(
+        label="candidate",
+        period=2024,
+        evaluations=[
+            PolicyEngineUSTargetEvaluation(target=target, actual_value=25.0),
+        ],
+    )
+
+    summary = _summarize_policyengine_target_fit_report(
+        report,
+        target_count=1,
+        relative_error_cap=10.0,
+    )
+
+    assert summary["mean_abs_relative_error"] == pytest.approx(25.0)
+    assert summary["capped_mean_abs_relative_error"] == pytest.approx(10.0)
+    assert summary["relative_error_cap"] == pytest.approx(10.0)
+
+
+def test_summarize_policyengine_target_fit_report_penalizes_unsupported_targets():
+    supported_target = TargetSpec(
+        name="supported_target",
+        entity=EntityType.HOUSEHOLD,
+        period=2024,
+        aggregation=TargetAggregation.COUNT,
+        value=100.0,
+        source="test",
+        metadata={},
+    )
+    unsupported_target = TargetSpec(
+        name="unsupported_target",
+        entity=EntityType.TAX_UNIT,
+        period=2024,
+        aggregation=TargetAggregation.COUNT,
+        value=1.0,
+        source="test",
+        metadata={},
+    )
+    report = PolicyEngineUSTargetEvaluationReport(
+        label="candidate",
+        period=2024,
+        evaluations=[
+            PolicyEngineUSTargetEvaluation(
+                target=supported_target,
+                actual_value=100.0,
+            ),
+        ],
+        unsupported_targets=[unsupported_target],
+    )
+
+    summary = _summarize_policyengine_target_fit_report(
+        report,
+        target_count=2,
+        relative_error_cap=10.0,
+    )
+
+    assert summary["supported_only_mean_abs_relative_error"] == pytest.approx(
+        0.0,
+        abs=1e-12,
+    )
+    assert summary["unsupported_target_error_penalty"] == pytest.approx(10.0)
+    assert summary["mean_abs_relative_error"] == pytest.approx(5.0)
+    assert summary["capped_mean_abs_relative_error"] == pytest.approx(5.0)
+
+
+def test_select_policyengine_deferred_stage_constraints_prioritizes_target_level_loss():
+    def _target(name: str) -> TargetSpec:
+        return TargetSpec(
+            name=name,
+            entity=EntityType.HOUSEHOLD,
+            period=2024,
+            aggregation=TargetAggregation.COUNT,
+            value=100.0,
+            source="test",
+            metadata={
+                "variable": "household_count",
+                "geo_level": "state",
+                "geographic_id": "6",
+            },
+        )
+
+    compiled_targets = [
+        _target("a_low"),
+        _target("m_mid"),
+        _target("z_high"),
+    ]
+    compiled_constraints = (
+        SimpleNamespace(coefficients=np.array([1.0] * 12)),
+        SimpleNamespace(coefficients=np.array([1.0] * 12)),
+        SimpleNamespace(coefficients=np.array([1.0] * 12)),
+    )
+    target_ledger = [
+        {
+            "target_name": target.name,
+            "stage": "solve_later",
+            "variable": "household_count",
+            "domain_variable": "",
+            "geo_level": "state",
+            "geographic_id": "6",
+        }
+        for target in compiled_targets
+    ]
+    deferred_oracle_loss = {
+        "family_ranking": [
+            {
+                "group": "household_count",
+                "capped_loss_share": 1.0,
+                "capped_sum_abs_relative_error": 10.0,
+            }
+        ],
+        "geography_ranking": [
+            {
+                "group": "state:CA",
+                "capped_loss_share": 1.0,
+                "capped_sum_abs_relative_error": 10.0,
+            }
+        ],
+    }
+
+    selected_targets, _, metadata = _select_policyengine_deferred_stage_constraints(
+        compiled_targets=compiled_targets,
+        compiled_constraints=compiled_constraints,
+        target_ledger=target_ledger,
+        deferred_oracle_loss=deferred_oracle_loss,
+        deferred_target_priority_lookup={
+            "a_low": 0.5,
+            "m_mid": 1.0,
+            "z_high": 4.0,
+        },
+        selected_target_names=set(),
+        household_count=100,
+        min_active_households=10,
+        max_constraints=1,
+        max_constraints_per_household=None,
+        top_family_count=1,
+        top_geography_count=1,
+    )
+
+    assert [target.name for target in selected_targets] == ["z_high"]
+    assert metadata["target_error_priority_available"] is True
+    assert metadata["n_focus_eligible_constraints"] == 3
+
 
 class TestUSMicroplexPipeline:
     """Test orchestration for US microplex builds."""
+
+    def test_policyengine_target_loss_geography_key_normalizes_state_fips(self):
+        assert (
+            _policyengine_target_loss_geography_key(
+                {"geo_level": "state", "geographic_id": "1"}
+            )
+            == "state:AL"
+        )
+        assert (
+            _policyengine_target_loss_geography_key(
+                {"geo_level": "state", "geographic_id": "01"}
+            )
+            == "state:AL"
+        )
+        assert (
+            _policyengine_target_loss_geography_key(
+                {"geo_level": "national", "geographic_id": "usa"}
+            )
+            == "national:US"
+        )
 
     @pytest.fixture
     def households(self):
@@ -593,6 +847,30 @@ class TestUSMicroplexPipeline:
         assert person_rows["medicaid"].tolist() == [0.0, 1_250.0]
         assert person_rows["medicaid_enrolled"].tolist() == [False, True]
         assert person_rows["state_income_tax_reported"].tolist() == [400.0, 50.0]
+
+    def test_build_policyengine_entity_tables_adds_deterministic_aca_takeup(self):
+        pipeline = USMicroplexPipeline(
+            USMicroplexBuildConfig(policyengine_dataset_year=2024)
+        )
+        population = pd.DataFrame(
+            {
+                "person_id": [1, 2, 3],
+                "household_id": [10, 20, 30],
+                "weight": [1.0, 1.0, 1.0],
+                "age": [34, 42, 29],
+                "sex": [2, 1, 2],
+                "income": [40_000.0, 65_000.0, 32_000.0],
+                "filing_status": ["SINGLE", "SINGLE", "SINGLE"],
+                "relationship_to_head": [0, 0, 0],
+                "state_fips": [6, 12, 48],
+                "tenure": [1, 1, 1],
+            }
+        )
+
+        tables = pipeline.build_policyengine_entity_tables(population)
+        tax_units = tables.tax_units.sort_values(["household_id", "tax_unit_id"]).reset_index(
+            drop=True
+        )
 
     def test_build_policyengine_entity_tables_fallback_employment_excludes_transfer_income(
         self,
@@ -1165,6 +1443,48 @@ class TestUSMicroplexPipeline:
 
         assert person_rows["tax_unit_id"].nunique() == 2
         assert tax_units["household_id"].tolist() == [10, 20]
+
+    def test_build_policyengine_entity_tables_partially_preserves_existing_tax_unit_ids(
+        self,
+    ):
+        pipeline = USMicroplexPipeline(
+            USMicroplexBuildConfig(policyengine_prefer_existing_tax_unit_ids=True)
+        )
+        population = pd.DataFrame(
+            {
+                "person_id": [1, 2, 3, 4, 5],
+                "household_id": [10, 10, 10, 20, 20],
+                "tax_unit_id": [100, 100, 200, np.nan, np.nan],
+                "weight": [1.0, 1.0, 1.0, 1.0, 1.0],
+                "age": [45, 43, 12, 38, 8],
+                "income": [60_000.0, 15_000.0, 0.0, 42_000.0, 0.0],
+                "relationship_to_head": [0, 1, 2, 0, 2],
+                "marital_status": [1, 1, 7, 7, 7],
+                "state_fips": [6, 6, 6, 36, 36],
+                "tenure": [1, 1, 1, 1, 1],
+            }
+        )
+
+        tables = pipeline.build_policyengine_entity_tables(population)
+        person_rows = tables.persons.sort_values("person_id").reset_index(drop=True)
+        tax_units = tables.tax_units.sort_values(
+            ["household_id", "tax_unit_id"]
+        ).reset_index(drop=True)
+
+        assert person_rows.loc[:2, "tax_unit_id"].tolist() == [100, 100, 200]
+        hh20_person_tax_units = person_rows.loc[
+            person_rows["household_id"] == 20, "tax_unit_id"
+        ]
+        assert hh20_person_tax_units.notna().all()
+        assert hh20_person_tax_units.nunique() == 1
+        assert int(hh20_person_tax_units.iloc[0]) > 200
+        assert tax_units.loc[
+            tax_units["household_id"] == 10, "tax_unit_id"
+        ].tolist() == [100, 200]
+        assert tax_units.loc[
+            tax_units["household_id"] == 20, "tax_unit_id"
+        ].tolist() == [201]
+
 
     def test_build_from_source_providers_accepts_year_specific_query_keys(self):
         households = pd.DataFrame(
@@ -3765,6 +4085,73 @@ class TestUSMicroplexPipeline:
         assert (
             summary["feasibility_filter"]["n_constraints_after_feasibility_filter"] == 1
         )
+        assert summary["target_plan"]["stage_counts"] == {
+            "solve_now": 1,
+            "solve_later": 1,
+            "audit_only": 0,
+        }
+        assert summary["target_plan"]["reason_counts"]["constraint_capacity"] == 1
+        assert summary["oracle_loss"]["full_oracle"]["target_count"] == 2
+        assert summary["oracle_loss"]["full_oracle"]["supported_target_count"] == 2
+        assert summary["oracle_loss"]["active_solve"]["target_count"] == 1
+        assert summary["oracle_loss"]["active_solve"]["mean_abs_relative_error"] == pytest.approx(
+            0.0,
+            abs=1e-12,
+        )
+        assert summary["oracle_loss"]["active_solve"][
+            "capped_mean_abs_relative_error"
+        ] == pytest.approx(0.0, abs=1e-12)
+        assert summary["oracle_loss"]["deferred"]["target_count"] == 1
+        assert summary["oracle_loss"]["deferred"]["family_summaries"][
+            "household_count"
+        ]["target_count"] == 1
+        assert summary["oracle_loss"]["deferred"]["family_summaries"][
+            "household_count"
+        ]["loss_share"] == pytest.approx(1.0, rel=1e-9)
+        assert summary["oracle_loss"]["deferred"]["family_summaries"][
+            "household_count"
+        ]["sum_abs_relative_error"] == pytest.approx(
+            summary["oracle_loss"]["deferred"]["mean_abs_relative_error"],
+            rel=1e-9,
+        )
+        assert summary["oracle_loss"]["deferred"]["family_ranking"][0]["group"] == (
+            "household_count"
+        )
+        assert summary["oracle_loss"]["deferred"]["family_ranking"][0][
+            "capped_sum_abs_relative_error"
+        ] == pytest.approx(
+            summary["oracle_loss"]["deferred"]["family_ranking"][0][
+                "sum_abs_relative_error"
+            ],
+            rel=1e-9,
+        )
+        assert summary["oracle_loss"]["full_oracle"]["geography_summaries"][
+            "unspecified"
+        ]["target_count"] == 2
+        assert summary["oracle_loss"]["full_oracle"]["geography_ranking"][0]["group"] == (
+            "unspecified"
+        )
+        assert (
+            summary["oracle_loss"]["full_oracle"]["mean_abs_relative_error"]
+            > summary["oracle_loss"]["active_solve"]["mean_abs_relative_error"]
+        )
+        assert summary["full_oracle_mean_abs_relative_error"] == pytest.approx(
+            summary["oracle_loss"]["full_oracle"]["mean_abs_relative_error"],
+            rel=1e-9,
+        )
+        assert summary["full_oracle_capped_mean_abs_relative_error"] == pytest.approx(
+            summary["oracle_loss"]["full_oracle"]["capped_mean_abs_relative_error"],
+            rel=1e-9,
+        )
+        assert summary["active_solve_mean_abs_relative_error"] == pytest.approx(
+            summary["oracle_loss"]["active_solve"]["mean_abs_relative_error"],
+            rel=1e-9,
+        )
+        assert summary["active_solve_capped_mean_abs_relative_error"] == pytest.approx(
+            summary["oracle_loss"]["active_solve"]["capped_mean_abs_relative_error"],
+            rel=1e-9,
+        )
+        assert summary["oracle_relative_error_cap"] == pytest.approx(10.0)
         assert calibrated_tables.households["household_weight"].sum() == pytest.approx(
             450.0,
             rel=1e-6,
@@ -3800,12 +4187,152 @@ class TestUSMicroplexPipeline:
 
         assert summary["warnings"]
 
-    def test_calibrate_policyengine_tables_skips_structurally_unsupported_targets(
+    def test_calibrate_policyengine_tables_runs_deferred_low_support_stage(
         self,
         persons,
         households,
         tmp_path,
     ):
+        db_path = tmp_path / "policyengine_targets.db"
+        _create_policyengine_calibration_db(db_path)
+        config = USMicroplexBuildConfig(
+            calibration_backend="entropy",
+            policyengine_targets_db=str(db_path),
+            policyengine_target_variables=("household_count",),
+            policyengine_target_period=2024,
+            policyengine_calibration_min_active_households=2,
+            policyengine_calibration_deferred_stage_min_active_households=(1,),
+            policyengine_calibration_deferred_stage_top_family_count=None,
+            policyengine_calibration_deferred_stage_top_geography_count=None,
+        )
+        pipeline = USMicroplexPipeline(config)
+        seed = pipeline.prepare_seed_data(persons, households).rename(
+            columns={"hh_weight": "weight"}
+        )
+        tables = pipeline.build_policyengine_entity_tables(seed)
+
+        _, _, summary = pipeline.calibrate_policyengine_tables(tables)
+
+        assert summary["n_constraints"] == 2
+        assert summary["n_supported_targets"] == 2
+        assert summary["n_calibration_stages_applied"] == 2
+        assert summary["final_calibration_stage_index"] == 2
+        assert summary["deferred_stage_support_schedule"] == [1]
+        assert summary["target_plan"]["stage_counts"] == {
+            "solve_now": 2,
+            "solve_later": 0,
+            "audit_only": 0,
+        }
+        assert summary["target_plan"]["reason_counts"]["selected_stage_1"] == 1
+        assert summary["target_plan"]["reason_counts"]["selected_stage_2"] == 1
+        assert summary["oracle_loss"]["deferred"]["target_count"] == 0
+        assert summary["oracle_loss"]["active_solve"]["target_count"] == 2
+        assert len(summary["calibration_stages"]) == 2
+        assert summary["calibration_stages"][1]["kind"] == "deferred"
+        assert summary["calibration_stages"][1]["status"] == "applied"
+        assert summary["calibration_stages"][1]["min_active_households"] == 1
+        assert summary["calibration_stages"][1]["selected_target_count"] == 1
+        assert any(
+            entry["stage"] == "solve_now" and entry["reason"] == "selected_stage_2"
+            for entry in summary["target_ledger"]
+        )
+
+    def test_calibrate_policyengine_tables_skips_deferred_stage_below_trigger_threshold(
+        self,
+        persons,
+        households,
+        tmp_path,
+    ):
+        db_path = tmp_path / "policyengine_targets.db"
+        _create_policyengine_calibration_db(db_path)
+        config = USMicroplexBuildConfig(
+            calibration_backend="entropy",
+            policyengine_targets_db=str(db_path),
+            policyengine_target_variables=("household_count",),
+            policyengine_target_period=2024,
+            policyengine_calibration_min_active_households=3,
+            policyengine_calibration_deferred_stage_min_active_households=(2, 1),
+            policyengine_calibration_deferred_stage_top_family_count=None,
+            policyengine_calibration_deferred_stage_top_geography_count=None,
+            policyengine_calibration_deferred_stage_min_full_oracle_capped_mean_abs_relative_error=100.0,
+        )
+        pipeline = USMicroplexPipeline(config)
+        seed = pipeline.prepare_seed_data(persons, households).rename(
+            columns={"hh_weight": "weight"}
+        )
+        tables = pipeline.build_policyengine_entity_tables(seed)
+
+        _, _, summary = pipeline.calibrate_policyengine_tables(tables)
+
+        assert summary["n_constraints"] == 1
+        assert summary["n_calibration_stages_applied"] == 1
+        assert summary["final_calibration_stage_index"] == 1
+        assert summary["deferred_stage_support_schedule"] == [2, 1]
+        assert summary["target_plan"]["stage_counts"] == {
+            "solve_now": 1,
+            "solve_later": 1,
+            "audit_only": 0,
+        }
+        assert len(summary["calibration_stages"]) == 3
+        assert summary["calibration_stages"][1]["status"] == "skipped"
+        assert summary["calibration_stages"][1]["skip_reason"] == (
+            "trigger_metric_below_threshold"
+        )
+        assert summary["calibration_stages"][1]["trigger_threshold"] == pytest.approx(
+            100.0
+        )
+        assert summary["calibration_stages"][2]["status"] == "skipped"
+        assert summary["calibration_stages"][2]["skip_reason"] == (
+            "trigger_metric_below_threshold"
+        )
+        assert summary["calibration_stages"][2]["trigger_threshold"] == pytest.approx(
+            100.0
+        )
+
+    def test_calibrate_policyengine_tables_marks_materialization_failures_audit_only(
+        self,
+        persons,
+        households,
+        tmp_path,
+    ):
+        class FakeEntity:
+            def __init__(self, key: str):
+                self.key = key
+
+        class FakeVariable:
+            def __init__(
+                self,
+                entity: FakeEntity,
+                formulas: dict[str, object] | None = None,
+            ):
+                self.entity = entity
+                self.formulas = formulas or {}
+
+            def is_input_variable(self) -> bool:
+                return not self.formulas
+
+        class FakeTaxBenefitSystem:
+            variables = {
+                "state_fips": FakeVariable(FakeEntity("household")),
+                "income_tax": FakeVariable(
+                    FakeEntity("person"),
+                    formulas={"2024": object()},
+                ),
+            }
+
+        class FakeSimulation:
+            tax_benefit_system = FakeTaxBenefitSystem()
+
+            def __init__(self, dataset, dataset_year=None, **kwargs):
+                _ = dataset, dataset_year, kwargs
+
+            def calculate(self, variable, period=None, map_to=None):
+                assert period == 2024
+                assert map_to is None
+                if variable == "income_tax":
+                    raise RuntimeError("missing test parameter")
+                raise KeyError(variable)
+
         db_path = tmp_path / "policyengine_targets.db"
         _create_policyengine_calibration_db_with_unsupported_target(db_path)
         config = USMicroplexBuildConfig(
@@ -3813,6 +4340,7 @@ class TestUSMicroplexPipeline:
             policyengine_targets_db=str(db_path),
             policyengine_target_period=2024,
             policyengine_calibration_min_active_households=1,
+            policyengine_simulation_cls=FakeSimulation,
         )
         pipeline = USMicroplexPipeline(config)
         seed = pipeline.prepare_seed_data(persons, households).rename(
@@ -3824,8 +4352,61 @@ class TestUSMicroplexPipeline:
 
         assert summary["n_loaded_targets"] == 2
         assert summary["n_supported_targets"] == 1
-        assert summary["n_unsupported_targets"] == 1
+        assert summary["n_unsupported_targets"] == 0
         assert summary["n_constraints"] == 1
+        assert summary["target_plan"]["stage_counts"] == {
+            "solve_now": 1,
+            "solve_later": 0,
+            "audit_only": 1,
+        }
+        assert summary["target_plan"]["reason_counts"]["materialization_failure"] == 1
+        assert summary["oracle_loss"]["full_oracle"]["target_count"] == 2
+        assert summary["oracle_loss"]["full_oracle"]["supported_target_count"] == 1
+        assert summary["oracle_loss"]["full_oracle"]["unsupported_target_count"] == 1
+        assert summary["oracle_loss"]["audit_only"]["target_count"] == 1
+        assert summary["oracle_loss"]["audit_only"]["supported_target_count"] == 0
+        assert summary["oracle_loss"]["audit_only"]["unsupported_target_count"] == 1
+        assert summary["oracle_loss"]["full_oracle"][
+            "unsupported_target_error_penalty"
+        ] == pytest.approx(10.0)
+        assert summary["oracle_loss"]["full_oracle"]["mean_abs_relative_error"] == (
+            pytest.approx(5.0)
+        )
+        assert summary["oracle_loss"]["full_oracle"][
+            "capped_mean_abs_relative_error"
+        ] == pytest.approx(5.0)
+        assert summary["oracle_loss"]["audit_only"]["mean_abs_relative_error"] == (
+            pytest.approx(10.0)
+        )
+        assert summary["oracle_loss"]["audit_only"][
+            "capped_mean_abs_relative_error"
+        ] == pytest.approx(10.0)
+        assert summary["oracle_loss"]["audit_only"]["family_summaries"][
+            "income_tax"
+        ]["unsupported_target_count"] == 1
+        assert summary["oracle_loss"]["audit_only"]["family_summaries"][
+            "income_tax"
+        ]["sum_abs_relative_error"] == pytest.approx(10.0)
+        assert summary["oracle_loss"]["audit_only"]["family_summaries"][
+            "income_tax"
+        ]["capped_sum_abs_relative_error"] == pytest.approx(10.0)
+        assert summary["oracle_loss"]["audit_only"]["family_ranking"][0]["group"] == (
+            "income_tax"
+        )
+        assert summary["oracle_loss"]["full_oracle"]["family_summaries"][
+            "income_tax"
+        ]["supported_target_rate"] == pytest.approx(0.0, abs=1e-12)
+        assert summary["oracle_loss"]["full_oracle"]["geography_summaries"][
+            "unspecified"
+        ]["unsupported_target_count"] == 1
+        assert summary["oracle_loss"]["full_oracle"]["geography_ranking"][0]["group"] == (
+            "unspecified"
+        )
+        assert any(
+            entry["stage"] == "audit_only"
+            and entry["reason"] == "materialization_failure"
+            for entry in summary["target_ledger"]
+        )
         assert calibrated_tables.households["household_weight"].sum() == pytest.approx(
             450.0,
             rel=1e-6,
@@ -5690,7 +6271,7 @@ class TestUSMicroplexPipeline:
         donor_input = pipeline.prepare_source_input(donor_frame)
         seed_data = pipeline.prepare_seed_data_from_source(cps_input)
 
-        pipeline._integrate_donor_sources(
+        integration = pipeline._integrate_donor_sources(
             seed_data,
             scaffold_input=cps_input,
             donor_inputs=[donor_input],
@@ -5868,7 +6449,7 @@ class TestUSMicroplexPipeline:
         donor_input = pipeline.prepare_source_input(donor_frame)
         seed_data = pipeline.prepare_seed_data_from_source(cps_input)
 
-        pipeline._integrate_donor_sources(
+        integration = pipeline._integrate_donor_sources(
             seed_data,
             scaffold_input=cps_input,
             donor_inputs=[donor_input],
@@ -6147,7 +6728,7 @@ class TestUSMicroplexPipeline:
         donor_input = pipeline.prepare_source_input(donor_frame)
         seed_data = pipeline.prepare_seed_data_from_source(cps_input)
 
-        pipeline._integrate_donor_sources(
+        integration = pipeline._integrate_donor_sources(
             seed_data,
             scaffold_input=cps_input,
             donor_inputs=[donor_input],
@@ -6163,6 +6744,72 @@ class TestUSMicroplexPipeline:
                 "is_tax_unit_spouse",
                 "is_tax_unit_dependent",
             )
+        ]
+        assert integration["conditioning_diagnostics"] == [
+            {
+                "donor_source": "irs_soi_puf_2024",
+                "model_variables": ["taxable_interest_income"],
+                "restored_variables": ["taxable_interest_income"],
+                "condition_selection": "pe_prespecified",
+                "used_condition_surface": False,
+                "raw_shared_vars": [
+                    "age",
+                    "education",
+                    "employment_status",
+                    "income",
+                    "person_number",
+                    "sex",
+                    "spouse_person_number",
+                    "state_fips",
+                    "tenure",
+                ],
+                "shared_vars_after_model_exclusion": [
+                    "age",
+                    "education",
+                    "employment_status",
+                    "income",
+                    "person_number",
+                    "sex",
+                    "spouse_person_number",
+                    "state_fips",
+                    "tenure",
+                ],
+                "projection_applied": False,
+                "entity_compatible_shared_vars": [],
+                "shared_vars_for_block": [
+                    "age",
+                    "education",
+                    "employment_status",
+                    "income",
+                    "person_number",
+                    "sex",
+                    "spouse_person_number",
+                    "state_fips",
+                    "tenure",
+                ],
+                "selected_condition_vars": [
+                    "age",
+                    "is_male",
+                    "tax_unit_is_joint",
+                    "tax_unit_count_dependents",
+                    "is_tax_unit_head",
+                    "is_tax_unit_spouse",
+                    "is_tax_unit_dependent",
+                ],
+                "requested_supplemental_shared_condition_vars": [],
+                "raw_supplemental_shared_condition_var_status": [],
+                "supplemental_shared_condition_var_status": [],
+                "dropped_shared_vars": [
+                    "education",
+                    "employment_status",
+                    "income",
+                    "person_number",
+                    "sex",
+                    "spouse_person_number",
+                    "state_fips",
+                    "tenure",
+                ],
+            }
         ]
 
     def test_integrate_donor_sources_uses_pe_prespecified_acs_predictors(
@@ -7357,6 +8004,13 @@ class TestUSMicroplexPipeline:
                     marital_unit_id=[300, 301],
                 ),
                 "integrated_variables": [],
+                "conditioning_diagnostics": [
+                    {
+                        "donor_source": "test_donor",
+                        "model_variables": ["income"],
+                        "selected_condition_vars": ["age"],
+                    }
+                ],
             }
 
         def fake_synthesize(seed_data, synthesis_variables=None):
@@ -7381,6 +8035,13 @@ class TestUSMicroplexPipeline:
         assert "marital_unit_id" not in captured_seed_columns
         assert "tax_unit_id" not in result.seed_data.columns
         assert "spm_unit_id" not in result.seed_data.columns
+        assert result.synthesis_metadata["donor_conditioning_diagnostics"] == [
+            {
+                "donor_source": "test_donor",
+                "model_variables": ["income"],
+                "selected_condition_vars": ["age"],
+            }
+        ]
 
     def test_build_from_frames_rank_matches_generated_donor_values(
         self,

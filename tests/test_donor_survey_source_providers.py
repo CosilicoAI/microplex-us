@@ -106,6 +106,134 @@ def _sipp_assets_tables(**_kwargs) -> DonorSurveyTables:
     return DonorSurveyTables(households=households, persons=persons)
 
 
+def test_sample_households_and_persons_prefers_positive_weight_households() -> None:
+    households = pd.DataFrame(
+        {
+            "household_id": ["h1", "h2", "h3"],
+            "household_weight": [10.0, 0.0, 20.0],
+        }
+    )
+    persons = pd.DataFrame(
+        {
+            "person_id": ["p1", "p2", "p3"],
+            "household_id": ["h1", "h2", "h3"],
+        }
+    )
+
+    sampled_households, sampled_persons = donor_surveys._sample_households_and_persons(
+        households=households,
+        persons=persons,
+        sample_n=2,
+        random_seed=0,
+    )
+
+    assert sampled_households["household_id"].tolist() == ["h1", "h3"]
+    assert sampled_persons["household_id"].tolist() == ["h1", "h3"]
+
+
+def test_sample_households_and_persons_falls_back_when_weighted_sampling_errors(
+    monkeypatch,
+) -> None:
+    households = pd.DataFrame(
+        {
+            "household_id": ["h1", "h2", "h3"],
+            "household_weight": [10.0, 5.0, 20.0],
+        }
+    )
+    persons = pd.DataFrame(
+        {
+            "person_id": ["p1", "p2", "p3"],
+            "household_id": ["h1", "h2", "h3"],
+        }
+    )
+    original_sample = pd.DataFrame.sample
+
+    def _flaky_sample(self, *args, **kwargs):
+        if kwargs.get("weights") is not None:
+            raise ValueError("weighted sampling failed")
+        return original_sample(self, *args, **kwargs)
+
+    monkeypatch.setattr(pd.DataFrame, "sample", _flaky_sample)
+
+    sampled_households, sampled_persons = donor_surveys._sample_households_and_persons(
+        households=households,
+        persons=persons,
+        sample_n=2,
+        random_seed=0,
+    )
+
+    assert len(sampled_households) == 2
+    assert set(sampled_persons["household_id"]) == set(sampled_households["household_id"])
+
+
+def test_sample_households_and_persons_state_floor_preserves_states() -> None:
+    households = pd.DataFrame(
+        {
+            "household_id": ["h1", "h2", "h3", "h4"],
+            "household_weight": [10.0, 9.0, 8.0, 7.0],
+            "state_fips": [6, 6, 36, 48],
+        }
+    )
+    persons = pd.DataFrame(
+        {
+            "person_id": ["p1", "p2", "p3", "p4"],
+            "household_id": ["h1", "h2", "h3", "h4"],
+        }
+    )
+
+    sampled_households, sampled_persons = donor_surveys._sample_households_and_persons(
+        households=households,
+        persons=persons,
+        sample_n=3,
+        random_seed=0,
+        state_floor=1,
+    )
+
+    assert len(sampled_households) == 3
+    assert sampled_households["state_fips"].nunique() == 3
+    assert set(sampled_persons["household_id"]) == set(sampled_households["household_id"])
+
+
+def test_sample_households_and_persons_state_age_floor_preserves_age_band_coverage() -> None:
+    households = pd.DataFrame(
+        {
+            "household_id": ["h1", "h2", "h3", "h4"],
+            "household_weight": [10.0, 9.0, 8.0, 7.0],
+            "state_fips": [6, 6, 36, 36],
+        }
+    )
+    persons = pd.DataFrame(
+        {
+            "person_id": ["p1", "p2", "p3", "p4"],
+            "household_id": ["h1", "h2", "h3", "h4"],
+            "age": [7, 42, 10, 67],
+        }
+    )
+
+    sampled_households, sampled_persons = donor_surveys._sample_households_and_persons(
+        households=households,
+        persons=persons,
+        sample_n=4,
+        random_seed=0,
+        state_age_floor=1,
+    )
+
+    sampled = sampled_persons.merge(
+        sampled_households[["household_id", "state_fips"]],
+        on="household_id",
+        how="left",
+    )
+    sampled["age_band"] = sampled["age"].map(donor_surveys._donor_age_band_key)
+
+    assert len(sampled_households) == 4
+    assert {
+        (6, "5_10"),
+        (6, "40_45"),
+        (36, "10_15"),
+        (36, "65_70"),
+    }.issubset(set(zip(sampled["state_fips"], sampled["age_band"], strict=False)))
+
+
 def _scf_tables(**_kwargs) -> DonorSurveyTables:
     households = pd.DataFrame(
         {
@@ -179,6 +307,29 @@ def test_acs_source_provider_uses_manifest_backed_dataset_loader(
     assert captured["random_seed"] == 0
 
 
+def test_acs_source_provider_forwards_state_age_floor_query_filter() -> None:
+    captured: dict[str, object] = {}
+
+    def _loader(**kwargs) -> DonorSurveyTables:
+        captured.update(kwargs)
+        return _acs_tables()
+
+    provider = ACSSourceProvider(loader=_loader)
+    provider.load_frame(
+        query=donor_surveys.SourceQuery(
+            provider_filters={
+                "sample_n": 2,
+                "random_seed": 3,
+                "state_age_floor": 1,
+            }
+        )
+    )
+
+    assert captured["sample_n"] == 2
+    assert captured["random_seed"] == 3
+    assert captured["state_age_floor"] == 1
+
+
 def test_acs_source_provider_deduplicates_households_from_dataset_loader(
     monkeypatch,
 ) -> None:
@@ -224,6 +375,54 @@ def test_acs_source_provider_deduplicates_households_from_dataset_loader(
 
     assert frame.tables[EntityType.HOUSEHOLD]["household_id"].tolist() == [1, 2]
     assert frame.tables[EntityType.PERSON]["household_id"].tolist() == [1, 1, 2]
+
+
+def test_acs_source_provider_makes_duplicate_person_ids_household_scoped(
+    monkeypatch,
+) -> None:
+    def _fake_loader(*, spec, year, sample_n, random_seed, **_kwargs) -> DonorSurveyTables:
+        households = pd.DataFrame(
+            {
+                "household_id": [1, 2],
+                "household_weight": [100.0, 120.0],
+                "state_fips": [6, 36],
+                "tenure": [1, 2],
+                "year": [2022, 2022],
+            }
+        )
+        persons = pd.DataFrame(
+            {
+                "person_id": [1, 2, 1],
+                "household_id": [1, 1, 2],
+                "age": [45, 12, 68],
+                "sex": [1, 2, 2],
+                "is_male": [1.0, 0.0, 0.0],
+                "is_household_head": [1.0, 0.0, 1.0],
+                "tenure_type": [1, 1, 2],
+                "employment_income": [50_000.0, 0.0, 12_000.0],
+                "self_employment_income": [5_000.0, 0.0, 0.0],
+                "social_security": [0.0, 0.0, 20_000.0],
+                "taxable_pension_income": [0.0, 0.0, 15_000.0],
+                "rent": [1_200.0, 0.0, 950.0],
+                "real_estate_taxes": [3_000.0, 0.0, 0.0],
+                "income": [55_000.0, 0.0, 47_000.0],
+                "weight": [100.0, 100.0, 120.0],
+                "year": [2022, 2022, 2022],
+            }
+        )
+        return DonorSurveyTables(households=households, persons=persons)
+
+    monkeypatch.setattr(
+        donor_surveys,
+        "_run_policyengine_dataset_loader_from_spec",
+        _fake_loader,
+    )
+
+    frame = ACSSourceProvider().load_frame()
+    person_ids = frame.tables[EntityType.PERSON]["person_id"].tolist()
+
+    assert person_ids == ["1:1", "1:2", "2:1"]
+    assert len(person_ids) == len(set(person_ids))
 
 
 def test_sipp_and_scf_provider_fillers_are_not_usable_as_conditions() -> None:

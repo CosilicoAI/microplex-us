@@ -1547,6 +1547,13 @@ def _benchmark_decomposable_family_imputers_once(
         random_seed=random_seed,
         qrf_factory=qrf_factory,
     )
+    qrf_support_masked_predictions = _qrf_support_masked_forest_share_predict(
+        train_frame,
+        eval_frame,
+        spec=spec,
+        random_seed=random_seed,
+        qrf_predictions=qrf_predictions,
+    )
 
     methods = {
         "grouped_share": _summarize_method(
@@ -1591,13 +1598,7 @@ def _benchmark_decomposable_family_imputers_once(
         "qrf_support_masked_forest_share": _summarize_method(
             eval_frame,
             target_frame,
-            _qrf_support_masked_forest_share_predict(
-                train_frame,
-                eval_frame,
-                spec=spec,
-                random_seed=random_seed,
-                qrf_predictions=qrf_predictions,
-            ),
+            qrf_support_masked_predictions,
             spec=spec,
         ),
         "qrf_augmented_sparse_forest_share": _summarize_method(

@@ -69,18 +69,34 @@ Main types and helpers:
 - `donor_imputation_block_specs(...)`
 
 The donor path also now selects conditioning features per donor block rather
-than using the same shared-variable set for every imputation target. The
-selection is data-driven:
+than using the same shared-variable set for every imputation target. There are
+two distinct selection modes:
 
-- start from variables allowed by source and variable capability metadata
-- score shared variables against the donor block
-- keep the strongest conditioning features instead of every available overlap
+- generic selection:
+  - start from variables allowed by source and variable capability metadata
+  - score shared variables against the donor block
+  - keep the strongest conditioning features instead of every available overlap
+- `pe_prespecified` selection:
+  - build a PE-style structural predictor surface when the variable semantics
+    ask for it
+  - use the variable's declared `preferred_condition_vars` as the structural
+    backbone
+  - optionally admit a narrow `supplemental_shared_condition_vars` set from the
+    actual shared overlap, instead of reopening the full common-predictor pool
+
+For the problematic PUF tax-leaf family, the PE-aligned default is still the
+structural backbone only. The local `policyengine-us-data`
+`calibration/puf_impute.py` path trains the PUF clone QRF on demographic /
+tax-unit-role predictors only, and the PUF source policy intentionally marks
+derived convenience columns like `income`, `employment_status`, and synthetic
+`state_fips` as not usable for donor conditioning.
 
 That keeps the donor path closer to the intended Microplex shape:
 
 - declarative semantics define what is valid
 - the pipeline chooses what is useful from the data
-- we do not keep expanding source-specific hand lists in pipeline code
+- source-specific predictor policy lives in semantics metadata rather than
+  expanding ad hoc pipeline branches
 
 The donor blocks themselves are also now declarative:
 
@@ -90,10 +106,30 @@ The donor blocks themselves are also now declarative:
 - block model variables
 - restored output variables
 - match strategy per modeled variable
+- preferred conditioning variables
+- supplemental shared conditioning variables
 - optional frame preparation / restoration hooks
 
 That means `us.py` now executes donor block specs rather than deciding inline
 which blocks need special handling.
+
+Artifacts now also record `synthesis.donor_conditioning_diagnostics` for each
+executed donor block, including:
+
+- donor source
+- modeled/restored variables
+- raw shared overlap before block preparation
+- block-level shared overlap after model-variable exclusion
+- whether entity projection ran, and which shared vars survived projection
+- selected condition vars
+- shared vars that were available but dropped
+- requested supplemental shared vars
+- raw-stage supplemental rejection reasons
+- prepared-stage supplemental rejection reasons
+- whether the block used a prepared condition surface
+
+Use `python -m microplex_us.pipelines.summarize_donor_conditioning <artifact>`
+to inspect those diagnostics from a finished artifact.
 
 When a donor block declares a non-person native entity and those IDs are
 available in the working frame, the pipeline now:

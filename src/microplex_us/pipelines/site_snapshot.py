@@ -3,10 +3,16 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from typing import Any
 
 from microplex.targets import assert_valid_benchmark_artifact_manifest
+
+from microplex_us.pipelines.data_flow_snapshot import (
+    require_saved_us_microplex_data_flow_snapshot,
+    write_us_microplex_data_flow_snapshot,
+)
 
 FOCUS_TAG_PRIORITY: tuple[str, ...] = (
     "state",
@@ -21,6 +27,8 @@ FOCUS_TAG_PRIORITY: tuple[str, ...] = (
 
 def build_us_microplex_site_snapshot(
     artifact_dir: str | Path,
+    *,
+    snapshot_path: str | Path | None = None,
 ) -> dict[str, Any]:
     """Build one site-facing snapshot from a versioned US artifact bundle."""
     artifact_root = Path(artifact_dir)
@@ -54,15 +62,25 @@ def build_us_microplex_site_snapshot(
     synthesis = dict(manifest.get("synthesis", {}))
     calibration = dict(manifest.get("calibration", {}))
     config = dict(manifest.get("config", {}))
+    data_flow_path = artifact_root / "data_flow_snapshot.json"
+    data_flow_snapshot = require_saved_us_microplex_data_flow_snapshot(artifact_root)
+
+    source_artifact = {
+        "artifactRef": _artifact_ref(artifact_root),
+        "manifestFile": "manifest.json",
+        "harnessFile": "policyengine_harness.json",
+        "dataFlowFile": data_flow_path.name,
+        "versionId": artifact_root.name,
+    }
+    if snapshot_path is not None:
+        source_artifact["artifactPath"] = _artifact_path_from_snapshot(
+            artifact_root,
+            Path(snapshot_path),
+        )
 
     return {
         "generatedAt": manifest.get("created_at"),
-        "sourceArtifact": {
-            "artifactDir": str(artifact_root.resolve()),
-            "manifestPath": str((artifact_root / "manifest.json").resolve()),
-            "harnessPath": str((artifact_root / "policyengine_harness.json").resolve()),
-            "versionId": artifact_root.name,
-        },
+        "sourceArtifact": source_artifact,
         "currentRun": {
             "id": artifact_root.name,
             "benchmarkTag": focus_tag,
@@ -132,6 +150,7 @@ def build_us_microplex_site_snapshot(
             key: dict(value)
             for key, value in dict(summary.get("attribute_cell_summaries", {})).items()
         },
+        "dataFlow": data_flow_snapshot,
     }
 
 
@@ -140,11 +159,30 @@ def write_us_microplex_site_snapshot(
     output_path: str | Path,
 ) -> Path:
     """Write the canonical US site snapshot JSON for one saved artifact bundle."""
-    snapshot = build_us_microplex_site_snapshot(artifact_dir)
+    artifact_root = Path(artifact_dir)
+    write_us_microplex_data_flow_snapshot(
+        artifact_root,
+        artifact_root / "data_flow_snapshot.json",
+    )
+    snapshot = build_us_microplex_site_snapshot(
+        artifact_root,
+        snapshot_path=output_path,
+    )
     destination = Path(output_path)
     destination.parent.mkdir(parents=True, exist_ok=True)
     destination.write_text(json.dumps(snapshot, indent=2, sort_keys=True))
     return destination
+
+
+def _artifact_ref(artifact_root: Path) -> str:
+    for parent in artifact_root.parents:
+        if parent.name == "artifacts":
+            return str(artifact_root.relative_to(parent))
+    return artifact_root.name
+
+
+def _artifact_path_from_snapshot(artifact_root: Path, snapshot_path: Path) -> str:
+    return os.path.relpath(artifact_root, snapshot_path.parent)
 
 
 def _nested_metric(

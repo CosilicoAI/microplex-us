@@ -10,6 +10,8 @@ from microplex_us.data_sources import CPSASECParquetSourceProvider
 from microplex_us.data_sources.cps import (
     CPS_ASEC_PROCESSED_CACHE_VERSION,
     CPSASECSourceProvider,
+    _attach_cps_ssn_card_type,
+    _cps_age_band_key,
     _sample_households_and_persons,
     load_cps_asec,
     processed_cps_asec_cache_path,
@@ -77,6 +79,129 @@ def test_cps_parquet_source_provider_derives_canonical_income_alias(tmp_path):
 
     assert "income" in frame.source.observations[1].variable_names
     assert frame.tables[EntityType.PERSON]["income"].tolist() == [56_150.0, 17_030.0]
+
+
+def test_cps_parquet_source_provider_derives_tax_unit_roles_from_tax_id(tmp_path):
+    households = pd.DataFrame(
+        {
+            "household_id": [1],
+            "state_fips": [6],
+            "household_weight": [1.0],
+        }
+    )
+    persons = pd.DataFrame(
+        {
+            "household_id": [1, 1, 1, 1],
+            "person_number": [1, 2, 3, 4],
+            "spouse_person_number": [2, 1, 0, 0],
+            "family_relationship": [1, 2, 3, 1],
+            "tax_unit_id": [100, 100, 100, 101],
+            "age": [40, 38, 10, 22],
+            "weight": [1.0, 1.0, 1.0, 1.0],
+        }
+    )
+    households.to_parquet(tmp_path / "cps_asec_households.parquet", index=False)
+    persons.to_parquet(tmp_path / "cps_asec_persons.parquet", index=False)
+
+    provider = CPSASECParquetSourceProvider(data_dir=tmp_path, year=2024)
+    frame = provider.load_frame(SourceQuery(period=2024))
+    result = frame.tables[EntityType.PERSON].sort_values("person_number").reset_index(drop=True)
+
+    assert result["tax_unit_id"].tolist() == [100, 100, 100, 101]
+    assert result["tax_unit_is_joint"].tolist() == [1.0, 1.0, 1.0, 0.0]
+    assert result["tax_unit_count_dependents"].tolist() == [1.0, 1.0, 1.0, 0.0]
+    assert result["is_tax_unit_head"].tolist() == [1.0, 0.0, 0.0, 1.0]
+    assert result["is_tax_unit_spouse"].tolist() == [0.0, 1.0, 0.0, 0.0]
+    assert result["is_tax_unit_dependent"].tolist() == [0.0, 0.0, 1.0, 0.0]
+
+
+def test_attach_cps_ssn_card_type_derives_pe_style_categories():
+    persons = pl.DataFrame(
+        {
+            "household_id": [1, 2, 3, 4],
+            "person_number": [1, 1, 1, 1],
+            "age": [30, 40, 28, 35],
+            "weight": [1.0, 1.0, 1.0, 1.0],
+        }
+    )
+    households = pl.DataFrame(
+        {
+            "household_id": [1, 2, 3, 4],
+            "household_weight": [1.0, 1.0, 1.0, 1.0],
+        }
+    )
+    persons_raw = pl.DataFrame(
+        {
+            "PRCITSHP": [1, 5, 5, 5],
+            "PEINUSYR": [0, 20, 20, 20],
+            "A_HSCOL": [0, 0, 0, 0],
+            "A_AGE": [30, 40, 28, 35],
+            "A_MARITL": [0, 0, 0, 0],
+            "A_SPOUSE": [0, 0, 0, 0],
+            "MCARE": [0, 1, 0, 0],
+            "CAID": [0, 0, 0, 0],
+            "PEN_SC1": [0, 0, 0, 0],
+            "PEN_SC2": [0, 0, 0, 0],
+            "RESNSS1": [0, 0, 0, 0],
+            "RESNSS2": [0, 0, 0, 0],
+            "IHSFLG": [0, 0, 0, 0],
+            "CHAMPVA": [0, 0, 0, 0],
+            "MIL": [0, 0, 0, 0],
+            "PEIO1COW": [0, 0, 0, 0],
+            "A_MJOCC": [0, 0, 0, 0],
+            "SS_YN": [0, 0, 0, 0],
+            "SPM_ID": [11, 22, 33, 44],
+            "SPM_CAPHOUSESUB": [0.0, 0.0, 0.0, 0.0],
+            "PEAFEVER": [0, 0, 0, 0],
+            "SSI_YN": [0, 0, 0, 0],
+            "WSAL_VAL": [0.0, 0.0, 20_000.0, 0.0],
+            "SEMP_VAL": [0.0, 0.0, 0.0, 0.0],
+        }
+    )
+
+    result = _attach_cps_ssn_card_type(
+        persons=persons,
+        households=households,
+        persons_raw=persons_raw,
+    )
+
+    assert result["ssn_card_type"].to_list() == [
+        "CITIZEN",
+        "OTHER_NON_CITIZEN",
+        "NON_CITIZEN_VALID_EAD",
+        "NONE",
+    ]
+
+
+def test_attach_cps_ssn_card_type_falls_back_to_citizen_when_raw_fields_missing():
+    persons = pl.DataFrame(
+        {
+            "household_id": [1, 2],
+            "person_number": [1, 1],
+            "age": [30, 40],
+            "weight": [1.0, 1.0],
+        }
+    )
+    households = pl.DataFrame(
+        {
+            "household_id": [1, 2],
+            "household_weight": [1.0, 1.0],
+        }
+    )
+    persons_raw = pl.DataFrame(
+        {
+            "PRCITSHP": [1, 5],
+            "PEINUSYR": [0, 20],
+        }
+    )
+
+    result = _attach_cps_ssn_card_type(
+        persons=persons,
+        households=households,
+        persons_raw=persons_raw,
+    )
+
+    assert result["ssn_card_type"].to_list() == ["CITIZEN", "CITIZEN"]
 
 
 def test_cps_parquet_source_provider_supports_household_sampling(tmp_path):
@@ -542,3 +667,83 @@ def test_cps_sampling_falls_back_to_uniform_when_weighted_sampling_is_infeasible
     assert set(sampled_persons["household_id"]) == set(
         sampled_households["household_id"]
     )
+
+
+def test_sample_households_and_persons_state_floor_preserves_state_coverage() -> None:
+    households = pd.DataFrame(
+        {
+            "household_id": [1, 2, 3, 4, 5, 6],
+            "state_fips": [6, 6, 36, 36, 48, 48],
+            "household_weight": [10.0, 9.0, 8.0, 7.0, 6.0, 5.0],
+            "year": [2024] * 6,
+        }
+    )
+    persons = pd.DataFrame(
+        {
+            "person_id": [11, 21, 31, 41, 51, 61],
+            "household_id": [1, 2, 3, 4, 5, 6],
+            "person_number": [1, 1, 1, 1, 1, 1],
+            "year": [2024] * 6,
+        }
+    )
+
+    sampled_households, sampled_persons = _sample_households_and_persons(
+        households=households,
+        persons=persons,
+        sample_n=3,
+        random_seed=7,
+        state_floor=1,
+    )
+
+    assert len(sampled_households) == 3
+    assert sampled_households["state_fips"].nunique() == 3
+    assert set(sampled_persons["household_id"]) == set(sampled_households["household_id"])
+
+
+def test_sample_households_and_persons_state_age_floor_preserves_age_band_coverage() -> None:
+    households = pd.DataFrame(
+        {
+            "household_id": [1, 2, 3, 4, 5, 6],
+            "state_fips": [6, 6, 6, 36, 36, 36],
+            "household_weight": [10.0, 9.0, 8.0, 7.0, 6.0, 5.0],
+            "year": [2024] * 6,
+        }
+    )
+    persons = pd.DataFrame(
+        {
+            "person_id": [11, 21, 31, 41, 51, 61],
+            "household_id": [1, 2, 3, 4, 5, 6],
+            "person_number": [1, 1, 1, 1, 1, 1],
+            "age": [2, 7, 7, 4, 87, 87],
+            "year": [2024] * 6,
+        }
+    )
+
+    sampled_households, sampled_persons = _sample_households_and_persons(
+        households=households,
+        persons=persons,
+        sample_n=4,
+        random_seed=7,
+        state_age_floor=1,
+    )
+
+    observed_keys = {
+        (int(state), _cps_age_band_key(age))
+        for state, age in persons.merge(
+            households[["household_id", "state_fips"]],
+            on="household_id",
+            how="left",
+        )[["state_fips", "age"]].itertuples(index=False, name=None)
+    }
+    sampled_keys = {
+        (int(state), _cps_age_band_key(age))
+        for state, age in sampled_persons.merge(
+            sampled_households[["household_id", "state_fips"]],
+            on="household_id",
+            how="left",
+        )[["state_fips", "age"]].itertuples(index=False, name=None)
+    }
+
+    assert len(sampled_households) == 4
+    assert observed_keys.issubset(sampled_keys)
+    assert set(sampled_persons["household_id"]) == set(sampled_households["household_id"])

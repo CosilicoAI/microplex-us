@@ -16,8 +16,11 @@ def test_check_us_microplex_site_snapshot_accepts_matching_snapshot(tmp_path) ->
     artifact_dir = tmp_path / "run-1"
     artifact_dir.mkdir()
     _write_us_artifact_bundle(artifact_dir)
-    snapshot_path = tmp_path / "site_snapshot_us.json"
+    snapshot_path = tmp_path / "snapshots" / "site_snapshot_us.json"
     write_us_microplex_site_snapshot(artifact_dir, snapshot_path)
+
+    snapshot = json.loads(snapshot_path.read_text())
+    assert snapshot["sourceArtifact"]["artifactPath"] == "../run-1"
 
     assert check_us_microplex_site_snapshot(snapshot_path) == snapshot_path
 
@@ -34,6 +37,24 @@ def test_check_us_microplex_site_snapshot_rejects_stale_snapshot(tmp_path) -> No
     snapshot_path.write_text(json.dumps(snapshot, indent=2, sort_keys=True))
 
     with pytest.raises(SystemExit, match="stale or inconsistent"):
+        check_us_microplex_site_snapshot(snapshot_path)
+
+
+def test_check_us_microplex_site_snapshot_rejects_stale_data_flow_sidecar(
+    tmp_path,
+) -> None:
+    artifact_dir = tmp_path / "run-1"
+    artifact_dir.mkdir()
+    _write_us_artifact_bundle(artifact_dir)
+    snapshot_path = tmp_path / "site_snapshot_us.json"
+    write_us_microplex_site_snapshot(artifact_dir, snapshot_path)
+
+    data_flow_path = artifact_dir / "data_flow_snapshot.json"
+    data_flow = json.loads(data_flow_path.read_text())
+    data_flow["runtime"]["scaffoldSource"] = "stale_source"
+    data_flow_path.write_text(json.dumps(data_flow, indent=2, sort_keys=True))
+
+    with pytest.raises(SystemExit, match="data-flow snapshot is stale or inconsistent"):
         check_us_microplex_site_snapshot(snapshot_path)
 
 

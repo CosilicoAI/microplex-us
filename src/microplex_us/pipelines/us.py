@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib.util
 import warnings
+from collections import Counter
 from collections.abc import Iterable
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -46,6 +47,10 @@ from microplex_us.pe_source_impute_engine import (
 from microplex_us.pipelines.pe_l0 import PolicyEngineL0Calibrator
 from microplex_us.pipelines.pe_native_optimization import (
     optimize_policyengine_us_native_loss_dataset,
+)
+from microplex_us.policyengine.comparison import (
+    evaluate_policyengine_us_target_set,
+    slice_policyengine_us_target_evaluation_report,
 )
 from microplex_us.policyengine.target_profiles import (
     PolicyEngineUSTargetCell,
@@ -437,6 +442,852 @@ def _constraint_active_household_count(
     return int(np.count_nonzero(np.abs(coefficients) > epsilon))
 
 
+def _build_policyengine_constraint_records(
+    targets: list[TargetSpec],
+    constraints: tuple[Any, ...],
+) -> list[dict[str, Any]]:
+    records: list[dict[str, Any]] = []
+    for target, constraint in zip(targets, constraints, strict=True):
+        aggregation_name = str(
+            getattr(getattr(target, "aggregation", None), "name", target.aggregation)
+        ).upper()
+        records.append(
+            {
+                "target": target,
+                "constraint": constraint,
+                "active_households": _constraint_active_household_count(constraint),
+                "geo_priority": _policyengine_target_geo_priority(target),
+                "aggregation_priority": 0 if aggregation_name == "COUNT" else 1,
+                "coefficient_mass": float(
+                    np.abs(
+                        np.asarray(getattr(constraint, "coefficients", ()), dtype=float)
+                    ).sum()
+                ),
+            }
+        )
+    return records
+
+
+def _policyengine_target_has_entity_table(
+    target: TargetSpec,
+    tables: PolicyEngineUSEntityTableBundle,
+) -> bool:
+    return {
+        EntityType.HOUSEHOLD: tables.households,
+        EntityType.PERSON: tables.persons,
+        EntityType.TAX_UNIT: tables.tax_units,
+        EntityType.SPM_UNIT: tables.spm_units,
+        EntityType.FAMILY: tables.families,
+    }.get(target.entity) is not None
+
+
+def _policyengine_target_variable_name(target: TargetSpec) -> str:
+    metadata = dict(target.metadata or {})
+    variable = metadata.get("variable")
+    if variable is not None:
+        return str(variable)
+    if target.measure is not None:
+        return str(target.measure)
+    aggregation_name = str(
+        getattr(getattr(target, "aggregation", None), "name", target.aggregation)
+    ).upper()
+    if aggregation_name == "COUNT":
+        entity_value = (
+            target.entity.value if isinstance(target.entity, EntityType) else str(target.entity)
+        )
+        return f"{entity_value}_count"
+    return "unknown"
+
+
+def _policyengine_target_family_key(target: TargetSpec) -> str:
+    metadata = dict(target.metadata or {})
+    geo_level = str(metadata.get("geo_level") or "unspecified")
+    domain_variable = str(metadata.get("domain_variable") or "")
+    variable = _policyengine_target_variable_name(target)
+    parts = [geo_level, variable]
+    if domain_variable:
+        parts.append(f"domain={domain_variable}")
+    return "|".join(parts)
+
+
+def _policyengine_target_loss_family_key(entry: dict[str, Any]) -> str:
+    variable = str(entry.get("variable") or "unknown")
+    domain_variable = str(entry.get("domain_variable") or "")
+    if domain_variable:
+        return f"{variable}|domain={domain_variable}"
+    return variable
+
+
+def _policyengine_target_loss_geography_key(entry: dict[str, Any]) -> str:
+    geo_level = str(entry.get("geo_level") or "unspecified")
+    geographic_id = entry.get("geographic_id")
+    if geographic_id is None or str(geographic_id) == "":
+        return geo_level
+    geographic_key = str(geographic_id).strip()
+    if geo_level == "national":
+        return f"{geo_level}:US"
+    if geo_level == "state":
+        try:
+            state_fips = int(geographic_key)
+        except (TypeError, ValueError):
+            geographic_key = geographic_key.upper()
+        else:
+            geographic_key = STATE_FIPS.get(state_fips, f"{state_fips:02d}")
+    return f"{geo_level}:{geographic_key}"
+
+
+def _policyengine_target_ledger_entry(
+    *,
+    target: TargetSpec,
+    stage: str,
+    reason: str,
+    household_count: int,
+    active_households: int | None = None,
+    min_active_households: int | None = None,
+    missing_features: Iterable[str] = (),
+    failed_materializations: Iterable[str] = (),
+) -> dict[str, Any]:
+    metadata = dict(target.metadata or {})
+    required_features = sorted(str(feature) for feature in target.required_features)
+    entity_value = (
+        target.entity.value if isinstance(target.entity, EntityType) else str(target.entity)
+    )
+    aggregation_value = getattr(target.aggregation, "value", str(target.aggregation))
+    active_support_share = None
+    if active_households is not None and household_count > 0:
+        active_support_share = float(active_households / household_count)
+    return {
+        "target_name": target.name,
+        "target_id": metadata.get("target_id"),
+        "stratum_id": metadata.get("stratum_id"),
+        "stage": stage,
+        "reason": reason,
+        "family": _policyengine_target_family_key(target),
+        "entity": entity_value,
+        "aggregation": aggregation_value,
+        "measure": target.measure,
+        "value": float(target.value),
+        "geo_level": metadata.get("geo_level"),
+        "geographic_id": metadata.get("geographic_id"),
+        "variable": _policyengine_target_variable_name(target),
+        "domain_variable": metadata.get("domain_variable"),
+        "filters": [
+            {
+                "feature": target_filter.feature,
+                "operator": target_filter.operator,
+                "value": target_filter.value,
+            }
+            for target_filter in target.filters
+        ],
+        "required_features": required_features,
+        "missing_features": sorted(str(feature) for feature in missing_features),
+        "failed_materializations": sorted(
+            str(feature) for feature in failed_materializations
+        ),
+        "active_households": active_households,
+        "active_support_share": active_support_share,
+        "min_active_households": min_active_households,
+        "source": target.source,
+        "description": target.description,
+    }
+
+
+def _summarize_policyengine_target_ledger(
+    ledger: list[dict[str, Any]],
+    *,
+    compiled_target_count: int,
+    preselection_target_count: int,
+    final_solve_target_count: int,
+) -> dict[str, Any]:
+    stage_order = ("solve_now", "solve_later", "audit_only")
+    stage_counts = Counter(entry["stage"] for entry in ledger)
+    reason_counts = Counter(entry["reason"] for entry in ledger)
+    stage_reason_counts: dict[str, Counter[str]] = {
+        stage: Counter() for stage in stage_order
+    }
+    family_stage_counts: dict[str, Counter[str]] = {}
+    geo_level_stage_counts: dict[str, Counter[str]] = {}
+    for entry in ledger:
+        stage = str(entry["stage"])
+        stage_reason_counts.setdefault(stage, Counter())[str(entry["reason"])] += 1
+        family = str(entry["family"])
+        family_stage_counts.setdefault(family, Counter())[stage] += 1
+        geo_level = str(entry.get("geo_level") or "unspecified")
+        geo_level_stage_counts.setdefault(geo_level, Counter())[stage] += 1
+    return {
+        "n_targets": len(ledger),
+        "n_compile_ready_targets": int(compiled_target_count),
+        "n_selected_after_feasibility": int(preselection_target_count),
+        "n_selected_for_current_solve": int(final_solve_target_count),
+        "stage_counts": {
+            stage: int(stage_counts.get(stage, 0)) for stage in stage_order
+        },
+        "reason_counts": {
+            reason: int(count) for reason, count in sorted(reason_counts.items())
+        },
+        "stage_reason_counts": {
+            stage: {
+                reason: int(count)
+                for reason, count in sorted(stage_reason_counts.get(stage, Counter()).items())
+            }
+            for stage in stage_order
+        },
+        "geo_level_stage_counts": {
+            geo_level: {
+                stage: int(count) for stage, count in sorted(counter.items())
+            }
+            for geo_level, counter in sorted(geo_level_stage_counts.items())
+        },
+        "family_stage_counts": {
+            family: {
+                stage: int(count) for stage, count in sorted(counter.items())
+            }
+            for family, counter in sorted(family_stage_counts.items())
+        },
+    }
+
+
+def _build_policyengine_calibration_target_ledger(
+    *,
+    canonical_targets: list[TargetSpec],
+    tables: PolicyEngineUSEntityTableBundle,
+    bindings: dict[str, PolicyEngineUSVariableBinding],
+    compiled_targets: list[TargetSpec],
+    structurally_unsupported_targets: list[TargetSpec],
+    compiled_constraints: tuple[Any, ...],
+    preselection_targets: list[TargetSpec],
+    selected_stage_by_name: dict[str, int],
+    household_count: int,
+    min_active_households: int,
+    materialization_failures: dict[str, str],
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    min_required_households = max(1, int(min_active_households))
+    compiled_target_names = {target.name for target in compiled_targets}
+    structurally_unsupported_names = {
+        target.name for target in structurally_unsupported_targets
+    }
+    preselection_names = {target.name for target in preselection_targets}
+    final_solve_names = set(selected_stage_by_name)
+
+    ledger: list[dict[str, Any]] = []
+    classified_names: set[str] = set()
+    for target in canonical_targets:
+        missing_features = sorted(
+            str(feature) for feature in target.required_features if feature not in bindings
+        )
+        has_entity_table = _policyengine_target_has_entity_table(target, tables)
+        if not has_entity_table:
+            ledger.append(
+                _policyengine_target_ledger_entry(
+                    target=target,
+                    stage="audit_only",
+                    reason="missing_entity_table",
+                    household_count=household_count,
+                    missing_features=missing_features,
+                )
+            )
+            classified_names.add(target.name)
+            continue
+        if missing_features:
+            failed_materializations = [
+                feature
+                for feature in missing_features
+                if feature in materialization_failures
+            ]
+            ledger.append(
+                _policyengine_target_ledger_entry(
+                    target=target,
+                    stage="audit_only",
+                    reason=(
+                        "materialization_failure"
+                        if failed_materializations
+                        else "missing_required_features"
+                    ),
+                    household_count=household_count,
+                    missing_features=missing_features,
+                    failed_materializations=failed_materializations,
+                )
+            )
+            classified_names.add(target.name)
+            continue
+        if target.name in structurally_unsupported_names:
+            ledger.append(
+                _policyengine_target_ledger_entry(
+                    target=target,
+                    stage="audit_only",
+                    reason="unsupported_structure",
+                    household_count=household_count,
+                )
+            )
+            classified_names.add(target.name)
+
+    for record in _build_policyengine_constraint_records(compiled_targets, compiled_constraints):
+        target = record["target"]
+        classified_names.add(target.name)
+        active_households = int(record["active_households"])
+        if target.name in final_solve_names:
+            stage = "solve_now"
+            reason = f"selected_stage_{int(selected_stage_by_name[target.name])}"
+        elif target.name in preselection_names:
+            stage = "solve_later"
+            reason = "household_budget_selection"
+        elif active_households < min_required_households:
+            stage = "solve_later"
+            reason = "low_household_support"
+        else:
+            stage = "solve_later"
+            reason = "constraint_capacity"
+        ledger.append(
+            _policyengine_target_ledger_entry(
+                target=target,
+                stage=stage,
+                reason=reason,
+                household_count=household_count,
+                active_households=active_households,
+                min_active_households=min_required_households,
+            )
+        )
+
+    for target in canonical_targets:
+        if target.name in classified_names:
+            continue
+        ledger.append(
+            _policyengine_target_ledger_entry(
+                target=target,
+                stage="audit_only",
+                reason="unclassified",
+                household_count=household_count,
+            )
+        )
+
+    stage_rank = {"solve_now": 0, "solve_later": 1, "audit_only": 2}
+    ledger.sort(
+        key=lambda entry: (
+            stage_rank.get(str(entry["stage"]), 99),
+            str(entry["reason"]),
+            str(entry["family"]),
+            str(entry["target_name"]),
+        )
+    )
+    return (
+        _summarize_policyengine_target_ledger(
+            ledger,
+            compiled_target_count=len(compiled_targets),
+            preselection_target_count=len(preselection_targets),
+            final_solve_target_count=len(final_solve_names),
+        ),
+        ledger,
+    )
+
+
+def _ranked_policyengine_group_focus_keys(
+    ranking: list[dict[str, Any]] | tuple[dict[str, Any], ...] | None,
+    *,
+    limit: int | None,
+) -> list[str]:
+    if not ranking:
+        return []
+    if limit is not None and limit <= 0:
+        return []
+    selected: list[str] = []
+    for row in ranking:
+        score = float(row.get("capped_sum_abs_relative_error") or 0.0)
+        if score <= 0.0:
+            continue
+        selected.append(str(row["group"]))
+        if limit is not None and len(selected) >= limit:
+            break
+    return selected
+
+
+def _select_policyengine_deferred_stage_constraints(
+    *,
+    compiled_targets: list[TargetSpec],
+    compiled_constraints: tuple[LinearConstraint, ...],
+    target_ledger: list[dict[str, Any]],
+    deferred_oracle_loss: dict[str, Any],
+    deferred_target_priority_lookup: dict[str, float] | None,
+    selected_target_names: set[str],
+    household_count: int,
+    min_active_households: int,
+    max_constraints: int | None,
+    max_constraints_per_household: float | None,
+    top_family_count: int | None,
+    top_geography_count: int | None,
+) -> tuple[list[TargetSpec], tuple[LinearConstraint, ...], dict[str, Any]]:
+    ledger_by_name = {
+        str(entry["target_name"]): entry
+        for entry in target_ledger
+        if entry.get("target_name") is not None
+    }
+    family_focus = _ranked_policyengine_group_focus_keys(
+        deferred_oracle_loss.get("family_ranking"),
+        limit=top_family_count,
+    )
+    geography_focus = _ranked_policyengine_group_focus_keys(
+        deferred_oracle_loss.get("geography_ranking"),
+        limit=top_geography_count,
+    )
+    family_focus_set = set(family_focus)
+    geography_focus_set = set(geography_focus)
+    family_scores = {
+        str(row["group"]): float(row.get("capped_loss_share") or 0.0)
+        for row in deferred_oracle_loss.get("family_ranking", ())
+    }
+    geography_scores = {
+        str(row["group"]): float(row.get("capped_loss_share") or 0.0)
+        for row in deferred_oracle_loss.get("geography_ranking", ())
+    }
+
+    candidate_targets: list[TargetSpec] = []
+    candidate_constraints: list[LinearConstraint] = []
+    priority_scores: dict[str, float] = {}
+    focus_eligible_count = 0
+    min_required_households = max(1, int(min_active_households))
+
+    for record in _build_policyengine_constraint_records(compiled_targets, compiled_constraints):
+        target = record["target"]
+        if target.name in selected_target_names:
+            continue
+        ledger_entry = ledger_by_name.get(target.name)
+        if ledger_entry is None or ledger_entry.get("stage") != "solve_later":
+            continue
+        if int(record["active_households"]) < min_required_households:
+            continue
+        family_key = _policyengine_target_loss_family_key(ledger_entry)
+        geography_key = _policyengine_target_loss_geography_key(ledger_entry)
+        if family_focus_set or geography_focus_set:
+            if family_key not in family_focus_set and geography_key not in geography_focus_set:
+                continue
+        focus_eligible_count += 1
+        candidate_targets.append(target)
+        candidate_constraints.append(record["constraint"])
+        target_score = (
+            float(deferred_target_priority_lookup.get(target.name, 0.0))
+            if deferred_target_priority_lookup is not None
+            else 0.0
+        )
+        priority_scores[target.name] = (
+            target_score
+            + family_scores.get(family_key, 0.0)
+            + geography_scores.get(geography_key, 0.0)
+        )
+
+    selected_targets, selected_constraints, feasibility_summary = (
+        _select_feasible_policyengine_calibration_constraints(
+            candidate_targets,
+            tuple(candidate_constraints),
+            household_count=household_count,
+            max_constraints=max_constraints,
+            max_constraints_per_household=max_constraints_per_household,
+            min_active_households=min_required_households,
+            priority_scores=priority_scores,
+        )
+    )
+    return selected_targets, selected_constraints, {
+        "min_active_households": min_required_households,
+        "top_family_count": top_family_count,
+        "top_geography_count": top_geography_count,
+        "focused_families": family_focus,
+        "focused_geographies": geography_focus,
+        "n_focus_eligible_constraints": focus_eligible_count,
+        "target_error_priority_available": deferred_target_priority_lookup is not None,
+        "feasibility_filter": feasibility_summary,
+    }
+
+
+def _policyengine_unsupported_target_error_penalty(
+    *,
+    relative_error_cap: float | None,
+) -> float:
+    if relative_error_cap is not None:
+        return float(relative_error_cap)
+    return 1.0
+
+
+def _policyengine_target_fit_loss_components(
+    report: Any,
+    *,
+    relative_error_cap: float | None = None,
+) -> dict[str, Any]:
+    supported_abs_relative_errors = [
+        abs(evaluation.relative_error)
+        for evaluation in report.evaluations
+        if evaluation.relative_error is not None
+    ]
+    capped_supported_abs_relative_errors = [
+        min(error, float(relative_error_cap))
+        if relative_error_cap is not None
+        else error
+        for error in supported_abs_relative_errors
+    ]
+    unsupported_target_count = int(len(report.unsupported_targets))
+    unsupported_target_error_penalty = _policyengine_unsupported_target_error_penalty(
+        relative_error_cap=relative_error_cap
+    )
+    penalized_abs_relative_errors = [
+        *supported_abs_relative_errors,
+        *([unsupported_target_error_penalty] * unsupported_target_count),
+    ]
+    capped_penalized_abs_relative_errors = [
+        *capped_supported_abs_relative_errors,
+        *([unsupported_target_error_penalty] * unsupported_target_count),
+    ]
+    return {
+        "supported_abs_relative_errors": supported_abs_relative_errors,
+        "capped_supported_abs_relative_errors": capped_supported_abs_relative_errors,
+        "penalized_abs_relative_errors": penalized_abs_relative_errors,
+        "capped_penalized_abs_relative_errors": capped_penalized_abs_relative_errors,
+        "unsupported_target_count": unsupported_target_count,
+        "unsupported_target_error_penalty": unsupported_target_error_penalty,
+    }
+
+
+def _summarize_policyengine_target_fit_report(
+    report: Any,
+    *,
+    target_count: int,
+    relative_error_cap: float | None = None,
+) -> dict[str, Any]:
+    supported_target_count = int(report.supported_target_count)
+    unsupported_target_count = int(len(report.unsupported_targets))
+    supported_target_rate = None
+    if target_count > 0:
+        supported_target_rate = float(supported_target_count / target_count)
+    loss_components = _policyengine_target_fit_loss_components(
+        report,
+        relative_error_cap=relative_error_cap,
+    )
+    supported_only_mean_abs_relative_error = report.mean_abs_relative_error
+    supported_only_max_abs_relative_error = report.max_abs_relative_error
+    supported_only_capped_mean_abs_relative_error = (
+        float(
+            sum(loss_components["capped_supported_abs_relative_errors"])
+            / len(loss_components["capped_supported_abs_relative_errors"])
+        )
+        if loss_components["capped_supported_abs_relative_errors"]
+        else None
+    )
+    penalized_abs_relative_errors = loss_components["penalized_abs_relative_errors"]
+    capped_penalized_abs_relative_errors = loss_components[
+        "capped_penalized_abs_relative_errors"
+    ]
+    mean_abs_relative_error = (
+        float(sum(penalized_abs_relative_errors) / target_count)
+        if target_count > 0 and penalized_abs_relative_errors
+        else None
+    )
+    max_abs_relative_error = None
+    if target_count > 0:
+        max_candidates = []
+        if supported_only_max_abs_relative_error is not None:
+            max_candidates.append(float(supported_only_max_abs_relative_error))
+        if unsupported_target_count > 0:
+            max_candidates.append(loss_components["unsupported_target_error_penalty"])
+        if max_candidates:
+            max_abs_relative_error = max(max_candidates)
+    capped_mean_abs_relative_error = (
+        float(sum(capped_penalized_abs_relative_errors) / target_count)
+        if target_count > 0 and capped_penalized_abs_relative_errors
+        else None
+    )
+    return {
+        "target_count": int(target_count),
+        "supported_target_count": supported_target_count,
+        "unsupported_target_count": unsupported_target_count,
+        "supported_target_rate": supported_target_rate,
+        "mean_abs_relative_error": (
+            float(mean_abs_relative_error)
+            if mean_abs_relative_error is not None
+            else None
+        ),
+        "supported_only_mean_abs_relative_error": (
+            float(supported_only_mean_abs_relative_error)
+            if supported_only_mean_abs_relative_error is not None
+            else None
+        ),
+        "max_abs_relative_error": (
+            float(max_abs_relative_error)
+            if max_abs_relative_error is not None
+            else None
+        ),
+        "supported_only_max_abs_relative_error": (
+            float(supported_only_max_abs_relative_error)
+            if supported_only_max_abs_relative_error is not None
+            else None
+        ),
+        "relative_error_cap": (
+            float(relative_error_cap) if relative_error_cap is not None else None
+        ),
+        "unsupported_target_error_penalty": (
+            loss_components["unsupported_target_error_penalty"]
+            if unsupported_target_count > 0
+            else None
+        ),
+        "capped_mean_abs_relative_error": capped_mean_abs_relative_error,
+        "supported_only_capped_mean_abs_relative_error": (
+            supported_only_capped_mean_abs_relative_error
+        ),
+    }
+
+
+def _summarize_policyengine_target_fit_group_reports(
+    report: Any,
+    *,
+    targets_by_group: dict[str, list[TargetSpec]],
+    relative_error_cap: float | None = None,
+) -> tuple[dict[str, dict[str, Any]], list[dict[str, Any]]]:
+    total_loss_components = _policyengine_target_fit_loss_components(
+        report,
+        relative_error_cap=relative_error_cap,
+    )
+    total_abs_relative_error = float(
+        sum(total_loss_components["penalized_abs_relative_errors"])
+    )
+    total_capped_abs_relative_error = float(
+        sum(total_loss_components["capped_penalized_abs_relative_errors"])
+    )
+    grouped: list[tuple[str, dict[str, Any]]] = []
+    for group_key, group_targets in targets_by_group.items():
+        group_report = slice_policyengine_us_target_evaluation_report(
+            report,
+            group_targets,
+        )
+        group_loss_components = _policyengine_target_fit_loss_components(
+            group_report,
+            relative_error_cap=relative_error_cap,
+        )
+        sum_abs_relative_error = float(
+            sum(group_loss_components["penalized_abs_relative_errors"])
+        )
+        capped_sum_abs_relative_error = float(
+            sum(group_loss_components["capped_penalized_abs_relative_errors"])
+        )
+        summary = _summarize_policyengine_target_fit_report(
+            group_report,
+            target_count=len(group_targets),
+            relative_error_cap=relative_error_cap,
+        )
+        summary["sum_abs_relative_error"] = sum_abs_relative_error
+        summary["loss_share"] = (
+            float(sum_abs_relative_error / total_abs_relative_error)
+            if total_abs_relative_error > 0.0
+            else None
+        )
+        summary["capped_sum_abs_relative_error"] = capped_sum_abs_relative_error
+        summary["capped_loss_share"] = (
+            float(capped_sum_abs_relative_error / total_capped_abs_relative_error)
+            if total_capped_abs_relative_error > 0.0
+            else None
+        )
+        grouped.append((group_key, summary))
+
+    grouped.sort(
+        key=lambda item: (
+            -item[1]["capped_sum_abs_relative_error"],
+            -item[1]["sum_abs_relative_error"],
+            -item[1]["target_count"],
+            item[0],
+        )
+    )
+    return (
+        {group_key: summary for group_key, summary in grouped},
+        [
+            {
+                "group": group_key,
+                **summary,
+            }
+            for group_key, summary in grouped
+        ],
+    )
+
+
+def _summarize_policyengine_target_fit_report_with_groups(
+    report: Any,
+    *,
+    targets: list[TargetSpec],
+    ledger_by_name: dict[str, dict[str, Any]],
+    relative_error_cap: float | None = None,
+) -> dict[str, Any]:
+    summary = _summarize_policyengine_target_fit_report(
+        report,
+        target_count=len(targets),
+        relative_error_cap=relative_error_cap,
+    )
+    family_targets: dict[str, list[TargetSpec]] = {}
+    geography_targets: dict[str, list[TargetSpec]] = {}
+    for target in targets:
+        ledger_entry = ledger_by_name.get(target.name)
+        if ledger_entry is None:
+            continue
+        family_targets.setdefault(
+            _policyengine_target_loss_family_key(ledger_entry),
+            [],
+        ).append(target)
+        geography_targets.setdefault(
+            _policyengine_target_loss_geography_key(ledger_entry),
+            [],
+        ).append(target)
+    (
+        summary["family_summaries"],
+        summary["family_ranking"],
+    ) = _summarize_policyengine_target_fit_group_reports(
+        report,
+        targets_by_group=family_targets,
+        relative_error_cap=relative_error_cap,
+    )
+    (
+        summary["geography_summaries"],
+        summary["geography_ranking"],
+    ) = _summarize_policyengine_target_fit_group_reports(
+        report,
+        targets_by_group=geography_targets,
+        relative_error_cap=relative_error_cap,
+    )
+    return summary
+
+
+def _evaluate_policyengine_target_fit_summaries(
+    *,
+    tables: PolicyEngineUSEntityTableBundle,
+    canonical_targets: list[TargetSpec],
+    final_solve_targets: list[TargetSpec],
+    target_ledger: list[dict[str, Any]],
+    period: int | str,
+    dataset_year: int | None,
+    simulation_cls: Any | None,
+    direct_override_variables: tuple[str, ...] = (),
+    relative_error_cap: float | None = None,
+) -> dict[str, dict[str, Any]]:
+    summaries, _ = _evaluate_policyengine_target_fit_context(
+        tables=tables,
+        canonical_targets=canonical_targets,
+        final_solve_targets=final_solve_targets,
+        target_ledger=target_ledger,
+        period=period,
+        dataset_year=dataset_year,
+        simulation_cls=simulation_cls,
+        direct_override_variables=direct_override_variables,
+        relative_error_cap=relative_error_cap,
+    )
+    return summaries
+
+
+def _policyengine_target_fit_priority_lookup(
+    report: Any,
+    *,
+    relative_error_cap: float | None = None,
+) -> dict[str, float]:
+    target_scores: dict[str, float] = {}
+    for evaluation in report.evaluations:
+        abs_relative_error = abs(float(evaluation.relative_error))
+        capped_abs_relative_error = (
+            min(abs_relative_error, float(relative_error_cap))
+            if relative_error_cap is not None
+            else abs_relative_error
+        )
+        target_scores[evaluation.target.name] = float(capped_abs_relative_error)
+    unsupported_target_error_penalty = _policyengine_unsupported_target_error_penalty(
+        relative_error_cap=relative_error_cap
+    )
+    for target in report.unsupported_targets:
+        target_scores[target.name] = float(unsupported_target_error_penalty)
+    return target_scores
+
+
+def _evaluate_policyengine_target_fit_context(
+    *,
+    tables: PolicyEngineUSEntityTableBundle,
+    canonical_targets: list[TargetSpec],
+    final_solve_targets: list[TargetSpec],
+    target_ledger: list[dict[str, Any]],
+    period: int | str,
+    dataset_year: int | None,
+    simulation_cls: Any | None,
+    direct_override_variables: tuple[str, ...] = (),
+    relative_error_cap: float | None = None,
+) -> tuple[dict[str, dict[str, Any]], dict[str, dict[str, float]]]:
+    target_by_name = {target.name: target for target in canonical_targets}
+    ledger_by_name = {
+        str(entry["target_name"]): entry for entry in target_ledger if entry.get("target_name")
+    }
+    deferred_targets = [
+        target_by_name[entry["target_name"]]
+        for entry in target_ledger
+        if entry["stage"] == "solve_later" and entry["target_name"] in target_by_name
+    ]
+    audit_only_targets = [
+        target_by_name[entry["target_name"]]
+        for entry in target_ledger
+        if entry["stage"] == "audit_only" and entry["target_name"] in target_by_name
+    ]
+    full_report = evaluate_policyengine_us_target_set(
+        tables,
+        canonical_targets,
+        period=period,
+        dataset_year=dataset_year,
+        simulation_cls=simulation_cls,
+        label="policyengine_db_calibration",
+        direct_override_variables=direct_override_variables,
+    )
+    active_solve_report = slice_policyengine_us_target_evaluation_report(
+        full_report,
+        final_solve_targets,
+    )
+    deferred_report = slice_policyengine_us_target_evaluation_report(
+        full_report,
+        deferred_targets,
+    )
+    audit_only_report = slice_policyengine_us_target_evaluation_report(
+        full_report,
+        audit_only_targets,
+    )
+    summaries = {
+        "full_oracle": _summarize_policyengine_target_fit_report_with_groups(
+            full_report,
+            targets=canonical_targets,
+            ledger_by_name=ledger_by_name,
+            relative_error_cap=relative_error_cap,
+        ),
+        "active_solve": _summarize_policyengine_target_fit_report_with_groups(
+            active_solve_report,
+            targets=final_solve_targets,
+            ledger_by_name=ledger_by_name,
+            relative_error_cap=relative_error_cap,
+        ),
+        "deferred": _summarize_policyengine_target_fit_report_with_groups(
+            deferred_report,
+            targets=deferred_targets,
+            ledger_by_name=ledger_by_name,
+            relative_error_cap=relative_error_cap,
+        ),
+        "audit_only": _summarize_policyengine_target_fit_report_with_groups(
+            audit_only_report,
+            targets=audit_only_targets,
+            ledger_by_name=ledger_by_name,
+            relative_error_cap=relative_error_cap,
+        ),
+    }
+    return summaries, {
+        "full_oracle": _policyengine_target_fit_priority_lookup(
+            full_report,
+            relative_error_cap=relative_error_cap,
+        ),
+        "active_solve": _policyengine_target_fit_priority_lookup(
+            active_solve_report,
+            relative_error_cap=relative_error_cap,
+        ),
+        "deferred": _policyengine_target_fit_priority_lookup(
+            deferred_report,
+            relative_error_cap=relative_error_cap,
+        ),
+        "audit_only": _policyengine_target_fit_priority_lookup(
+            audit_only_report,
+            relative_error_cap=relative_error_cap,
+        ),
+    }
+
+
 def _select_feasible_policyengine_calibration_constraints(
     targets: list[TargetSpec],
     constraints: tuple[Any, ...],
@@ -445,6 +1296,7 @@ def _select_feasible_policyengine_calibration_constraints(
     max_constraints: int | None,
     max_constraints_per_household: float | None,
     min_active_households: int,
+    priority_scores: dict[str, float] | None = None,
 ) -> tuple[list[TargetSpec], tuple[Any, ...], dict[str, Any]]:
     selected_targets = list(targets)
     selected_constraints = tuple(constraints)
@@ -459,23 +1311,7 @@ def _select_feasible_policyengine_calibration_constraints(
             int(np.floor(max_constraints_per_household * household_count)),
         )
 
-    records = []
-    for target, constraint in zip(targets, constraints, strict=True):
-        active_households = _constraint_active_household_count(constraint)
-        records.append(
-            {
-                "target": target,
-                "constraint": constraint,
-                "active_households": active_households,
-                "geo_priority": _policyengine_target_geo_priority(target),
-                "aggregation_priority": 0 if target.aggregation.name == "COUNT" else 1,
-                "coefficient_mass": float(
-                    np.abs(
-                        np.asarray(getattr(constraint, "coefficients", ()), dtype=float)
-                    ).sum()
-                ),
-            }
-        )
+    records = _build_policyengine_constraint_records(targets, constraints)
 
     min_required_households = max(1, int(min_active_households))
     support_filtered = [
@@ -487,6 +1323,9 @@ def _select_feasible_policyengine_calibration_constraints(
 
     support_filtered.sort(
         key=lambda record: (
+            -float(priority_scores.get(record["target"].name, 0.0))
+            if priority_scores is not None
+            else 0.0,
             record["geo_priority"],
             record["aggregation_priority"],
             -record["active_households"],
@@ -574,6 +1413,22 @@ class USMicroplexBuildConfig:
     donor_imputer_max_condition_vars: int | None = 8
     donor_imputer_excluded_variables: tuple[str, ...] = ("filing_status_code",)
     donor_imputer_authoritative_override_variables: tuple[str, ...] = ()
+    dependent_tax_leaf_soft_cap_multiplier: float | None = None
+    dependent_tax_leaf_soft_cap_base_variables: tuple[str, ...] = (
+        "employment_income",
+        "wage_income",
+        "self_employment_income",
+    )
+    dependent_tax_leaf_soft_cap_variables: tuple[str, ...] = (
+        "taxable_interest_income",
+        "tax_exempt_interest_income",
+        "taxable_pension_income",
+        "dividend_income",
+        "qualified_dividend_income",
+        "non_qualified_dividend_income",
+        "partnership_s_corp_income",
+        "rental_income",
+    )
     bootstrap_strata_columns: tuple[str, ...] = ()
     prefer_cached_cps_asec_source: bool = False
     cps_asec_source_year: int = 2023
@@ -611,6 +1466,14 @@ class USMicroplexBuildConfig:
     policyengine_calibration_min_active_households: int = (
         DEFAULT_POLICYENGINE_CALIBRATION_MIN_ACTIVE_HOUSEHOLDS
     )
+    policyengine_calibration_deferred_stage_min_active_households: tuple[int, ...] = ()
+    policyengine_calibration_deferred_stage_max_constraints: int | None = 24
+    policyengine_calibration_deferred_stage_min_full_oracle_capped_mean_abs_relative_error: (
+        float | None
+    ) = None
+    policyengine_calibration_deferred_stage_top_family_count: int | None = 8
+    policyengine_calibration_deferred_stage_top_geography_count: int | None = 8
+    policyengine_oracle_relative_error_cap: float | None = 10.0
     policyengine_target_reform_id: int = 0
     policyengine_simulation_cls: Any | None = None
 
@@ -630,6 +1493,59 @@ class USMicroplexBuildConfig:
             raise ValueError(
                 "policyengine_calibration_rescale_to_target_total_weight requires "
                 "policyengine_calibration_target_total_weight"
+            )
+        if (
+            self.policyengine_oracle_relative_error_cap is not None
+            and float(self.policyengine_oracle_relative_error_cap) <= 0.0
+        ):
+            raise ValueError(
+                "policyengine_oracle_relative_error_cap must be positive when provided"
+            )
+        if (
+            self.dependent_tax_leaf_soft_cap_multiplier is not None
+            and float(self.dependent_tax_leaf_soft_cap_multiplier) < 0.0
+        ):
+            raise ValueError(
+                "dependent_tax_leaf_soft_cap_multiplier must be non-negative when provided"
+            )
+        if any(
+            int(value) <= 0
+            for value in self.policyengine_calibration_deferred_stage_min_active_households
+        ):
+            raise ValueError(
+                "policyengine_calibration_deferred_stage_min_active_households must contain only positive values"
+            )
+        if (
+            self.policyengine_calibration_deferred_stage_max_constraints is not None
+            and int(self.policyengine_calibration_deferred_stage_max_constraints) <= 0
+        ):
+            raise ValueError(
+                "policyengine_calibration_deferred_stage_max_constraints must be positive when provided"
+            )
+        if (
+            self.policyengine_calibration_deferred_stage_min_full_oracle_capped_mean_abs_relative_error
+            is not None
+            and float(
+                self.policyengine_calibration_deferred_stage_min_full_oracle_capped_mean_abs_relative_error
+            )
+            <= 0.0
+        ):
+            raise ValueError(
+                "policyengine_calibration_deferred_stage_min_full_oracle_capped_mean_abs_relative_error must be positive when provided"
+            )
+        if (
+            self.policyengine_calibration_deferred_stage_top_family_count is not None
+            and int(self.policyengine_calibration_deferred_stage_top_family_count) < 0
+        ):
+            raise ValueError(
+                "policyengine_calibration_deferred_stage_top_family_count must be nonnegative when provided"
+            )
+        if (
+            self.policyengine_calibration_deferred_stage_top_geography_count is not None
+            and int(self.policyengine_calibration_deferred_stage_top_geography_count) < 0
+        ):
+            raise ValueError(
+                "policyengine_calibration_deferred_stage_top_geography_count must be nonnegative when provided"
             )
 
     def to_dict(self) -> dict[str, Any]:
@@ -797,6 +1713,7 @@ class USMicroplexPipeline:
             seed_data,
             scaffold_input=scaffold_input,
         )
+        seed_data = self._apply_dependent_tax_leaf_soft_caps(seed_data)
         targets = self.build_targets(seed_data)
         synthesis_variables = self._resolve_synthesis_variables(
             scaffold_input,
@@ -816,6 +1733,9 @@ class USMicroplexPipeline:
             "target_vars": list(synthesis_variables.target_vars),
             "scaffold_source": scaffold_input.frame.source.name,
             "donor_integrated_variables": donor_integration["integrated_variables"],
+            "donor_conditioning_diagnostics": donor_integration.get(
+                "conditioning_diagnostics", []
+            ),
             "donor_excluded_variables": list(
                 self.config.donor_imputer_excluded_variables
             ),
@@ -1800,8 +2720,10 @@ class USMicroplexPipeline:
             tables,
             bindings,
             canonical_targets,
-            supported_targets,
+            compiled_targets,
             unsupported_targets,
+            compiled_constraints,
+            supported_targets,
             constraints,
             feasibility_filter_summary,
             materialized_variables,
@@ -1811,12 +2733,18 @@ class USMicroplexPipeline:
             provider=provider,
             target_period=target_period,
         )
+        preselection_supported_targets = list(supported_targets)
+        target_planning_household_count = len(tables.households)
         if not supported_targets:
             raise ValueError(
                 "No supported PolicyEngine DB targets matched current tables"
             )
+        compiled_constraint_tables = tables
         selection_summary: dict[str, Any] | None = None
         if self.config.policyengine_selection_household_budget is not None:
+            preselection_household_ids = compiled_constraint_tables.households[
+                "household_id"
+            ].to_numpy(dtype=np.int64)
             (
                 tables,
                 supported_targets,
@@ -1852,114 +2780,524 @@ class USMicroplexPipeline:
                     raise ValueError(
                         "No supported PolicyEngine DB targets remained after household-budget selection"
                     )
+                selected_household_ids = tables.households["household_id"].to_numpy(
+                    dtype=np.int64
+                )
+                selection_mask = np.isin(
+                    preselection_household_ids,
+                    selected_household_ids,
+                )
+                compiled_constraints = _subset_policyengine_linear_constraints(
+                    compiled_constraints,
+                    selection_mask,
+                )
+
         input_household_weight_sum = float(tables.households["household_weight"].sum())
-        if self.config.calibration_backend == "none":
-            calibrated_households = tables.households.copy()
-            pre_rescale_household_weight_sum = input_household_weight_sum
-        else:
-            calibrator = self._build_weight_calibrator()
-            calibration_constraints = list(constraints)
-            if self.config.policyengine_calibration_target_total_weight is not None:
-                n_hh = len(tables.households)
-                calibration_constraints.append(
-                    LinearConstraint(
-                        name="total_household_weight_sum",
-                        coefficients=np.ones(n_hh, dtype=float),
-                        target=float(
-                            self.config.policyengine_calibration_target_total_weight
+
+        def _apply_policyengine_constraint_stage(
+            stage_tables: PolicyEngineUSEntityTableBundle,
+            stage_constraints: tuple[LinearConstraint, ...],
+        ) -> tuple[PolicyEngineUSEntityTableBundle, pd.DataFrame, dict[str, Any]]:
+            stage_input_household_weight_sum = float(
+                stage_tables.households["household_weight"].sum()
+            )
+            stage_calibrator = None
+            if self.config.calibration_backend == "none":
+                calibrated_households = stage_tables.households.copy()
+                pre_rescale_household_weight_sum = stage_input_household_weight_sum
+            else:
+                stage_calibrator = self._build_weight_calibrator()
+                calibration_constraints = list(stage_constraints)
+                if self.config.policyengine_calibration_target_total_weight is not None:
+                    n_hh = len(stage_tables.households)
+                    calibration_constraints.append(
+                        LinearConstraint(
+                            name="total_household_weight_sum",
+                            coefficients=np.ones(n_hh, dtype=float),
+                            target=float(
+                                self.config.policyengine_calibration_target_total_weight
+                            ),
+                        )
+                    )
+                calibrated_households = stage_calibrator.fit_transform(
+                    stage_tables.households.copy(),
+                    {},
+                    weight_col="household_weight",
+                    linear_constraints=tuple(calibration_constraints),
+                )
+                pre_rescale_household_weight_sum = float(
+                    calibrated_households["household_weight"].sum()
+                )
+            weight_sum_rescaled = False
+            weight_sum_rescale_mode: str | None = None
+            if (
+                self.config.policyengine_calibration_rescale_to_target_total_weight
+                and self.config.policyengine_calibration_target_total_weight is not None
+                and pre_rescale_household_weight_sum > 0.0
+                and not np.isclose(
+                    pre_rescale_household_weight_sum,
+                    float(self.config.policyengine_calibration_target_total_weight),
+                )
+            ):
+                calibrated_households["household_weight"] = calibrated_households[
+                    "household_weight"
+                ].astype(float) * (
+                    float(self.config.policyengine_calibration_target_total_weight)
+                    / pre_rescale_household_weight_sum
+                )
+                weight_sum_rescaled = True
+                weight_sum_rescale_mode = "target_total_weight"
+            elif (
+                self.config.policyengine_calibration_rescale_to_input_weight_sum
+                and pre_rescale_household_weight_sum > 0.0
+                and not np.isclose(
+                    pre_rescale_household_weight_sum,
+                    stage_input_household_weight_sum,
+                )
+            ):
+                calibrated_households["household_weight"] = calibrated_households[
+                    "household_weight"
+                ].astype(float) * (
+                    stage_input_household_weight_sum / pre_rescale_household_weight_sum
+                )
+                weight_sum_rescaled = True
+                weight_sum_rescale_mode = "input_weight_sum"
+            if self.config.calibration_backend == "none":
+                validation = {
+                    "converged": True,
+                    "max_error": 0.0,
+                    "sparsity": 0.0,
+                    "linear_errors": {},
+                }
+            else:
+                validation = stage_calibrator.validate(calibrated_households)
+
+            household_weights = calibrated_households.set_index("household_id")[
+                "household_weight"
+            ]
+            calibrated_persons = (
+                stage_tables.persons.copy()
+                if stage_tables.persons is not None
+                else pd.DataFrame()
+            )
+            if not calibrated_persons.empty:
+                calibrated_persons["weight"] = (
+                    calibrated_persons["household_id"]
+                    .map(household_weights)
+                    .astype(float)
+                )
+
+            updated_stage_tables = PolicyEngineUSEntityTableBundle(
+                households=calibrated_households,
+                persons=calibrated_persons
+                if not calibrated_persons.empty
+                else stage_tables.persons,
+                tax_units=stage_tables.tax_units,
+                spm_units=stage_tables.spm_units,
+                families=stage_tables.families,
+                marital_units=stage_tables.marital_units,
+            )
+            return updated_stage_tables, calibrated_persons, {
+                "validation": validation,
+                "input_household_weight_sum": stage_input_household_weight_sum,
+                "pre_rescale_household_weight_sum": pre_rescale_household_weight_sum,
+                "post_rescale_household_weight_sum": float(
+                    calibrated_households["household_weight"].sum()
+                ),
+                "weight_sum_rescaled": weight_sum_rescaled,
+                "weight_sum_rescale_mode": weight_sum_rescale_mode,
+                "household_weight_diagnostics": _summarize_weight_diagnostics(
+                    calibrated_households["household_weight"]
+                ),
+                "person_weight_diagnostics": (
+                    _summarize_weight_diagnostics(calibrated_persons["weight"])
+                    if not calibrated_persons.empty and "weight" in calibrated_persons.columns
+                    else None
+                ),
+            }
+
+        selected_stage_by_name = {
+            target.name: 1 for target in supported_targets
+        }
+        all_selected_targets = list(supported_targets)
+        all_selected_constraints = list(constraints)
+        updated_tables, calibrated_persons, final_stage_summary = (
+            _apply_policyengine_constraint_stage(
+                tables,
+                tuple(constraints),
+            )
+        )
+        target_plan_summary, target_ledger = _build_policyengine_calibration_target_ledger(
+            canonical_targets=canonical_targets,
+            tables=tables,
+            bindings=bindings,
+            compiled_targets=compiled_targets,
+            structurally_unsupported_targets=unsupported_targets,
+            compiled_constraints=compiled_constraints,
+            preselection_targets=preselection_supported_targets,
+            selected_stage_by_name=selected_stage_by_name,
+            household_count=target_planning_household_count,
+            min_active_households=self.config.policyengine_calibration_min_active_households,
+            materialization_failures=materialization_failures,
+        )
+        oracle_loss, oracle_target_priority_lookup = (
+            _evaluate_policyengine_target_fit_context(
+                tables=updated_tables,
+                canonical_targets=canonical_targets,
+                final_solve_targets=all_selected_targets,
+                target_ledger=target_ledger,
+                period=target_period,
+                dataset_year=self.config.policyengine_dataset_year or int(target_period),
+                simulation_cls=self.config.policyengine_simulation_cls,
+                direct_override_variables=(
+                    self.config.policyengine_direct_override_variables
+                ),
+                relative_error_cap=self.config.policyengine_oracle_relative_error_cap,
+            )
+        )
+
+        calibration_stages: list[dict[str, Any]] = []
+        applied_stage_count = 1
+        final_stage_index = 1
+        deferred_stage_accept_metric = "full_oracle_capped_mean_abs_relative_error"
+        deferred_stage_trigger_metric = "full_oracle_capped_mean_abs_relative_error"
+
+        def _append_stage_summary(
+            *,
+            stage_index: int,
+            kind: str,
+            status: str,
+            min_active_households: int,
+            selected_targets_for_stage: list[TargetSpec],
+            stage_metadata: dict[str, Any],
+            stage_result: dict[str, Any] | None,
+            oracle_loss_snapshot: dict[str, dict[str, Any]],
+            pre_oracle_loss_snapshot: dict[str, dict[str, Any]] | None = None,
+        ) -> None:
+            validation = (
+                stage_result.get("validation", {})
+                if stage_result is not None
+                else {}
+            )
+            linear_errors = list(validation.get("linear_errors", {}).values())
+            stage_summary = {
+                "stage_index": stage_index,
+                "kind": kind,
+                "status": status,
+                "min_active_households": int(min_active_households),
+                "selected_target_count": len(selected_targets_for_stage),
+                "selected_constraint_count": len(selected_targets_for_stage),
+                "selected_target_names": [
+                    target.name for target in selected_targets_for_stage
+                ],
+                "post_full_oracle_mean_abs_relative_error": oracle_loss_snapshot[
+                    "full_oracle"
+                ]["mean_abs_relative_error"],
+                "post_full_oracle_capped_mean_abs_relative_error": (
+                    oracle_loss_snapshot["full_oracle"][
+                        "capped_mean_abs_relative_error"
+                    ]
+                ),
+                "post_active_solve_mean_abs_relative_error": oracle_loss_snapshot[
+                    "active_solve"
+                ]["mean_abs_relative_error"],
+                "post_active_solve_capped_mean_abs_relative_error": (
+                    oracle_loss_snapshot["active_solve"][
+                        "capped_mean_abs_relative_error"
+                    ]
+                ),
+                **stage_metadata,
+            }
+            if pre_oracle_loss_snapshot is not None:
+                stage_summary.update(
+                    {
+                        "pre_full_oracle_mean_abs_relative_error": (
+                            pre_oracle_loss_snapshot["full_oracle"][
+                                "mean_abs_relative_error"
+                            ]
+                        ),
+                        "pre_full_oracle_capped_mean_abs_relative_error": (
+                            pre_oracle_loss_snapshot["full_oracle"][
+                                "capped_mean_abs_relative_error"
+                            ]
+                        ),
+                        "pre_active_solve_mean_abs_relative_error": (
+                            pre_oracle_loss_snapshot["active_solve"][
+                                "mean_abs_relative_error"
+                            ]
+                        ),
+                        "pre_active_solve_capped_mean_abs_relative_error": (
+                            pre_oracle_loss_snapshot["active_solve"][
+                                "capped_mean_abs_relative_error"
+                            ]
+                        ),
+                    }
+                )
+            if stage_result is not None:
+                stage_summary.update(
+                    {
+                        "input_household_weight_sum": stage_result[
+                            "input_household_weight_sum"
+                        ],
+                        "pre_rescale_household_weight_sum": stage_result[
+                            "pre_rescale_household_weight_sum"
+                        ],
+                        "post_rescale_household_weight_sum": stage_result[
+                            "post_rescale_household_weight_sum"
+                        ],
+                        "weight_sum_rescaled": stage_result["weight_sum_rescaled"],
+                        "weight_sum_rescale_mode": stage_result[
+                            "weight_sum_rescale_mode"
+                        ],
+                        "household_weight_diagnostics": stage_result[
+                            "household_weight_diagnostics"
+                        ],
+                        "person_weight_diagnostics": stage_result[
+                            "person_weight_diagnostics"
+                        ],
+                        "max_error": float(validation.get("max_error", 0.0)),
+                        "mean_error": (
+                            float(
+                                np.mean(
+                                    [error["relative_error"] for error in linear_errors]
+                                )
+                            )
+                            if linear_errors
+                            else 0.0
+                        ),
+                        "converged": bool(validation.get("converged", False)),
+                        "sparsity": float(validation.get("sparsity", 0.0)),
+                    }
+                )
+            calibration_stages.append(stage_summary)
+
+        _append_stage_summary(
+            stage_index=1,
+            kind="initial",
+            status="applied",
+            min_active_households=self.config.policyengine_calibration_min_active_households,
+            selected_targets_for_stage=list(supported_targets),
+            stage_metadata={"feasibility_filter": feasibility_filter_summary},
+            stage_result=final_stage_summary,
+            oracle_loss_snapshot=oracle_loss,
+        )
+
+        deferred_stage_schedule: list[int] = []
+        for min_active_households in (
+            self.config.policyengine_calibration_deferred_stage_min_active_households
+        ):
+            resolved_min_active = int(min_active_households)
+            if (
+                resolved_min_active >= self.config.policyengine_calibration_min_active_households
+                or resolved_min_active in deferred_stage_schedule
+            ):
+                continue
+            deferred_stage_schedule.append(resolved_min_active)
+
+        if self.config.calibration_backend != "none":
+            for stage_index, min_active_households in enumerate(
+                deferred_stage_schedule,
+                start=2,
+            ):
+                pre_stage_oracle_loss = oracle_loss
+                pre_stage_trigger_metric_value = pre_stage_oracle_loss["full_oracle"][
+                    "capped_mean_abs_relative_error"
+                ]
+                trigger_threshold = (
+                    self.config.policyengine_calibration_deferred_stage_min_full_oracle_capped_mean_abs_relative_error
+                )
+                if (
+                    trigger_threshold is not None
+                    and pre_stage_trigger_metric_value is not None
+                    and float(pre_stage_trigger_metric_value) < float(trigger_threshold)
+                ):
+                    _append_stage_summary(
+                        stage_index=stage_index,
+                        kind="deferred",
+                        status="skipped",
+                        min_active_households=min_active_households,
+                        selected_targets_for_stage=[],
+                        stage_metadata={
+                            "trigger_metric": deferred_stage_trigger_metric,
+                            "trigger_threshold": float(trigger_threshold),
+                            "trigger_metric_value": float(
+                                pre_stage_trigger_metric_value
+                            ),
+                            "skip_reason": "trigger_metric_below_threshold",
+                        },
+                        stage_result=None,
+                        oracle_loss_snapshot=oracle_loss,
+                        pre_oracle_loss_snapshot=pre_stage_oracle_loss,
+                    )
+                    continue
+                stage_targets, stage_constraints, stage_metadata = (
+                    _select_policyengine_deferred_stage_constraints(
+                        compiled_targets=compiled_targets,
+                        compiled_constraints=compiled_constraints,
+                        target_ledger=target_ledger,
+                        deferred_oracle_loss=oracle_loss["deferred"],
+                        deferred_target_priority_lookup=oracle_target_priority_lookup[
+                            "deferred"
+                        ],
+                        selected_target_names=set(selected_stage_by_name),
+                        household_count=target_planning_household_count,
+                        min_active_households=min_active_households,
+                        max_constraints=(
+                            self.config.policyengine_calibration_deferred_stage_max_constraints
+                            if self.config.policyengine_calibration_deferred_stage_max_constraints
+                            is not None
+                            else self.config.policyengine_calibration_max_constraints
+                        ),
+                        max_constraints_per_household=(
+                            self.config.policyengine_calibration_max_constraints_per_household
+                        ),
+                        top_family_count=(
+                            self.config.policyengine_calibration_deferred_stage_top_family_count
+                        ),
+                        top_geography_count=(
+                            self.config.policyengine_calibration_deferred_stage_top_geography_count
                         ),
                     )
                 )
-            calibrated_households = calibrator.fit_transform(
-                tables.households.copy(),
-                {},
-                weight_col="household_weight",
-                linear_constraints=tuple(calibration_constraints),
-            )
-            pre_rescale_household_weight_sum = float(
-                calibrated_households["household_weight"].sum()
-            )
-        weight_sum_rescaled = False
-        weight_sum_rescale_mode: str | None = None
-        if (
-            self.config.policyengine_calibration_rescale_to_target_total_weight
-            and self.config.policyengine_calibration_target_total_weight is not None
-            and pre_rescale_household_weight_sum > 0.0
-            and not np.isclose(
-                pre_rescale_household_weight_sum,
-                float(self.config.policyengine_calibration_target_total_weight),
-            )
-        ):
-            calibrated_households["household_weight"] = calibrated_households[
-                "household_weight"
-            ].astype(float) * (
-                float(self.config.policyengine_calibration_target_total_weight)
-                / pre_rescale_household_weight_sum
-            )
-            weight_sum_rescaled = True
-            weight_sum_rescale_mode = "target_total_weight"
-        elif (
-            self.config.policyengine_calibration_rescale_to_input_weight_sum
-            and pre_rescale_household_weight_sum > 0.0
-            and not np.isclose(
-                pre_rescale_household_weight_sum, input_household_weight_sum
-            )
-        ):
-            calibrated_households["household_weight"] = calibrated_households[
-                "household_weight"
-            ].astype(float) * (
-                input_household_weight_sum / pre_rescale_household_weight_sum
-            )
-            weight_sum_rescaled = True
-            weight_sum_rescale_mode = "input_weight_sum"
-        if self.config.calibration_backend == "none":
-            validation = {
-                "converged": True,
-                "max_error": 0.0,
-                "sparsity": 0.0,
-                "linear_errors": {},
-            }
-        else:
-            validation = calibrator.validate(calibrated_households)
+                if not stage_targets:
+                    _append_stage_summary(
+                        stage_index=stage_index,
+                        kind="deferred",
+                        status="skipped",
+                        min_active_households=min_active_households,
+                        selected_targets_for_stage=[],
+                        stage_metadata=stage_metadata,
+                        stage_result=None,
+                        oracle_loss_snapshot=oracle_loss,
+                        pre_oracle_loss_snapshot=pre_stage_oracle_loss,
+                    )
+                    continue
+                candidate_tables, candidate_calibrated_persons, candidate_stage_summary = (
+                    _apply_policyengine_constraint_stage(
+                        updated_tables,
+                        stage_constraints,
+                    )
+                )
+                candidate_selected_stage_by_name = dict(selected_stage_by_name)
+                for target in stage_targets:
+                    candidate_selected_stage_by_name[target.name] = stage_index
+                candidate_all_selected_targets = [
+                    *all_selected_targets,
+                    *stage_targets,
+                ]
+                candidate_all_selected_constraints = [
+                    *all_selected_constraints,
+                    *stage_constraints,
+                ]
+                candidate_target_plan_summary, candidate_target_ledger = (
+                    _build_policyengine_calibration_target_ledger(
+                        canonical_targets=canonical_targets,
+                        tables=tables,
+                        bindings=bindings,
+                        compiled_targets=compiled_targets,
+                        structurally_unsupported_targets=unsupported_targets,
+                        compiled_constraints=compiled_constraints,
+                        preselection_targets=preselection_supported_targets,
+                        selected_stage_by_name=candidate_selected_stage_by_name,
+                        household_count=target_planning_household_count,
+                        min_active_households=(
+                            self.config.policyengine_calibration_min_active_households
+                        ),
+                        materialization_failures=materialization_failures,
+                    )
+                )
+                candidate_oracle_loss, candidate_target_priority_lookup = (
+                    _evaluate_policyengine_target_fit_context(
+                        tables=candidate_tables,
+                        canonical_targets=canonical_targets,
+                        final_solve_targets=candidate_all_selected_targets,
+                        target_ledger=candidate_target_ledger,
+                        period=target_period,
+                        dataset_year=self.config.policyengine_dataset_year
+                        or int(target_period),
+                        simulation_cls=self.config.policyengine_simulation_cls,
+                        direct_override_variables=(
+                            self.config.policyengine_direct_override_variables
+                        ),
+                        relative_error_cap=(
+                            self.config.policyengine_oracle_relative_error_cap
+                        ),
+                    )
+                )
+                pre_metric = pre_stage_oracle_loss["full_oracle"][
+                    "capped_mean_abs_relative_error"
+                ]
+                post_metric = candidate_oracle_loss["full_oracle"][
+                    "capped_mean_abs_relative_error"
+                ]
+                stage_improved = (
+                    pre_metric is None
+                    or post_metric is None
+                    or float(post_metric) < float(pre_metric)
+                )
+                if stage_improved:
+                    updated_tables = candidate_tables
+                    calibrated_persons = candidate_calibrated_persons
+                    final_stage_summary = candidate_stage_summary
+                    applied_stage_count += 1
+                    final_stage_index = stage_index
+                    selected_stage_by_name = candidate_selected_stage_by_name
+                    all_selected_targets = candidate_all_selected_targets
+                    all_selected_constraints = candidate_all_selected_constraints
+                    target_plan_summary = candidate_target_plan_summary
+                    target_ledger = candidate_target_ledger
+                    oracle_loss = candidate_oracle_loss
+                    oracle_target_priority_lookup = candidate_target_priority_lookup
+                _append_stage_summary(
+                    stage_index=stage_index,
+                    kind="deferred",
+                    status="applied" if stage_improved else "rejected",
+                    min_active_households=min_active_households,
+                    selected_targets_for_stage=stage_targets,
+                    stage_metadata={
+                        **stage_metadata,
+                        "accept_metric": deferred_stage_accept_metric,
+                        "accepted": stage_improved,
+                        "trigger_metric": deferred_stage_trigger_metric,
+                        "trigger_threshold": (
+                            float(trigger_threshold)
+                            if trigger_threshold is not None
+                            else None
+                        ),
+                        "trigger_metric_value": (
+                            float(pre_stage_trigger_metric_value)
+                            if pre_stage_trigger_metric_value is not None
+                            else None
+                        ),
+                    },
+                    stage_result=candidate_stage_summary,
+                    oracle_loss_snapshot=candidate_oracle_loss,
+                    pre_oracle_loss_snapshot=pre_stage_oracle_loss,
+                )
 
-        household_weights = calibrated_households.set_index("household_id")[
-            "household_weight"
-        ]
-        calibrated_persons = (
-            tables.persons.copy() if tables.persons is not None else pd.DataFrame()
-        )
-        if not calibrated_persons.empty:
-            calibrated_persons["weight"] = (
-                calibrated_persons["household_id"].map(household_weights).astype(float)
-            )
-
-        updated_tables = PolicyEngineUSEntityTableBundle(
-            households=calibrated_households,
-            persons=calibrated_persons
-            if not calibrated_persons.empty
-            else tables.persons,
-            tax_units=tables.tax_units,
-            spm_units=tables.spm_units,
-            families=tables.families,
-            marital_units=tables.marital_units,
-        )
-        household_weight_diagnostics = _summarize_weight_diagnostics(
-            calibrated_households["household_weight"]
-        )
-        person_weight_diagnostics = (
-            _summarize_weight_diagnostics(calibrated_persons["weight"])
-            if not calibrated_persons.empty and "weight" in calibrated_persons.columns
-            else None
-        )
+        validation = dict(final_stage_summary["validation"])
         linear_errors = list(validation.get("linear_errors", {}).values())
+        household_weight_diagnostics = final_stage_summary[
+            "household_weight_diagnostics"
+        ]
+        person_weight_diagnostics = final_stage_summary["person_weight_diagnostics"]
         summary = {
             "backend": f"policyengine_db_{self.config.calibration_backend}",
             "period": int(target_period),
             "n_loaded_targets": len(canonical_targets),
-            "n_supported_targets": len(supported_targets),
+            "n_supported_targets": len(all_selected_targets),
             "n_unsupported_targets": len(unsupported_targets),
-            "n_constraints": len(constraints),
+            "n_constraints": len(all_selected_constraints),
             "feasibility_filter": feasibility_filter_summary,
+            "calibration_stages": calibration_stages,
+            "n_calibration_stages_applied": applied_stage_count,
+            "final_calibration_stage_index": final_stage_index,
+            "deferred_stage_support_schedule": deferred_stage_schedule,
+            "deferred_stage_accept_metric": deferred_stage_accept_metric,
+            "deferred_stage_trigger_metric": deferred_stage_trigger_metric,
+            "deferred_stage_trigger_threshold": (
+                self.config.policyengine_calibration_deferred_stage_min_full_oracle_capped_mean_abs_relative_error
+            ),
             "target_variables": list(
                 self._policyengine_target_scope(for_calibration=True)[0]
             ),
@@ -1992,21 +3330,50 @@ class USMicroplexPipeline:
             ),
             "input_household_weight_sum": input_household_weight_sum,
             "total_weight_constraint_target": self.config.policyengine_calibration_target_total_weight,
-            "pre_rescale_household_weight_sum": pre_rescale_household_weight_sum,
-            "post_rescale_household_weight_sum": float(
-                calibrated_households["household_weight"].sum()
-            ),
-            "weight_sum_rescaled": weight_sum_rescaled,
-            "weight_sum_rescale_mode": weight_sum_rescale_mode,
+            "pre_rescale_household_weight_sum": final_stage_summary[
+                "pre_rescale_household_weight_sum"
+            ],
+            "post_rescale_household_weight_sum": final_stage_summary[
+                "post_rescale_household_weight_sum"
+            ],
+            "weight_sum_rescaled": final_stage_summary["weight_sum_rescaled"],
+            "weight_sum_rescale_mode": final_stage_summary["weight_sum_rescale_mode"],
             "household_weight_diagnostics": household_weight_diagnostics,
             "person_weight_diagnostics": person_weight_diagnostics,
+            "target_plan": target_plan_summary,
+            "target_ledger": target_ledger,
+            "oracle_loss": oracle_loss,
+            "oracle_relative_error_cap": self.config.policyengine_oracle_relative_error_cap,
+            "full_oracle_mean_abs_relative_error": oracle_loss["full_oracle"][
+                "mean_abs_relative_error"
+            ],
+            "full_oracle_capped_mean_abs_relative_error": oracle_loss["full_oracle"][
+                "capped_mean_abs_relative_error"
+            ],
+            "active_solve_mean_abs_relative_error": oracle_loss["active_solve"][
+                "mean_abs_relative_error"
+            ],
+            "active_solve_capped_mean_abs_relative_error": oracle_loss["active_solve"][
+                "capped_mean_abs_relative_error"
+            ],
         }
         if selection_summary is not None:
             summary["selection"] = selection_summary
         warning_messages = list(feasibility_filter_summary.get("warning_messages", ()))
-        if not summary["converged"]:
+        for stage in calibration_stages[1:]:
+            stage_warnings = (
+                stage.get("feasibility_filter", {}).get("warning_messages", ())
+            )
+            warning_messages.extend(
+                f"Deferred calibration stage {stage['stage_index']}: {message}"
+                for message in stage_warnings
+            )
+        if any(
+            stage.get("status") == "applied" and not stage.get("converged", True)
+            for stage in calibration_stages
+        ):
             warning_messages.append(
-                "Calibration did not converge on the selected constraint set."
+                "Calibration did not converge on one or more selected constraint sets."
             )
         summary["warnings"] = warning_messages
         for message in warning_messages:
@@ -2024,6 +3391,8 @@ class USMicroplexPipeline:
         dict[str, PolicyEngineUSVariableBinding],
         list[TargetSpec],
         list[TargetSpec],
+        list[TargetSpec],
+        tuple[Any, ...],
         list[TargetSpec],
         tuple[Any, ...],
         dict[str, Any],
@@ -2076,6 +3445,8 @@ class USMicroplexPipeline:
                 variable_bindings=bindings,
             )
         )
+        compiled_targets = list(supported_targets)
+        compiled_constraints = tuple(constraints)
         (
             supported_targets,
             constraints,
@@ -2096,8 +3467,10 @@ class USMicroplexPipeline:
             tables,
             bindings,
             canonical_targets,
-            supported_targets,
+            compiled_targets,
             unsupported_targets,
+            compiled_constraints,
+            supported_targets,
             constraints,
             feasibility_filter_summary,
             materialized_variables,
@@ -2240,7 +3613,7 @@ class USMicroplexPipeline:
         persons = self._assign_marital_units(persons)
         marital_units = self._collapse_group_table(persons, "marital_unit_id")
 
-        return PolicyEngineUSEntityTableBundle(
+        tables = PolicyEngineUSEntityTableBundle(
             households=households,
             persons=persons,
             tax_units=tax_units,
@@ -2248,6 +3621,7 @@ class USMicroplexPipeline:
             families=families,
             marital_units=marital_units,
         )
+        return tables
 
     def export_policyengine_dataset(
         self,
@@ -2537,6 +3911,7 @@ class USMicroplexPipeline:
     ) -> dict[str, Any]:
         current = seed_data.copy()
         integrated_variables: list[str] = []
+        conditioning_diagnostics: list[dict[str, Any]] = []
         scaffold_observed = prune_redundant_variables(
             scaffold_input.fusion_plan.variables_for(EntityType.HOUSEHOLD)
             | scaffold_input.fusion_plan.variables_for(EntityType.PERSON)
@@ -2591,6 +3966,7 @@ class USMicroplexPipeline:
                     donor_seed[variable],
                 )
             )
+            raw_shared_var_set = set(shared_vars)
             donor_only_vars = sorted(
                 variable
                 for variable in donor_observed - scaffold_observed
@@ -2680,6 +4056,71 @@ class USMicroplexPipeline:
                         rng=rng,
                     )
                     if result is not None:
+                        selected_condition_vars = list(result.condition_vars)
+                        requested_supplemental_vars = (
+                            self._resolve_requested_supplemental_shared_condition_vars(
+                                donor_block_spec.model_variables
+                            )
+                        )
+                        conditioning_diagnostics.append(
+                            {
+                                "donor_source": donor_input.frame.source.name,
+                                "model_variables": list(
+                                    donor_block_spec.model_variables
+                                ),
+                                "restored_variables": list(
+                                    donor_block_spec.restored_variables
+                                ),
+                                "condition_selection": (
+                                    self.config.donor_imputer_condition_selection
+                                ),
+                                "used_condition_surface": True,
+                                "raw_shared_vars": list(
+                                    prepared_inputs.raw_shared_vars
+                                ),
+                                "shared_vars_after_model_exclusion": list(
+                                    prepared_inputs.shared_vars_after_model_exclusion
+                                ),
+                                "projection_applied": (
+                                    prepared_inputs.projection_applied
+                                ),
+                                "entity_compatible_shared_vars": list(
+                                    prepared_inputs.entity_compatible_shared_vars
+                                ),
+                                "shared_vars_for_block": list(shared_vars_for_block),
+                                "selected_condition_vars": selected_condition_vars,
+                                "dropped_shared_vars": [
+                                    variable
+                                    for variable in shared_vars_for_block
+                                    if variable not in selected_condition_vars
+                                ],
+                                "requested_supplemental_shared_condition_vars": (
+                                    requested_supplemental_vars
+                                ),
+                                "raw_supplemental_shared_condition_var_status": (
+                                    self._summarize_requested_raw_condition_var_status(
+                                        donor_frame=donor_seed,
+                                        current_frame=current,
+                                        scaffold_source=scaffold_input.frame.source,
+                                        donor_source=donor_input.frame.source,
+                                        numeric_current=numeric_current,
+                                        numeric_donor=numeric_donor,
+                                        shared_var_set=raw_shared_var_set,
+                                        excluded=excluded,
+                                        requested_vars=requested_supplemental_vars,
+                                    )
+                                ),
+                                "supplemental_shared_condition_var_status": (
+                                    self._summarize_requested_condition_var_status(
+                                        donor_frame=donor_condition_source,
+                                        current_frame=current_condition_source,
+                                        shared_vars=shared_vars_for_block,
+                                        selected_condition_vars=selected_condition_vars,
+                                        requested_vars=requested_supplemental_vars,
+                                    )
+                                ),
+                            }
+                        )
                         current = result.updated_frame
                         integrated_variables.extend(result.integrated_variables)
                     continue
@@ -2729,13 +4170,111 @@ class USMicroplexPipeline:
                     rng=rng,
                 )
                 if result is not None:
+                    selected_condition_vars = list(result.condition_vars)
+                    requested_supplemental_vars = (
+                        self._resolve_requested_supplemental_shared_condition_vars(
+                            donor_block_spec.model_variables
+                        )
+                    )
+                    conditioning_diagnostics.append(
+                        {
+                            "donor_source": donor_input.frame.source.name,
+                            "model_variables": list(donor_block_spec.model_variables),
+                            "restored_variables": list(
+                                donor_block_spec.restored_variables
+                            ),
+                            "condition_selection": (
+                                self.config.donor_imputer_condition_selection
+                            ),
+                            "used_condition_surface": False,
+                            "raw_shared_vars": list(prepared_inputs.raw_shared_vars),
+                            "shared_vars_after_model_exclusion": list(
+                                prepared_inputs.shared_vars_after_model_exclusion
+                            ),
+                            "projection_applied": prepared_inputs.projection_applied,
+                            "entity_compatible_shared_vars": list(
+                                prepared_inputs.entity_compatible_shared_vars
+                            ),
+                            "shared_vars_for_block": list(shared_vars_for_block),
+                            "selected_condition_vars": selected_condition_vars,
+                            "dropped_shared_vars": [
+                                variable
+                                for variable in shared_vars_for_block
+                                if variable not in selected_condition_vars
+                            ],
+                            "requested_supplemental_shared_condition_vars": (
+                                requested_supplemental_vars
+                            ),
+                            "raw_supplemental_shared_condition_var_status": (
+                                self._summarize_requested_raw_condition_var_status(
+                                    donor_frame=donor_seed,
+                                    current_frame=current,
+                                    scaffold_source=scaffold_input.frame.source,
+                                    donor_source=donor_input.frame.source,
+                                    numeric_current=numeric_current,
+                                    numeric_donor=numeric_donor,
+                                    shared_var_set=raw_shared_var_set,
+                                    excluded=excluded,
+                                    requested_vars=requested_supplemental_vars,
+                                )
+                            ),
+                            "supplemental_shared_condition_var_status": (
+                                self._summarize_requested_condition_var_status(
+                                    donor_frame=donor_condition_source,
+                                    current_frame=current_condition_source,
+                                    shared_vars=shared_vars_for_block,
+                                    selected_condition_vars=selected_condition_vars,
+                                    requested_vars=requested_supplemental_vars,
+                                )
+                            ),
+                        }
+                    )
                     current = result.updated_frame
                     integrated_variables.extend(result.integrated_variables)
 
         return {
             "seed_data": current,
             "integrated_variables": sorted(set(integrated_variables)),
+            "conditioning_diagnostics": conditioning_diagnostics,
         }
+
+    def _apply_dependent_tax_leaf_soft_caps(
+        self,
+        seed_data: pd.DataFrame,
+    ) -> pd.DataFrame:
+        multiplier = self.config.dependent_tax_leaf_soft_cap_multiplier
+        if multiplier is None:
+            return seed_data
+        if "is_tax_unit_dependent" in seed_data.columns:
+            dependent = pd.to_numeric(
+                seed_data["is_tax_unit_dependent"], errors="coerce"
+            ).fillna(0.0) > 0
+        elif "is_dependent" in seed_data.columns:
+            dependent = pd.to_numeric(
+                seed_data["is_dependent"], errors="coerce"
+            ).fillna(0.0) > 0
+        else:
+            return seed_data
+        base_vars = [
+            var
+            for var in self.config.dependent_tax_leaf_soft_cap_base_variables
+            if var in seed_data.columns
+        ]
+        if not base_vars:
+            return seed_data
+        base = (
+            pd.to_numeric(seed_data[base_vars].sum(axis=1), errors="coerce")
+            .fillna(0.0)
+            .clip(lower=0.0)
+        )
+        cap = base * float(multiplier)
+        for variable in self.config.dependent_tax_leaf_soft_cap_variables:
+            if variable not in seed_data.columns:
+                continue
+            series = pd.to_numeric(seed_data[variable], errors="coerce").fillna(0.0)
+            adjusted = series.where(~dependent, other=series.clip(upper=cap))
+            seed_data[variable] = adjusted
+        return seed_data
 
     def _select_donor_condition_vars(
         self,
@@ -2755,6 +4294,7 @@ class USMicroplexPipeline:
             preferred_condition_vars = self._resolve_preferred_donor_condition_vars(
                 donor_frame=donor_frame,
                 current_frame=current_frame,
+                shared_vars=shared_vars,
                 donor_block=donor_block,
             )
             if preferred_condition_vars:
@@ -2798,15 +4338,17 @@ class USMicroplexPipeline:
         *,
         donor_frame: pd.DataFrame,
         current_frame: pd.DataFrame,
+        shared_vars: list[str] | None = None,
         donor_block: tuple[str, ...],
     ) -> list[str]:
+        semantic_specs = tuple(
+            variable_semantic_spec_for(target_variable) for target_variable in donor_block
+        )
         preferred_condition_vars = tuple(
             dict.fromkeys(
                 variable
-                for target_variable in donor_block
-                for variable in variable_semantic_spec_for(
-                    target_variable
-                ).preferred_condition_vars
+                for spec in semantic_specs
+                for variable in spec.preferred_condition_vars
             )
         )
         if not preferred_condition_vars:
@@ -2828,7 +4370,119 @@ class USMicroplexPipeline:
             ):
                 continue
             resolved.append(variable)
+        shared_var_set = set(shared_vars or ())
+        supplemental_shared_condition_vars = tuple(
+            dict.fromkeys(
+                variable
+                for spec in semantic_specs
+                for variable in spec.supplemental_shared_condition_vars
+            )
+        )
+        for variable in supplemental_shared_condition_vars:
+            if variable in resolved or variable not in shared_var_set:
+                continue
+            resolved.append(variable)
         return resolved
+
+    def _resolve_requested_supplemental_shared_condition_vars(
+        self,
+        donor_block: tuple[str, ...],
+    ) -> list[str]:
+        return list(
+            dict.fromkeys(
+                variable
+                for target_variable in donor_block
+                for variable in variable_semantic_spec_for(
+                    target_variable
+                ).supplemental_shared_condition_vars
+            )
+        )
+
+    def _summarize_requested_condition_var_status(
+        self,
+        *,
+        donor_frame: pd.DataFrame,
+        current_frame: pd.DataFrame,
+        shared_vars: list[str],
+        selected_condition_vars: list[str],
+        requested_vars: list[str],
+    ) -> list[dict[str, Any]]:
+        shared_var_set = set(shared_vars)
+        selected_var_set = set(selected_condition_vars)
+        statuses: list[dict[str, Any]] = []
+        for variable in requested_vars:
+            status = {
+                "variable": variable,
+                "selected": variable in selected_var_set,
+                "in_shared_overlap": variable in shared_var_set,
+            }
+            if variable in selected_var_set:
+                status["reason"] = "selected"
+            elif variable in shared_var_set:
+                status["reason"] = "available_but_not_selected"
+            elif variable not in donor_frame.columns:
+                status["reason"] = "missing_donor_column"
+            elif variable not in current_frame.columns:
+                status["reason"] = "missing_current_column"
+            elif not pd.api.types.is_numeric_dtype(donor_frame[variable]):
+                status["reason"] = "non_numeric_donor_column"
+            elif not pd.api.types.is_numeric_dtype(current_frame[variable]):
+                status["reason"] = "non_numeric_current_column"
+            elif not self._is_compatible_donor_condition(
+                current_frame[variable],
+                donor_frame[variable],
+            ):
+                status["reason"] = "incompatible_condition_support"
+            else:
+                status["reason"] = "excluded_from_block_shared_overlap"
+            statuses.append(status)
+        return statuses
+
+    def _summarize_requested_raw_condition_var_status(
+        self,
+        *,
+        donor_frame: pd.DataFrame,
+        current_frame: pd.DataFrame,
+        scaffold_source: SourceDescriptor,
+        donor_source: SourceDescriptor,
+        numeric_current: set[str],
+        numeric_donor: set[str],
+        shared_var_set: set[str],
+        excluded: set[str],
+        requested_vars: list[str],
+    ) -> list[dict[str, Any]]:
+        statuses: list[dict[str, Any]] = []
+        for variable in requested_vars:
+            status = {
+                "variable": variable,
+                "selected": variable in shared_var_set,
+                "in_shared_overlap": variable in shared_var_set,
+            }
+            if variable in shared_var_set:
+                status["reason"] = "selected"
+            elif variable in excluded:
+                status["reason"] = "excluded_variable"
+            elif variable not in current_frame.columns:
+                status["reason"] = "missing_current_column"
+            elif variable not in donor_frame.columns:
+                status["reason"] = "missing_donor_column"
+            elif variable not in numeric_current:
+                status["reason"] = "non_numeric_current_column"
+            elif variable not in numeric_donor:
+                status["reason"] = "non_numeric_donor_column"
+            elif not scaffold_source.allows_conditioning_on(variable):
+                status["reason"] = "scaffold_source_disallows_conditioning"
+            elif not donor_source.allows_conditioning_on(variable):
+                status["reason"] = "donor_source_disallows_conditioning"
+            elif not self._is_compatible_donor_condition(
+                current_frame[variable],
+                donor_frame[variable],
+            ):
+                status["reason"] = "incompatible_condition_support"
+            else:
+                status["reason"] = "excluded_from_shared_overlap"
+            statuses.append(status)
+        return statuses
 
     def _augment_donor_condition_frame_for_targets(
         self,
@@ -3543,18 +5197,49 @@ class USMicroplexPipeline:
         self,
         persons: pd.DataFrame,
     ) -> tuple[pd.DataFrame, pd.DataFrame]:
-        if self.config.policyengine_prefer_existing_tax_unit_ids:
-            preserved = self._build_policyengine_tax_units_from_existing_ids(persons)
-            if preserved is not None:
-                return preserved
-
-        optimizer = TaxUnitOptimizer()
         person_rows = persons.copy()
         tax_unit_rows: list[dict[str, Any]] = []
         person_to_tax_unit: dict[int, int] = {}
         next_tax_unit_id = 0
+        preserved_households: set[Any] = set()
+
+        if self.config.policyengine_prefer_existing_tax_unit_ids:
+            preserved = self._build_policyengine_tax_units_from_existing_ids(persons)
+            if preserved is not None:
+                preserved_tax_units, preserved_person_rows, preserved_households = (
+                    preserved
+                )
+                if len(preserved_households) == person_rows["household_id"].nunique():
+                    return preserved_tax_units, preserved_person_rows
+                if not preserved_tax_units.empty:
+                    tax_unit_rows.extend(
+                        preserved_tax_units.to_dict(orient="records")
+                    )
+                    person_to_tax_unit.update(
+                        {
+                            int(person_id): int(tax_unit_id)
+                            for person_id, tax_unit_id in zip(
+                                preserved_person_rows["person_id"].tolist(),
+                                preserved_person_rows["tax_unit_id"].tolist(),
+                                strict=True,
+                            )
+                        }
+                    )
+                    next_tax_unit_id = (
+                        int(
+                            pd.to_numeric(
+                                preserved_tax_units["tax_unit_id"],
+                                errors="coerce",
+                            ).max()
+                        )
+                        + 1
+                    )
+
+        optimizer = TaxUnitOptimizer()
 
         for household_id in person_rows["household_id"].drop_duplicates().tolist():
+            if household_id in preserved_households:
+                continue
             hh_persons = person_rows[person_rows["household_id"] == household_id].copy()
             if hh_persons.empty:
                 continue
@@ -3649,7 +5334,7 @@ class USMicroplexPipeline:
     def _build_policyengine_tax_units_from_existing_ids(
         self,
         persons: pd.DataFrame,
-    ) -> tuple[pd.DataFrame, pd.DataFrame] | None:
+    ) -> tuple[pd.DataFrame, pd.DataFrame, set[Any]] | None:
         if "tax_unit_id" not in persons.columns or "person_id" not in persons.columns:
             return None
 
@@ -3658,14 +5343,23 @@ class USMicroplexPipeline:
             return None
 
         person_rows = persons.copy()
+        household_has_complete_tax_unit_ids = raw_tax_unit_id.notna().groupby(
+            person_rows["household_id"]
+        ).transform("all")
+        if not bool(household_has_complete_tax_unit_ids.any()):
+            return None
+
+        person_rows = person_rows.loc[household_has_complete_tax_unit_ids].copy()
+        raw_tax_unit_id = raw_tax_unit_id.loc[person_rows.index]
+        preserved_households = set(
+            person_rows["household_id"].drop_duplicates().tolist()
+        )
         tax_unit_key = pd.DataFrame(
             {
                 "household_id": person_rows["household_id"],
                 "tax_unit_id": raw_tax_unit_id,
             }
         )
-        if tax_unit_key["tax_unit_id"].isna().any():
-            return None
 
         households_per_tax_unit = (
             tax_unit_key.assign(_household_id=person_rows["household_id"])
@@ -3723,7 +5417,7 @@ class USMicroplexPipeline:
                 }
             )
 
-        return pd.DataFrame(tax_unit_rows), person_rows
+        return pd.DataFrame(tax_unit_rows), person_rows, preserved_households
 
     def _aggregate_policyengine_tax_unit_input_columns(
         self,

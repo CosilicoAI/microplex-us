@@ -653,7 +653,7 @@ def test_evaluate_policyengine_us_target_set_raises_on_strict_materialization_fa
         )
 
 
-def test_evaluate_policyengine_us_target_set_marks_cross_entity_constraints_unsupported():
+def test_evaluate_policyengine_us_target_set_supports_person_to_tax_unit_count_filters():
     report = evaluate_policyengine_us_target_set(
         _sample_tables(),
         [
@@ -671,9 +671,11 @@ def test_evaluate_policyengine_us_target_set_marks_cross_entity_constraints_unsu
         period=2024,
     )
 
-    assert report.supported_target_count == 0
-    assert len(report.evaluations) == 0
-    assert [target.name for target in report.unsupported_targets] == ["adult_tax_units"]
+    assert report.supported_target_count == 1
+    assert len(report.evaluations) == 1
+    assert report.evaluations[0].target.name == "adult_tax_units"
+    assert report.evaluations[0].actual_value == pytest.approx(3.0)
+    assert report.unsupported_targets == []
 
 
 def test_evaluate_policyengine_us_target_set_batches_supported_constraint_compilation(

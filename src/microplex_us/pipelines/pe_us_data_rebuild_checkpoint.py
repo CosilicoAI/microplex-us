@@ -65,10 +65,6 @@ if TYPE_CHECKING:
     )
 
 
-DEFAULT_POLICYENGINE_REBUILD_CALIBRATION_TARGET_VARIABLES = (
-    "person_count",
-    "household_count",
-)
 DEFAULT_CHECKPOINT_IMPUTATION_ABLATION_EVAL_FRACTION = 0.25
 MIN_CHECKPOINT_IMPUTATION_ABLATION_HOUSEHOLDS = 8
 
@@ -76,10 +72,7 @@ MIN_CHECKPOINT_IMPUTATION_ABLATION_HOUSEHOLDS = 8
 def _resolve_checkpoint_calibration_target_variables(
     calibration_target_variables: tuple[str, ...],
 ) -> tuple[str, ...]:
-    return (
-        tuple(calibration_target_variables)
-        or DEFAULT_POLICYENGINE_REBUILD_CALIBRATION_TARGET_VARIABLES
-    )
+    return tuple(calibration_target_variables)
 
 
 @dataclass(frozen=True)
@@ -298,9 +291,19 @@ def _checkpoint_post_calibration_metrics(
     *,
     production_variant: str,
 ) -> dict[str, dict[str, float]]:
+    calibration_summary = dict(manifest.get("calibration", {}))
     harness_summary = dict(manifest.get("policyengine_harness", {}))
     native_scores_summary = dict(manifest.get("policyengine_native_scores", {}))
     metrics: dict[str, float] = {}
+    for key in (
+        "full_oracle_capped_mean_abs_relative_error",
+        "full_oracle_mean_abs_relative_error",
+        "active_solve_capped_mean_abs_relative_error",
+        "active_solve_mean_abs_relative_error",
+    ):
+        value = calibration_summary.get(key)
+        if value is not None:
+            metrics[key] = float(value)
     for key in (
         "candidate_mean_abs_relative_error",
         "mean_abs_relative_error_delta",
@@ -950,6 +953,7 @@ def _build_checkpoint_benchmark_stage(
     extra_outputs: tuple[str, ...] = (),
 ) -> dict[str, Any]:
     artifacts = dict(manifest.get("artifacts", {}))
+    calibration_summary = dict(manifest.get("calibration", {}))
     harness_summary = dict(manifest.get("policyengine_harness", {}))
     native_scores_summary = dict(manifest.get("policyengine_native_scores", {}))
     imputation_ablation_summary = dict(manifest.get("imputation_ablation", {}))
@@ -978,6 +982,16 @@ def _build_checkpoint_benchmark_stage(
             else "missing"
         ),
         "metrics": [
+            {
+                "label": "Capped full oracle loss",
+                "value": calibration_summary.get(
+                    "full_oracle_capped_mean_abs_relative_error"
+                ),
+            },
+            {
+                "label": "Full oracle loss",
+                "value": calibration_summary.get("full_oracle_mean_abs_relative_error"),
+            },
             {
                 "label": "Harness delta",
                 "value": harness_summary.get("mean_abs_relative_error_delta"),
@@ -1046,20 +1060,26 @@ def _attach_checkpoint_registry_and_index(
     run_registry_metadata: dict[str, Any] | None,
 ) -> tuple[Path | None, Path | None]:
     if (
-        "policyengine_harness" not in manifest
+        manifest.get("calibration", {}).get("full_oracle_capped_mean_abs_relative_error")
+        is None
+        and manifest.get("calibration", {}).get("full_oracle_mean_abs_relative_error")
+        is None
+        and "policyengine_harness" not in manifest
         and "policyengine_native_scores" not in manifest
     ):
         return None, None
-
-    resolved_harness_payload = (
-        dict(harness_payload)
-        if harness_payload is not None
-        else (
-            json.loads(harness_path.read_text())
-            if harness_path is not None and harness_path.exists()
-            else None
+    if "policyengine_harness" not in manifest and "policyengine_native_scores" not in manifest:
+        resolved_harness_payload = None
+    else:
+        resolved_harness_payload = (
+            dict(harness_payload)
+            if harness_payload is not None
+            else (
+                json.loads(harness_path.read_text())
+                if harness_path is not None and harness_path.exists()
+                else None
+            )
         )
-    )
     resolved_run_registry_path = Path(
         run_registry_path or artifact_root.parent / "run_registry.jsonl"
     )
@@ -1100,17 +1120,31 @@ def _attach_checkpoint_registry_and_index(
         "improved_delta_frontier": recorded_entry.improved_delta_frontier,
         "improved_composite_frontier": recorded_entry.improved_composite_frontier,
         "improved_native_frontier": recorded_entry.improved_native_frontier,
-        "default_frontier_metric": (
-            "enhanced_cps_native_loss_delta"
-            if "policyengine_native_scores" in manifest
-            else "candidate_composite_parity_loss"
-        ),
+        "default_frontier_metric": _checkpoint_default_frontier_metric(manifest),
     }
     manifest["run_index"] = {
         "path": str(resolved_run_index_path),
         "artifact_id": recorded_entry.artifact_id,
     }
     return resolved_run_registry_path, resolved_run_index_path
+
+
+def _checkpoint_default_frontier_metric(manifest: dict[str, Any]) -> FrontierMetric:
+    if (
+        dict(manifest.get("calibration", {})).get(
+            "full_oracle_capped_mean_abs_relative_error"
+        )
+        is not None
+    ):
+        return "full_oracle_capped_mean_abs_relative_error"
+    if (
+        dict(manifest.get("calibration", {})).get("full_oracle_mean_abs_relative_error")
+        is not None
+    ):
+        return "full_oracle_mean_abs_relative_error"
+    if "policyengine_native_scores" in manifest:
+        return "enhanced_cps_native_loss_delta"
+    return "candidate_composite_parity_loss"
 
 
 def _load_checkpoint_versioned_artifacts(
@@ -1619,6 +1653,8 @@ def default_policyengine_us_data_rebuild_queries(
     cps_sample_n: int | None = None,
     puf_sample_n: int | None = None,
     donor_sample_n: int | None = None,
+    cps_state_age_floor: int | None = 1,
+    donor_state_age_floor: int | None = 1,
     random_seed: int = 0,
 ) -> dict[str, SourceQuery]:
     """Return default provider queries for a rebuild checkpoint smoke run."""
@@ -1648,11 +1684,22 @@ def default_policyengine_us_data_rebuild_queries(
             sample_n = resolved_donor_sample_n
         if sample_n is None:
             continue
+        provider_filters = {
+            "sample_n": int(sample_n),
+            "random_seed": int(random_seed),
+        }
+        if (
+            isinstance(provider, CPSASECSourceProvider)
+            and cps_state_age_floor is not None
+        ):
+            provider_filters["state_age_floor"] = int(cps_state_age_floor)
+        elif (
+            isinstance(provider, DonorSurveySourceProvider)
+            and donor_state_age_floor is not None
+        ):
+            provider_filters["state_age_floor"] = int(donor_state_age_floor)
         queries[provider.descriptor.name] = SourceQuery(
-            provider_filters={
-                "sample_n": int(sample_n),
-                "random_seed": int(random_seed),
-            }
+            provider_filters=provider_filters
         )
     return queries
 
@@ -1696,7 +1743,7 @@ def run_policyengine_us_data_rebuild_checkpoint(
     donor_sample_n: int | None = None,
     query_random_seed: int = 0,
     version_id: str | None = None,
-    frontier_metric: FrontierMetric = "enhanced_cps_native_loss_delta",
+    frontier_metric: FrontierMetric = "full_oracle_capped_mean_abs_relative_error",
     policyengine_comparison_cache: PolicyEngineUSComparisonCache | None = None,
     policyengine_target_provider: TargetProvider | None = None,
     policyengine_harness_slices: (
@@ -1840,6 +1887,7 @@ def run_policyengine_us_data_rebuild_checkpoint(
         run_registry_path=run_registry_path,
         run_index_path=run_index_path,
         run_registry_metadata=resolved_registry_metadata,
+        enable_child_tax_unit_agi_drift=True,
     )
     evidence = attach_policyengine_us_data_rebuild_checkpoint_evidence(
         artifacts.artifact_paths.output_dir,

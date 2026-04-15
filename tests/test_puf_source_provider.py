@@ -398,7 +398,6 @@ def test_uprate_mapped_puf_with_pe_factors_uses_aliases_and_recomputes(tmp_path)
     assert result["tax_exempt_pension_income"].tolist() == pytest.approx([5.4])
     assert result["total_pension_income"].tolist() == pytest.approx([17.3])
 
-
 def test_puf_source_provider_pe_soi_mode_uses_raw_uprating(tmp_path):
     repo_root = tmp_path / "pe-us-data"
     storage = repo_root / "policyengine_us_data" / "storage"
@@ -475,7 +474,7 @@ def test_expand_to_persons_uses_pe_demographic_helpers_when_present():
             "exemptions_count": [2, 3],
             "_puf_recid": [101, 202],
             "_puf_agerange": [4, 5],
-            "_puf_earnsplit": [0, 0],
+            "_puf_earnsplit": [2, 0],
             "_puf_gender": [1, 2],
             "_puf_agedp1": [2, 4],
             "_puf_agedp2": [3, 6],
@@ -484,27 +483,36 @@ def test_expand_to_persons_uses_pe_demographic_helpers_when_present():
     )
 
     persons = expand_to_persons(tax_units).sort_values("person_id").reset_index(drop=True)
+    persons_repeat = expand_to_persons(tax_units).sort_values("person_id").reset_index(drop=True)
+
+    pd.testing.assert_frame_equal(persons, persons_repeat)
 
     assert persons["person_id"].tolist() == ["101:1", "101:2", "202:1", "202:3", "202:4"]
     assert persons["tax_unit_id"].tolist() == ["101", "101", "202", "202", "202"]
 
     head = persons.loc[persons["person_id"] == "101:1"].iloc[0]
     spouse = persons.loc[persons["person_id"] == "101:2"].iloc[0]
+    single = persons.loc[persons["person_id"] == "202:1"].iloc[0]
     dependent_1 = persons.loc[persons["person_id"] == "202:3"].iloc[0]
     dependent_2 = persons.loc[persons["person_id"] == "202:4"].iloc[0]
 
-    assert head["employment_income"] == 100.0
-    assert spouse["employment_income"] == 0.0
-    assert head["pre_tax_contributions"] == 20.0
-    assert spouse["pre_tax_contributions"] == 0.0
+    assert head["employment_income"] == pytest.approx(27.825327362979824)
+    assert spouse["employment_income"] == pytest.approx(72.17467263702018)
+    assert head["pre_tax_contributions"] == pytest.approx(5.565065472595965)
+    assert spouse["pre_tax_contributions"] == pytest.approx(14.434934527404035)
     assert head["age"] == 50
     assert spouse["age"] == 50
+    assert spouse["is_male"] == 0.0
+    assert single["age"] == 60
+    assert single["is_male"] == 0.0
     assert dependent_1["is_dependent"] == 1
     assert dependent_2["is_dependent"] == 1
     assert dependent_1["employment_income"] == 0.0
     assert dependent_2["employment_income"] == 0.0
     assert dependent_1["age"] == 18
     assert dependent_2["age"] == 27
+    assert dependent_1["is_male"] == 0.0
+    assert dependent_2["is_male"] == 0.0
 
 
 def test_expand_to_persons_clears_status_flags_for_non_head_members():
@@ -925,6 +933,11 @@ def test_map_puf_variables_can_impute_pre_tax_contributions_via_policyengine_sub
     monkeypatch.setattr(puf_module, "resolve_policyengine_us_data_python", _resolve_python)
     monkeypatch.setattr(puf_module, "build_policyengine_us_data_subprocess_env", _build_env)
     monkeypatch.setattr(puf_module.subprocess, "run", _run)
+    monkeypatch.setattr(
+        puf_module,
+        "_load_pe_extended_cps_pre_tax_training_frame",
+        lambda **_kwargs: (_ for _ in ()).throw(FileNotFoundError("missing h5")),
+    )
 
     mapped = map_puf_variables(
         raw,
@@ -1128,3 +1141,20 @@ def test_puf_sampling_falls_back_to_uniform_when_weighted_sampling_is_infeasible
     )
 
     assert len(sampled) == 2
+
+
+def test_puf_sampling_uses_raw_s006_weights_when_weight_column_missing():
+    tax_units = pd.DataFrame(
+        {
+            "household_id": [1, 2, 3],
+            "S006": [0.0, 0.0, 100.0],
+        }
+    )
+
+    sampled = _sample_tax_units(
+        tax_units,
+        sample_n=1,
+        random_seed=42,
+    )
+
+    assert sampled["household_id"].tolist() == [3]

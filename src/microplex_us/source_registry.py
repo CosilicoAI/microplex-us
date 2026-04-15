@@ -78,6 +78,11 @@ PUF_SOURCE_VARIABLE_POLICY = SourceVariablePolicySpec(
             usable_as_condition=False,
             notes="PUF wage income is source-native but should not be used as a shared donor condition.",
         ),
+        "filing_status_code": SourceVariablePolicy(
+            authoritative=True,
+            usable_as_condition=False,
+            notes="PUF filing status is source-native tax-unit structure and should survive rebuild donor integration.",
+        ),
     },
 )
 

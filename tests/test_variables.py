@@ -116,8 +116,8 @@ def test_donor_imputation_blocks_keep_dividends_in_one_composition_block():
         {
             "qualified_dividend_income",
             "non_qualified_dividend_income",
-            "partnership_s_corp_income",
             "taxable_interest_income",
+            "partnership_s_corp_income",
         }
     )
 
@@ -330,6 +330,7 @@ def test_partnership_income_semantics_remain_person_native():
 def test_sparse_irs_tax_variables_use_puf_irs_predictors():
     from microplex_us.variables import (
         PUF_IRS_TAX_PREFERRED_CONDITION_VARS,
+        PUF_IRS_TAX_SUPPLEMENTAL_SHARED_CONDITION_VARS,
         variable_semantic_spec_for,
     )
 
@@ -351,6 +352,29 @@ def test_sparse_irs_tax_variables_use_puf_irs_predictors():
         assert (
             variable_semantic_spec_for(variable_name).preferred_condition_vars
             == PUF_IRS_TAX_PREFERRED_CONDITION_VARS
+        )
+        assert (
+            variable_semantic_spec_for(variable_name).supplemental_shared_condition_vars
+            == PUF_IRS_TAX_SUPPLEMENTAL_SHARED_CONDITION_VARS
+        )
+
+    assert PUF_IRS_TAX_SUPPLEMENTAL_SHARED_CONDITION_VARS == ()
+
+
+def test_rental_income_components_use_sparse_asset_conditioning():
+    from microplex_us.variables import (
+        RENTAL_INCOME_COMPONENT_PREFERRED_CONDITION_VARS,
+        variable_semantic_spec_for,
+    )
+
+    for variable_name in ("rental_income_positive", "rental_income_negative"):
+        spec = variable_semantic_spec_for(variable_name)
+        assert spec.support_family is VariableSupportFamily.ZERO_INFLATED_POSITIVE
+        assert spec.donor_match_strategy is DonorMatchStrategy.ZERO_INFLATED_POSITIVE
+        assert spec.condition_score_mode is ConditionScoreMode.VALUE_AND_SUPPORT
+        assert (
+            spec.preferred_condition_vars
+            == RENTAL_INCOME_COMPONENT_PREFERRED_CONDITION_VARS
         )
 
 

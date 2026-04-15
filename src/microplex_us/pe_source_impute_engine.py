@@ -78,7 +78,11 @@ class PESourceImputePreparedBlockInputs:
 
     donor_fit_source: pd.DataFrame
     current_generation_source: pd.DataFrame
+    raw_shared_vars: tuple[str, ...]
+    shared_vars_after_model_exclusion: tuple[str, ...]
     shared_vars_for_block: tuple[str, ...]
+    entity_compatible_shared_vars: tuple[str, ...]
+    projection_applied: bool
     entity_key: str | None
     condition_surface: PESourceImputeConditionSurface | None
 
@@ -162,15 +166,19 @@ class PESourceImputeBlockEngine:
             for variable in shared_vars
             if variable not in donor_block_spec.model_variables
         ]
+        shared_vars_after_model_exclusion = tuple(shared_vars_for_block)
+        entity_compatible_shared_vars: tuple[str, ...] = ()
         donor_fit_source = donor_working
         current_generation_source = current_frame
         entity_key = entity_key_fn(donor_block_spec.native_entity)
+        projection_applied = False
 
         if can_project_to_entity(
             current_frame,
             donor_working,
             donor_block_spec.native_entity,
         ):
+            projection_applied = True
             entity_compatible_shared_vars = [
                 variable
                 for variable in shared_vars
@@ -182,6 +190,7 @@ class PESourceImputeBlockEngine:
             ]
             if entity_compatible_shared_vars:
                 shared_vars_for_block = entity_compatible_shared_vars
+            entity_compatible_shared_vars = tuple(entity_compatible_shared_vars)
             donor_fit_source = project_frame_to_entity(
                 donor_working,
                 entity=donor_block_spec.native_entity,
@@ -209,7 +218,11 @@ class PESourceImputeBlockEngine:
         return PESourceImputePreparedBlockInputs(
             donor_fit_source=donor_fit_source,
             current_generation_source=current_generation_source,
+            raw_shared_vars=tuple(shared_vars),
+            shared_vars_after_model_exclusion=shared_vars_after_model_exclusion,
             shared_vars_for_block=tuple(shared_vars_for_block),
+            entity_compatible_shared_vars=entity_compatible_shared_vars,
+            projection_applied=projection_applied,
             entity_key=entity_key,
             condition_surface=condition_surface,
         )

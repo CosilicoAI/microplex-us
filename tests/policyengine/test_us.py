@@ -284,6 +284,131 @@ class TestPolicyEngineUSDBTargetProvider:
         assert [target.target_id for target in national_targets] == [10]
         assert [target.target_id for target in state_targets] == [11]
 
+    def test_load_targets_supports_multi_domain_target_cells(self, tmp_path):
+        db_path = tmp_path / "policy_data.db"
+        conn = sqlite3.connect(db_path)
+        conn.executescript(
+            """
+            CREATE TABLE strata (
+                stratum_id INTEGER PRIMARY KEY,
+                definition_hash TEXT,
+                parent_stratum_id INTEGER
+            );
+
+            CREATE TABLE stratum_constraints (
+                stratum_id INTEGER NOT NULL,
+                constraint_variable TEXT NOT NULL,
+                operation TEXT NOT NULL,
+                value TEXT NOT NULL
+            );
+
+            CREATE TABLE targets (
+                target_id INTEGER PRIMARY KEY,
+                variable TEXT NOT NULL,
+                period INTEGER NOT NULL,
+                stratum_id INTEGER NOT NULL,
+                reform_id INTEGER NOT NULL DEFAULT 0,
+                value REAL,
+                active BOOLEAN NOT NULL DEFAULT 1,
+                tolerance REAL,
+                source TEXT,
+                notes TEXT
+            );
+
+            CREATE VIEW target_overview AS
+            SELECT
+                t.target_id,
+                t.stratum_id,
+                t.variable,
+                t.value,
+                t.period,
+                t.active,
+                'state' AS geo_level,
+                '06' AS geographic_id,
+                'eitc,eitc_child_count' AS domain_variable
+            FROM targets AS t;
+            """
+        )
+        constraints = (
+            PolicyEngineUSConstraint("state_fips", "==", "06"),
+            PolicyEngineUSConstraint("tax_unit_is_filer", "==", "1"),
+            PolicyEngineUSConstraint("eitc", ">", "0"),
+            PolicyEngineUSConstraint("eitc_child_count", "==", "2"),
+        )
+        conn.execute(
+            """
+            INSERT INTO strata (stratum_id, definition_hash, parent_stratum_id)
+            VALUES (?, ?, ?)
+            """,
+            (
+                1,
+                compute_policyengine_us_definition_hash(constraints),
+                None,
+            ),
+        )
+        conn.executemany(
+            """
+            INSERT INTO stratum_constraints (
+                stratum_id,
+                constraint_variable,
+                operation,
+                value
+            ) VALUES (?, ?, ?, ?)
+            """,
+            [(1, c.variable, c.operation, c.value) for c in constraints],
+        )
+        conn.execute(
+            """
+            INSERT INTO targets (
+                target_id,
+                variable,
+                period,
+                stratum_id,
+                reform_id,
+                value,
+                active,
+                tolerance,
+                source,
+                notes
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                20,
+                "tax_unit_count",
+                2024,
+                1,
+                0,
+                123.0,
+                1,
+                5.0,
+                "IRS SOI",
+                "California EITC recipients with two children",
+            ),
+        )
+        conn.commit()
+        conn.close()
+
+        provider = PolicyEngineUSDBTargetProvider(db_path)
+
+        targets = provider.load_targets(
+            period=2024,
+            target_cells=[
+                {
+                    "variable": "tax_unit_count",
+                    "geo_level": "state",
+                    "domain_variable": "eitc_child_count",
+                }
+            ],
+        )
+        by_domain = provider.load_targets(
+            period=2024,
+            variables=["tax_unit_count"],
+            domain_variables=["eitc_child_count"],
+        )
+
+        assert [target.target_id for target in targets] == [20]
+        assert [target.target_id for target in by_domain] == [20]
+
     def test_load_targets_allows_geographic_hierarchy_without_literal_inheritance(
         self,
         tmp_path,
@@ -1040,6 +1165,71 @@ class TestPolicyEngineUSConstraintCompilation:
         np.testing.assert_allclose(
             constraints[0].coefficients,
             np.array([100.0, 300.0]),
+        )
+
+    def test_count_targets_align_person_constraints_to_tax_unit_rows(self):
+        tables = PolicyEngineUSEntityTableBundle(
+            households=pd.DataFrame(
+                {
+                    "household_id": [1, 2],
+                    "weight": [1.0, 1.0],
+                }
+            ),
+            persons=pd.DataFrame(
+                {
+                    "person_id": [10, 11, 12],
+                    "household_id": [1, 1, 2],
+                    "tax_unit_id": [100, 101, 200],
+                    "dividend_income": [100.0, 200.0, 300.0],
+                }
+            ),
+            tax_units=pd.DataFrame(
+                {
+                    "tax_unit_id": [100, 101, 200],
+                    "household_id": [1, 1, 2],
+                    "tax_unit_is_filer": [1, 0, 1],
+                }
+            ),
+        )
+
+        constraints = compile_policyengine_us_household_linear_constraints(
+            targets=(
+                TargetSpec(
+                    name="filer_tax_units_with_dividends",
+                    entity=EntityType.TAX_UNIT,
+                    value=2.0,
+                    period=2024,
+                    aggregation=TargetAggregation.COUNT,
+                    filters=(
+                        TargetFilter(
+                            feature="dividend_income",
+                            operator=">",
+                            value=0.0,
+                        ),
+                        TargetFilter(
+                            feature="tax_unit_is_filer",
+                            operator="==",
+                            value=1,
+                        ),
+                    ),
+                ),
+            ),
+            tables=tables,
+            variable_bindings={
+                "dividend_income": PolicyEngineUSVariableBinding(
+                    entity=EntityType.PERSON,
+                    column="dividend_income",
+                ),
+                "tax_unit_is_filer": PolicyEngineUSVariableBinding(
+                    entity=EntityType.TAX_UNIT,
+                    column="tax_unit_is_filer",
+                ),
+            },
+        )
+
+        np.testing.assert_allclose(
+            constraints[0].coefficients,
+            np.array([1.0, 1.0]),
         )
 
     def test_materializes_formula_variables_before_compiling_constraints(self, tmp_path):
@@ -1846,6 +2036,7 @@ class TestPolicyEngineUSProjection:
         assert "health_savings_account_ald" in SAFE_POLICYENGINE_US_EXPORT_VARIABLES
         assert "non_sch_d_capital_gains" not in SAFE_POLICYENGINE_US_EXPORT_VARIABLES
         assert "receives_wic" in SAFE_POLICYENGINE_US_EXPORT_VARIABLES
+        assert "ssn_card_type" in SAFE_POLICYENGINE_US_EXPORT_VARIABLES
         assert "is_separated" in SAFE_POLICYENGINE_US_EXPORT_VARIABLES
         assert "is_surviving_spouse" in SAFE_POLICYENGINE_US_EXPORT_VARIABLES
         assert "self_employed_health_insurance_ald" not in SAFE_POLICYENGINE_US_EXPORT_VARIABLES
@@ -1996,6 +2187,31 @@ class TestPolicyEngineUSProjection:
             assert set(handle.keys()) == {"age", "person_id", "state_code"}
             assert np.array_equal(handle["age"]["2024"][:], np.array([34, 12]))
             assert handle["state_code"]["2024"].dtype.kind == "S"
+
+    def test_build_time_period_arrays_defaults_missing_ssn_card_type_to_citizen(self):
+        tables = PolicyEngineUSEntityTableBundle(
+            households=pd.DataFrame(
+                {
+                    "household_id": [10, 20],
+                    "household_weight": [1.0, 1.0],
+                }
+            ),
+            persons=pd.DataFrame(
+                {
+                    "person_id": [1, 2],
+                    "household_id": [10, 20],
+                    "ssn_card_type": ["NONE", None],
+                }
+            ),
+        )
+
+        arrays = build_policyengine_us_time_period_arrays(
+            tables,
+            period=2024,
+            person_variable_map={"ssn_card_type": "ssn_card_type"},
+        )
+
+        assert arrays["ssn_card_type"]["2024"].tolist() == [b"NONE", b"CITIZEN"]
 
 
 class TestUSPipelinePolicyEngineTargets:

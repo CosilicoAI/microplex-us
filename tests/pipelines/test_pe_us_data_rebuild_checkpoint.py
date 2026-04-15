@@ -43,6 +43,17 @@ def test_default_policyengine_us_data_rebuild_checkpoint_config_sets_pe_context(
     assert config.synthesis_backend == "seed"
     assert config.calibration_backend == "entropy"
     assert config.policyengine_calibration_min_active_households == 20
+    assert config.policyengine_calibration_deferred_stage_min_active_households == (
+        10,
+        1,
+    )
+    assert config.policyengine_calibration_deferred_stage_max_constraints == 24
+    assert (
+        config.policyengine_calibration_deferred_stage_min_full_oracle_capped_mean_abs_relative_error
+        is None
+    )
+    assert config.policyengine_calibration_deferred_stage_top_family_count == 7
+    assert config.policyengine_calibration_deferred_stage_top_geography_count == 4
     assert config.donor_imputer_backend == "qrf"
     assert config.donor_imputer_condition_selection == "pe_prespecified"
     assert config.donor_imputer_excluded_variables == ()
@@ -52,10 +63,8 @@ def test_default_policyengine_us_data_rebuild_checkpoint_config_sets_pe_context(
     assert config.policyengine_target_period == 2024
     assert config.policyengine_target_profile == "pe_native_broad"
     assert config.policyengine_calibration_target_profile == "pe_native_broad"
-    assert config.policyengine_calibration_target_variables == (
-        "person_count",
-        "household_count",
-    )
+    assert config.policyengine_calibration_target_variables == ()
+    assert config.policyengine_oracle_relative_error_cap == 10.0
     assert config.policyengine_direct_override_variables == (
         "health_savings_account_ald",
         "non_sch_d_capital_gains",
@@ -199,6 +208,7 @@ def test_default_policyengine_us_data_rebuild_queries_assign_sample_sizes_by_pro
     assert queries[providers[0].descriptor.name].provider_filters == {
         "sample_n": 11,
         "random_seed": 7,
+        "state_age_floor": 1,
     }
     assert queries[providers[1].descriptor.name].provider_filters == {
         "sample_n": 22,
@@ -208,6 +218,7 @@ def test_default_policyengine_us_data_rebuild_queries_assign_sample_sizes_by_pro
         assert queries[provider.descriptor.name].provider_filters == {
             "sample_n": 33,
             "random_seed": 7,
+            "state_age_floor": 1,
         }
 
 
@@ -226,11 +237,39 @@ def test_default_policyengine_us_data_rebuild_queries_derive_donor_sample_size_f
         random_seed=7,
     )
 
+    assert queries[providers[0].descriptor.name].provider_filters == {
+        "sample_n": 11,
+        "random_seed": 7,
+        "state_age_floor": 1,
+    }
     for provider in providers[2:]:
         assert queries[provider.descriptor.name].provider_filters == {
             "sample_n": 22,
             "random_seed": 7,
+            "state_age_floor": 1,
         }
+
+
+def test_default_policyengine_us_data_rebuild_queries_can_disable_cps_state_age_floor() -> (
+    None
+):
+    providers = default_policyengine_us_data_rebuild_source_providers(
+        include_donor_surveys=False,
+        cps_download=False,
+    )
+
+    queries = default_policyengine_us_data_rebuild_queries(
+        providers,
+        cps_sample_n=11,
+        puf_sample_n=22,
+        cps_state_age_floor=None,
+        random_seed=7,
+    )
+
+    assert queries[providers[0].descriptor.name].provider_filters == {
+        "sample_n": 11,
+        "random_seed": 7,
+    }
 
 
 @dataclass(frozen=True)
@@ -275,6 +314,7 @@ def test_run_policyengine_us_data_rebuild_checkpoint_builds_bundle_and_parity(
         run_registry_path,
         run_index_path,
         run_registry_metadata,
+        enable_child_tax_unit_agi_drift,
     ):
         captured.update(
             {
@@ -289,6 +329,7 @@ def test_run_policyengine_us_data_rebuild_checkpoint_builds_bundle_and_parity(
                 "run_registry_metadata": run_registry_metadata,
                 "defer_policyengine_harness": defer_policyengine_harness,
                 "defer_policyengine_native_score": defer_policyengine_native_score,
+                "enable_child_tax_unit_agi_drift": enable_child_tax_unit_agi_drift,
             }
         )
         manifest = {
@@ -310,6 +351,8 @@ def test_run_policyengine_us_data_rebuild_checkpoint_builds_bundle_and_parity(
                 "converged": True,
                 "n_loaded_targets": 1,
                 "n_supported_targets": 1,
+                "full_oracle_capped_mean_abs_relative_error": 0.12,
+                "full_oracle_mean_abs_relative_error": 0.12,
             },
             "artifacts": {
                 "seed_data": "seed_data.parquet",
@@ -421,6 +464,8 @@ def test_run_policyengine_us_data_rebuild_checkpoint_builds_bundle_and_parity(
                     "policyengine_harness_path": str(
                         (artifact_root / "policyengine_harness.json").resolve()
                     ),
+                    "full_oracle_capped_mean_abs_relative_error": 0.12,
+                    "full_oracle_mean_abs_relative_error": 0.12,
                     "enhanced_cps_native_loss_delta": 0.5,
                 }
             )
@@ -499,7 +544,7 @@ def test_run_policyengine_us_data_rebuild_checkpoint_builds_bundle_and_parity(
     assert captured["providers"] == [provider]
     assert captured["queries"] == {"fake_source": query}
     assert captured["version_id"] == "run-1"
-    assert captured["frontier_metric"] == "enhanced_cps_native_loss_delta"
+    assert captured["frontier_metric"] == "full_oracle_capped_mean_abs_relative_error"
     assert captured["policyengine_baseline_dataset"] == "/tmp/enhanced_cps_2024.h5"
     assert captured["config"].policyengine_targets_db == "/tmp/policy_data.db"
     assert (
@@ -514,6 +559,7 @@ def test_run_policyengine_us_data_rebuild_checkpoint_builds_bundle_and_parity(
     )
     assert captured["defer_policyengine_harness"] is True
     assert captured["defer_policyengine_native_score"] is True
+    assert captured["enable_child_tax_unit_agi_drift"] is True
     assert captured["policyengine_harness_metadata"]["rebuild_checkpoint"] is True
     assert captured["policyengine_harness_metadata"]["rebuild_program_id"] == (
         "pe-us-data-rebuild-v1"
@@ -688,6 +734,8 @@ def test_attach_policyengine_us_data_rebuild_checkpoint_evidence_updates_manifes
             "converged": True,
             "n_loaded_targets": 1,
             "n_supported_targets": 1,
+            "full_oracle_capped_mean_abs_relative_error": 0.12,
+            "full_oracle_mean_abs_relative_error": 0.12,
         },
         "artifacts": {
             "seed_data": "seed_data.parquet",
@@ -856,6 +904,9 @@ def test_attach_policyengine_us_data_rebuild_checkpoint_evidence_updates_manifes
         written_manifest["policyengine_native_scores"]["enhanced_cps_native_loss_delta"]
         == 0.10
     )
+    assert written_manifest["run_registry"]["default_frontier_metric"] == (
+        "full_oracle_capped_mean_abs_relative_error"
+    )
     assert (
         written_manifest["imputation_ablation"]["production_mean_weighted_mae"] == 0.21
     )
@@ -871,6 +922,8 @@ def test_attach_policyengine_us_data_rebuild_checkpoint_evidence_updates_manifes
     assert (tmp_path / "run_index.duckdb").exists()
     assert len(registry_entries) == 1
     assert registry_entries[0].artifact_id == "artifact"
+    assert registry_entries[0].full_oracle_capped_mean_abs_relative_error == 0.12
+    assert registry_entries[0].full_oracle_mean_abs_relative_error == 0.12
     assert registry_entries[0].metadata["checkpoint_test"] is True
     assert benchmark_stage["status"] == "ready"
     assert benchmark_stage["outputs"] == [
@@ -880,11 +933,98 @@ def test_attach_policyengine_us_data_rebuild_checkpoint_evidence_updates_manifes
         "pe_us_data_rebuild_native_audit.json",
     ]
     assert {metric["label"]: metric["value"] for metric in benchmark_stage["metrics"]}[
+        "Capped full oracle loss"
+    ] == 0.12
+    assert {metric["label"]: metric["value"] for metric in benchmark_stage["metrics"]}[
+        "Full oracle loss"
+    ] == 0.12
+    assert {metric["label"]: metric["value"] for metric in benchmark_stage["metrics"]}[
         "Imputation MAE"
     ] == 0.21
     assert {metric["label"]: metric["value"] for metric in benchmark_stage["metrics"]}[
         "Imputation F1"
     ] == 0.88
+
+
+def test_attach_policyengine_us_data_rebuild_checkpoint_evidence_registers_calibration_only_runs(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    artifact_dir = tmp_path / "artifact"
+    artifact_dir.mkdir()
+    manifest = {
+        "created_at": "2026-04-06T00:00:00+00:00",
+        "config": default_policyengine_us_data_rebuild_checkpoint_config(
+            policyengine_baseline_dataset="/tmp/enhanced_cps_2024.h5",
+            policyengine_targets_db="/tmp/policy_data.db",
+            target_period=2024,
+        ).to_dict(),
+        "rows": {"seed": 10, "synthetic": 20, "calibrated": 20},
+        "weights": {"nonzero": 20, "total": 20.0},
+        "targets": {"n_marginal_groups": 1, "n_continuous": 0},
+        "synthesis": {"source_names": ["cps_asec_2023", "irs_soi_puf"]},
+        "calibration": {
+            "converged": True,
+            "n_loaded_targets": 1,
+            "n_supported_targets": 1,
+            "full_oracle_capped_mean_abs_relative_error": 0.12,
+            "full_oracle_mean_abs_relative_error": 0.12,
+        },
+        "artifacts": {
+            "seed_data": "seed_data.parquet",
+            "synthetic_data": "synthetic_data.parquet",
+            "calibrated_data": "calibrated_data.parquet",
+            "targets": "targets.json",
+            "policyengine_dataset": "policyengine_us.h5",
+        },
+    }
+    (artifact_dir / "manifest.json").write_text(json.dumps(manifest))
+    (artifact_dir / "data_flow_snapshot.json").write_text(
+        json.dumps({"schemaVersion": 1, "stages": []})
+    )
+    for name in (
+        "seed_data.parquet",
+        "synthetic_data.parquet",
+        "calibrated_data.parquet",
+        "targets.json",
+        "policyengine_us.h5",
+    ):
+        (artifact_dir / name).write_text("{}")
+
+    module_name = "microplex_us.pipelines.pe_us_data_rebuild_checkpoint"
+    monkeypatch.setattr(
+        f"{module_name}.write_policyengine_us_data_rebuild_parity_artifact",
+        lambda artifact_dir_arg, **kwargs: (
+            Path(artifact_dir_arg) / "pe_us_data_rebuild_parity.json"
+        ),
+    )
+    monkeypatch.setattr(
+        f"{module_name}.build_policyengine_us_data_rebuild_parity_artifact",
+        lambda artifact_dir_arg, **kwargs: {
+            "artifactId": Path(artifact_dir_arg).name,
+            "verdict": {"hasRealPolicyEngineComparison": False},
+        },
+    )
+
+    attach_policyengine_us_data_rebuild_checkpoint_evidence(
+        artifact_dir,
+        compute_harness=False,
+        compute_native_scores=False,
+        compute_native_audit=False,
+        compute_imputation_ablation=False,
+        run_registry_path=tmp_path / "run_registry.jsonl",
+        run_index_path=tmp_path,
+    )
+
+    written_manifest = json.loads((artifact_dir / "manifest.json").read_text())
+    registry_entries = load_us_microplex_run_registry(tmp_path / "run_registry.jsonl")
+
+    assert written_manifest["run_registry"]["default_frontier_metric"] == (
+        "full_oracle_capped_mean_abs_relative_error"
+    )
+    assert registry_entries[0].artifact_id == "artifact"
+    assert registry_entries[0].full_oracle_capped_mean_abs_relative_error == 0.12
+    assert registry_entries[0].full_oracle_mean_abs_relative_error == 0.12
 
 
 def test_attach_policyengine_us_data_rebuild_checkpoint_evidence_computes_imputation_ablation_with_build_result(
@@ -916,6 +1056,8 @@ def test_attach_policyengine_us_data_rebuild_checkpoint_evidence_computes_imputa
             "converged": True,
             "n_loaded_targets": 1,
             "n_supported_targets": 1,
+            "full_oracle_capped_mean_abs_relative_error": 0.12,
+            "full_oracle_mean_abs_relative_error": 0.12,
         },
         "artifacts": {
             "seed_data": "seed_data.parquet",

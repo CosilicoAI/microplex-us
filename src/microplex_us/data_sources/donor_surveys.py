@@ -27,6 +27,10 @@ from microplex.core import (
     apply_source_query,
 )
 
+from microplex_us.data_sources.sampling import (
+    sample_frame_with_state_floor,
+    sample_frame_without_replacement,
+)
 from microplex_us.pe_source_impute_specs import (
     PEPolicyengineDatasetLoaderSpec,
     PESourceImputeBlockSpec,
@@ -149,15 +153,36 @@ def _build_static_descriptor(
 
 def _ensure_person_ids(persons: pd.DataFrame) -> pd.DataFrame:
     result = persons.copy()
-    if "person_id" in result.columns:
+    if "person_id" not in result.columns:
+        if "household_id" in result.columns:
+            result["person_id"] = (
+                result["household_id"].astype(str)
+                + ":"
+                + result.groupby("household_id").cumcount().add(1).astype(str)
+            )
+            return result
+        result["person_id"] = np.arange(len(result)).astype(str)
         return result
+
+    if not result["person_id"].duplicated().any():
+        return result
+
     if "household_id" in result.columns:
+        composite = (
+            result["household_id"].astype(str)
+            + ":"
+            + result["person_id"].astype(str)
+        )
+        if not composite.duplicated().any():
+            result["person_id"] = composite
+            return result
         result["person_id"] = (
             result["household_id"].astype(str)
             + ":"
             + result.groupby("household_id").cumcount().add(1).astype(str)
         )
         return result
+
     result["person_id"] = np.arange(len(result)).astype(str)
     return result
 
@@ -168,32 +193,142 @@ def _sample_households_and_persons(
     persons: pd.DataFrame,
     sample_n: int | None,
     random_seed: int,
+    state_floor: int | None = None,
+    state_age_floor: int | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     households = households.reset_index(drop=True)
     persons = persons.reset_index(drop=True)
     if sample_n is None or sample_n >= len(households):
         return households, persons
-    sample_weights: pd.Series | None = None
-    if "household_weight" in households.columns:
-        candidate_weights = (
-            pd.to_numeric(households["household_weight"], errors="coerce")
-            .fillna(0.0)
-            .clip(lower=0.0)
-        )
-        if candidate_weights.sum() > 0.0 and int((candidate_weights > 0.0).sum()) >= sample_n:
-            sample_weights = candidate_weights
-    sampled_households = households.sample(
-        n=sample_n,
-        random_state=random_seed,
-        replace=False,
-        weights=sample_weights,
-    ).copy()
+    sampled_households = _sample_donor_households(
+        households=households,
+        persons=persons,
+        sample_n=sample_n,
+        random_seed=random_seed,
+        state_floor=state_floor,
+        state_age_floor=state_age_floor,
+    )
     keep = set(sampled_households["household_id"])
     sampled_persons = persons[persons["household_id"].isin(keep)].copy()
     return (
         sampled_households.sort_values(["household_id"]).reset_index(drop=True),
         sampled_persons.sort_values(["household_id", "person_id"]).reset_index(drop=True),
     )
+
+
+def _sample_donor_households(
+    *,
+    households: pd.DataFrame,
+    persons: pd.DataFrame,
+    sample_n: int | None,
+    random_seed: int,
+    state_floor: int | None = None,
+    state_age_floor: int | None = None,
+) -> pd.DataFrame:
+    resolved_state_age_floor = int(state_age_floor or 0)
+    if (
+        resolved_state_age_floor <= 0
+        or "state_fips" not in households.columns
+        or "age" not in persons.columns
+        or "household_id" not in households.columns
+        or "household_id" not in persons.columns
+    ):
+        return sample_frame_with_state_floor(
+            households,
+            sample_n=sample_n,
+            random_seed=random_seed,
+            weight_col="household_weight",
+            state_floor=state_floor,
+            positive_only_when_weighted=True,
+        )
+
+    coverage = persons[["household_id", "age"]].merge(
+        households[["household_id", "state_fips"]],
+        on="household_id",
+        how="inner",
+    )
+    coverage["age_band"] = coverage["age"].map(_donor_age_band_key)
+    coverage["state_fips"] = pd.to_numeric(
+        coverage["state_fips"], errors="coerce"
+    ).astype("Int64")
+    coverage = coverage.dropna(subset=["state_fips", "age_band"]).copy()
+    if coverage.empty:
+        return sample_frame_with_state_floor(
+            households,
+            sample_n=sample_n,
+            random_seed=random_seed,
+            weight_col="household_weight",
+            state_floor=state_floor,
+            positive_only_when_weighted=True,
+        )
+
+    rng = np.random.default_rng(random_seed)
+    selected_ids: set[str | int] = set()
+    for _, group in coverage.groupby(["state_fips", "age_band"], sort=True):
+        group_household_ids = pd.Index(group["household_id"].unique())
+        already_selected = [hid for hid in group_household_ids if hid in selected_ids]
+        missing = resolved_state_age_floor - len(already_selected)
+        if missing <= 0:
+            continue
+        available_ids = [hid for hid in group_household_ids if hid not in selected_ids]
+        if not available_ids:
+            continue
+        candidate_households = households[
+            households["household_id"].isin(available_ids)
+        ].copy()
+        sampled = sample_frame_without_replacement(
+            candidate_households,
+            sample_n=min(missing, len(candidate_households)),
+            random_seed=int(rng.integers(0, np.iinfo(np.int32).max)),
+            weight_col="household_weight",
+            positive_only_when_weighted=True,
+        )
+        selected_ids.update(sampled["household_id"].tolist())
+
+    if sample_n is not None and len(selected_ids) > sample_n:
+        raise ValueError(
+            "state_age_floor requires more sampled donor households than sample_n allows: "
+            f"selected={len(selected_ids)}, sample_n={sample_n}"
+        )
+
+    if not selected_ids:
+        return sample_frame_with_state_floor(
+            households,
+            sample_n=sample_n,
+            random_seed=random_seed,
+            weight_col="household_weight",
+            state_floor=state_floor,
+            positive_only_when_weighted=True,
+        )
+
+    selected = households[households["household_id"].isin(selected_ids)].copy()
+    remaining_n = int(sample_n) - len(selected)
+    if remaining_n <= 0:
+        return selected
+
+    remainder = households[~households["household_id"].isin(selected_ids)].copy()
+    remainder_sample = sample_frame_without_replacement(
+        remainder,
+        sample_n=remaining_n,
+        random_seed=int(rng.integers(0, np.iinfo(np.int32).max)),
+        weight_col="household_weight",
+        positive_only_when_weighted=True,
+    )
+    return pd.concat([selected, remainder_sample], axis=0, ignore_index=False)
+
+
+def _donor_age_band_key(age: float | int | None) -> str | None:
+    value = pd.to_numeric(pd.Series([age]), errors="coerce").iloc[0]
+    if pd.isna(value):
+        return None
+    age_int = int(value)
+    if age_int < 0:
+        return None
+    if age_int >= 85:
+        return "85_plus"
+    lower = (age_int // 5) * 5
+    upper = lower + 5
+    return f"{lower}_{upper}"
 
 
 def _build_observation_frame(
@@ -353,9 +488,13 @@ def _build_persons():
     return persons
 
 persons = _build_persons()
-households = persons[
-    ["household_id", "state_fips", "tenure", "weight", "year"]
-].rename(columns={{"weight": "household_weight"}})
+households = (
+    persons[
+        ["household_id", "state_fips", "tenure", "weight", "year"]
+    ]
+    .rename(columns={{"weight": "household_weight"}})
+    .drop_duplicates(subset=["household_id"])
+)
 
 if sample_n is not None and sample_n < len(households):
     sampled = households.sample(
@@ -444,6 +583,8 @@ def _default_acs_tables_loader(
     year: int,
     sample_n: int | None,
     random_seed: int,
+    state_floor: int | None = None,
+    state_age_floor: int | None = None,
     cache_dir: Path | None = None,
     policyengine_us_data_repo: str | Path | None = None,
     policyengine_us_data_python: str | Path | None = None,
@@ -457,7 +598,7 @@ def _default_acs_tables_loader(
     tables = _run_policyengine_dataset_loader_from_spec(
         spec=spec,
         year=year,
-        sample_n=sample_n,
+        sample_n=None if state_floor else sample_n,
         random_seed=random_seed,
         policyengine_us_data_repo=policyengine_us_data_repo,
         policyengine_us_data_python=policyengine_us_data_python,
@@ -472,6 +613,14 @@ def _default_acs_tables_loader(
         .sort_values(["household_id", "person_id"])
         .reset_index(drop=True)
     )
+    households, persons = _sample_households_and_persons(
+        households=households,
+        persons=persons,
+        sample_n=sample_n,
+        random_seed=random_seed,
+        state_floor=state_floor,
+        state_age_floor=state_age_floor,
+    )
     return DonorSurveyTables(households=households, persons=persons)
 
 
@@ -480,6 +629,8 @@ def _default_scf_tables_loader(
     year: int,
     sample_n: int | None,
     random_seed: int,
+    state_floor: int | None = None,
+    state_age_floor: int | None = None,
     cache_dir: Path | None = None,
     policyengine_us_data_repo: str | Path | None = None,
     policyengine_us_data_python: str | Path | None = None,
@@ -490,14 +641,23 @@ def _default_scf_tables_loader(
         raise ValueError(
             f"{spec.descriptor_name} provider currently supports year={spec.default_year} only"
         )
-    return _run_policyengine_dataset_loader_from_spec(
+    tables = _run_policyengine_dataset_loader_from_spec(
         spec=spec,
         year=year,
-        sample_n=sample_n,
+        sample_n=None if state_floor else sample_n,
         random_seed=random_seed,
         policyengine_us_data_repo=policyengine_us_data_repo,
         policyengine_us_data_python=policyengine_us_data_python,
     )
+    households, persons = _sample_households_and_persons(
+        households=tables.households,
+        persons=tables.persons,
+        sample_n=sample_n,
+        random_seed=random_seed,
+        state_floor=state_floor,
+        state_age_floor=state_age_floor,
+    )
+    return DonorSurveyTables(households=households, persons=persons)
 
 
 def _download_policyengine_us_data_file(
@@ -539,6 +699,8 @@ def _load_sipp_tables_from_spec(
     year: int,
     sample_n: int | None,
     random_seed: int,
+    state_floor: int | None = None,
+    state_age_floor: int | None = None,
     cache_dir: Path | None,
 ) -> DonorSurveyTables:
     raw_loader = spec.raw_loader
@@ -607,6 +769,8 @@ def _load_sipp_tables_from_spec(
         persons=persons,
         sample_n=sample_n,
         random_seed=random_seed,
+        state_floor=state_floor,
+        state_age_floor=state_age_floor,
     )
     return DonorSurveyTables(households=households, persons=persons)
 
@@ -616,6 +780,8 @@ def _default_sipp_tips_tables_loader(
     year: int,
     sample_n: int | None,
     random_seed: int,
+    state_floor: int | None = None,
+    state_age_floor: int | None = None,
     cache_dir: Path | None = None,
     policyengine_us_data_repo: str | Path | None = None,
     policyengine_us_data_python: str | Path | None = None,
@@ -626,6 +792,8 @@ def _default_sipp_tips_tables_loader(
         year=year,
         sample_n=sample_n,
         random_seed=random_seed,
+        state_floor=state_floor,
+        state_age_floor=state_age_floor,
         cache_dir=cache_dir,
     )
 
@@ -635,6 +803,8 @@ def _default_sipp_assets_tables_loader(
     year: int,
     sample_n: int | None,
     random_seed: int,
+    state_floor: int | None = None,
+    state_age_floor: int | None = None,
     cache_dir: Path | None = None,
     policyengine_us_data_repo: str | Path | None = None,
     policyengine_us_data_python: str | Path | None = None,
@@ -645,6 +815,8 @@ def _default_sipp_assets_tables_loader(
         year=year,
         sample_n=sample_n,
         random_seed=random_seed,
+        state_floor=state_floor,
+        state_age_floor=state_age_floor,
         cache_dir=cache_dir,
     )
 
@@ -709,6 +881,8 @@ class DonorSurveySourceProvider:
             year=year,
             sample_n=provider_filters.get("sample_n"),
             random_seed=int(provider_filters.get("random_seed", 0)),
+            state_floor=provider_filters.get("state_floor"),
+            state_age_floor=provider_filters.get("state_age_floor"),
             cache_dir=provider_filters.get("cache_dir", self.cache_dir),
             policyengine_us_data_repo=provider_filters.get(
                 "policyengine_us_data_repo",

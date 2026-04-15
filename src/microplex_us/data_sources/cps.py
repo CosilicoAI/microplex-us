@@ -29,11 +29,15 @@ from microplex.core import (
     apply_source_query,
 )
 
+from microplex_us.data_sources.sampling import (
+    sample_frame_with_state_floor,
+    sample_frame_without_replacement,
+)
 from microplex_us.source_registry import resolve_source_variable_capabilities
 
 # Default cache directory
 DEFAULT_CACHE_DIR = Path.home() / ".cache" / "microplex"
-CPS_ASEC_PROCESSED_CACHE_VERSION = "20260408coverage"
+CPS_ASEC_PROCESSED_CACHE_VERSION = "20260412pe_export_ssn"
 
 # CPS ASEC data URLs by year
 CPS_URLS = {
@@ -227,6 +231,9 @@ SOCIAL_SECURITY_DISABILITY_REASON_CODE = 2
 SOCIAL_SECURITY_SURVIVOR_REASON_CODES = (3, 5)
 SOCIAL_SECURITY_DEPENDENT_REASON_CODES = (4, 6, 7)
 MINIMUM_RETIREMENT_AGE = 62
+PE_CPS_UNDOCUMENTED_TARGET = 13e6
+PE_CPS_UNDOCUMENTED_WORKERS_TARGET = 8.3e6
+PE_CPS_UNDOCUMENTED_STUDENTS_TARGET = 0.21 * 1.9e6
 
 
 def processed_cps_asec_cache_path(*, year: int, cache_dir: Path) -> Path:
@@ -364,6 +371,219 @@ def _add_cps_income_aliases(persons: pd.DataFrame) -> pd.DataFrame:
     return result
 
 
+def _repair_relationship_to_head(
+    persons: pd.DataFrame,
+    relationship: pd.Series,
+) -> pd.Series:
+    """Repair household relationship patterns so each household has one clear head."""
+    normalized = relationship.astype(int).copy()
+    if "household_id" not in persons.columns:
+        return normalized
+
+    ages = pd.to_numeric(persons.get("age", 0), errors="coerce").fillna(0.0)
+    grouped = persons.groupby("household_id", sort=False).groups
+    for member_index in grouped.values():
+        member_index = list(member_index)
+        household_relationship = normalized.loc[member_index].copy()
+        household_ages = ages.loc[member_index]
+
+        head_index = household_relationship[household_relationship.eq(0)].index.tolist()
+        if not head_index:
+            spouse_candidates = [
+                index
+                for index in household_relationship[
+                    household_relationship.eq(1)
+                ].index.tolist()
+                if household_ages.loc[index] >= 18
+            ]
+            adult_candidates = [
+                index
+                for index in household_relationship.index.tolist()
+                if household_ages.loc[index] >= 18
+            ]
+            candidate_pool = spouse_candidates or adult_candidates or household_relationship.index.tolist()
+            head_choice = max(candidate_pool, key=lambda index: household_ages.loc[index])
+            normalized.loc[head_choice] = 0
+            head_index = [head_choice]
+        elif len(head_index) > 1:
+            keep_head = max(head_index, key=lambda index: household_ages.loc[index])
+            for index in head_index:
+                if index == keep_head:
+                    continue
+                normalized.loc[index] = 3 if household_ages.loc[index] >= 19 else 2
+
+        spouse_index = normalized.loc[member_index][
+            normalized.loc[member_index].eq(1)
+        ].index.tolist()
+        if len(spouse_index) > 1:
+            keep_spouse = max(spouse_index, key=lambda index: household_ages.loc[index])
+            for index in spouse_index:
+                if index == keep_spouse:
+                    continue
+                normalized.loc[index] = 3 if household_ages.loc[index] >= 19 else 2
+
+    return normalized
+
+
+def _normalize_relationship_to_head(persons: pd.DataFrame) -> pd.Series:
+    """Normalize available CPS relationship coding to head/spouse/dependent/other."""
+    family_normalized: pd.Series | None = None
+    if "family_relationship" in persons.columns:
+        family_relationship = (
+            pd.to_numeric(persons["family_relationship"], errors="coerce")
+            .fillna(-1)
+            .astype(int)
+        )
+        unique_values = set(family_relationship.unique().tolist())
+        if unique_values.issubset({0, 1, 2, 3, 4}):
+            family_normalized = pd.Series(3, index=persons.index, dtype=int)
+            household_groups = (
+                persons.groupby("household_id", sort=False).groups.values()
+                if "household_id" in persons.columns
+                else [persons.index]
+            )
+            for member_index in household_groups:
+                member_index = list(member_index)
+                household_codes = set(family_relationship.loc[member_index].tolist())
+                if 0 in household_codes:
+                    mapped = family_relationship.loc[member_index].map(
+                        {0: 0, 1: 1, 2: 2, 3: 3, 4: 3}
+                    )
+                else:
+                    mapped = family_relationship.loc[member_index].map(
+                        {1: 0, 2: 1, 3: 2, 4: 3}
+                    )
+                family_normalized.loc[member_index] = mapped.fillna(3).astype(int)
+
+    if "relationship_to_head" not in persons.columns:
+        if family_normalized is not None:
+            return _repair_relationship_to_head(persons, family_normalized)
+        order = persons.groupby("household_id").cumcount()
+        normalized = pd.Series(3, index=persons.index, dtype=int)
+        normalized.loc[order == 0] = 0
+        normalized.loc[(order == 1) & (pd.to_numeric(persons.get("age", 0), errors="coerce").fillna(0) >= 18)] = 1
+        normalized.loc[pd.to_numeric(persons.get("age", 0), errors="coerce").fillna(0) < 18] = 2
+        return _repair_relationship_to_head(persons, normalized)
+
+    relationship = (
+        pd.to_numeric(persons["relationship_to_head"], errors="coerce")
+        .fillna(-1)
+        .astype(int)
+    )
+    unique_values = set(relationship.unique().tolist())
+    if unique_values.issubset({0, 1, 2, 3}):
+        if family_normalized is not None:
+            relationship_detail = set(relationship.unique().tolist()) & {1, 2}
+            family_detail = set(family_normalized.unique().tolist()) & {1, 2}
+            if len(family_detail) > len(relationship_detail):
+                return _repair_relationship_to_head(persons, family_normalized)
+        return _repair_relationship_to_head(persons, relationship)
+
+    if unique_values.issubset({1, 2, 3, 4}):
+        normalized = relationship.map({1: 0, 2: 1, 3: 3, 4: 2}).fillna(3).astype(int)
+        return _repair_relationship_to_head(persons, normalized)
+
+    order = persons.groupby("household_id").cumcount()
+    normalized = pd.Series(3, index=persons.index, dtype=int)
+    normalized.loc[order == 0] = 0
+    normalized.loc[(order == 1) & (pd.to_numeric(persons.get("age", 0), errors="coerce").fillna(0) >= 18)] = 1
+    normalized.loc[pd.to_numeric(persons.get("age", 0), errors="coerce").fillna(0) < 18] = 2
+    return _repair_relationship_to_head(persons, normalized)
+
+
+def _add_cps_tax_unit_structure_columns(persons: pd.DataFrame) -> pd.DataFrame:
+    """Derive PE-style tax-unit role columns from CPS tax-unit identifiers and pointers."""
+    if "tax_unit_id" not in persons.columns:
+        return persons
+
+    result = persons.copy()
+    relationship = _normalize_relationship_to_head(result)
+    result["tax_unit_is_joint"] = 0.0
+    result["tax_unit_count_dependents"] = 0.0
+    result["is_tax_unit_head"] = 0.0
+    result["is_tax_unit_spouse"] = 0.0
+    result["is_tax_unit_dependent"] = 0.0
+
+    ages = pd.to_numeric(result.get("age", 0), errors="coerce").fillna(0.0)
+    spouse_person_number = pd.to_numeric(
+        result.get("spouse_person_number", 0), errors="coerce"
+    ).fillna(0).astype(int)
+    person_number = pd.to_numeric(
+        result.get("person_number", 0), errors="coerce"
+    ).fillna(0).astype(int)
+
+    valid_tax_unit_ids = result["tax_unit_id"].notna() & result["tax_unit_id"].astype(str).str.strip().ne("")
+    grouped = result.loc[valid_tax_unit_ids].groupby(["household_id", "tax_unit_id"], sort=False)
+    for _, unit_persons in grouped:
+        member_index = unit_persons.index
+        unit_relationship = relationship.loc[member_index]
+        dependent_index = unit_relationship[unit_relationship.eq(2)].index.tolist()
+
+        spouse_index: list[int] = []
+        by_number = {
+            int(number): idx
+            for idx, number in person_number.loc[member_index].items()
+            if int(number) > 0
+        }
+        for idx in member_index:
+            spouse_number = int(spouse_person_number.loc[idx])
+            current_number = int(person_number.loc[idx])
+            if spouse_number <= 0 or current_number <= 0:
+                continue
+            spouse_idx = by_number.get(spouse_number)
+            if spouse_idx is None:
+                continue
+            if int(spouse_person_number.loc[spouse_idx]) != current_number:
+                continue
+            spouse_index.extend([int(idx), int(spouse_idx)])
+        if not spouse_index:
+            spouse_index = unit_relationship[unit_relationship.eq(1)].index.astype(int).tolist()
+        spouse_index = [idx for idx in dict.fromkeys(spouse_index) if idx not in dependent_index]
+
+        head_index: int | None = None
+        head_candidates = [
+            int(idx)
+            for idx in unit_relationship[unit_relationship.eq(0)].index.tolist()
+            if int(idx) not in spouse_index
+        ]
+        if head_candidates:
+            head_index = head_candidates[0]
+        else:
+            nondependent_candidates = [
+                int(idx)
+                for idx in member_index.tolist()
+                if int(idx) not in spouse_index and int(idx) not in dependent_index
+            ]
+            if nondependent_candidates:
+                head_index = max(
+                    nondependent_candidates,
+                    key=lambda idx: (float(ages.loc[idx]), -int(idx)),
+                )
+            elif spouse_index:
+                head_index = spouse_index[0]
+                spouse_index = [idx for idx in spouse_index if idx != head_index]
+            else:
+                head_index = int(member_index[0])
+
+        spouse_index = [idx for idx in spouse_index if idx != head_index]
+        if len(spouse_index) > 1:
+            spouse_index = [
+                max(
+                    spouse_index,
+                    key=lambda idx: (float(ages.loc[idx]), -int(idx)),
+                )
+            ]
+
+        result.loc[member_index, "tax_unit_is_joint"] = float(bool(spouse_index))
+        result.loc[member_index, "tax_unit_count_dependents"] = float(len(dependent_index))
+        result.loc[dependent_index, "is_tax_unit_dependent"] = 1.0
+        if head_index is not None:
+            result.loc[head_index, "is_tax_unit_head"] = 1.0
+        result.loc[spouse_index, "is_tax_unit_spouse"] = 1.0
+
+    return result
+
+
 def _build_observation_frame(
     *,
     households: pd.DataFrame,
@@ -371,7 +591,9 @@ def _build_observation_frame(
     source_name: str,
 ) -> ObservationFrame:
     normalized_households = households.copy()
-    normalized_persons = _add_cps_income_aliases(_ensure_person_ids(persons))
+    normalized_persons = _add_cps_tax_unit_structure_columns(
+        _add_cps_income_aliases(_ensure_person_ids(persons))
+    )
     descriptor = _descriptor_from_tables(
         households=normalized_households,
         persons=normalized_persons,
@@ -403,6 +625,8 @@ def _sample_households_and_persons(
     persons: pd.DataFrame,
     sample_n: int | None,
     random_seed: int,
+    state_floor: int | None = None,
+    state_age_floor: int | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Sample households and keep all linked person records."""
     household_sort_columns = [
@@ -431,32 +655,14 @@ def _sample_households_and_persons(
         persons = persons.reset_index(drop=True)
     if sample_n is None or sample_n >= len(households):
         return households, persons
-    sample_weights: pd.Series | None = None
-    if "household_weight" in households.columns:
-        candidate_weights = (
-            pd.to_numeric(households["household_weight"], errors="coerce")
-            .fillna(0.0)
-            .clip(lower=0.0)
-        )
-        if candidate_weights.sum() > 0.0 and int((candidate_weights > 0.0).sum()) >= sample_n:
-            sample_weights = candidate_weights
-    try:
-        sampled_households = households.sample(
-            n=sample_n,
-            random_state=random_seed,
-            replace=False,
-            weights=sample_weights,
-        ).copy()
-    except ValueError:
-        # Pandas can reject weighted sampling without replacement at large n
-        # even when the positive-weight count looks sufficient. Fall back to
-        # deterministic uniform sampling rather than failing the whole build.
-        sampled_households = households.sample(
-            n=sample_n,
-            random_state=random_seed,
-            replace=False,
-            weights=None,
-        ).copy()
+    sampled_households = _sample_cps_households(
+        households=households,
+        persons=persons,
+        sample_n=sample_n,
+        random_seed=random_seed,
+        state_floor=state_floor,
+        state_age_floor=state_age_floor,
+    )
     sampled_keys = set(sampled_households["household_id"])
     sampled_persons = persons[persons["household_id"].isin(sampled_keys)].copy()
     if household_sort_columns:
@@ -470,6 +676,118 @@ def _sample_households_and_persons(
             kind="mergesort",
         )
     return sampled_households.reset_index(drop=True), sampled_persons.reset_index(drop=True)
+
+
+def _sample_cps_households(
+    *,
+    households: pd.DataFrame,
+    persons: pd.DataFrame,
+    sample_n: int | None,
+    random_seed: int,
+    state_floor: int | None = None,
+    state_age_floor: int | None = None,
+) -> pd.DataFrame:
+    """Sample CPS households with optional state or state-age coverage floors."""
+
+    resolved_state_age_floor = int(state_age_floor or 0)
+    if (
+        resolved_state_age_floor <= 0
+        or "state_fips" not in households.columns
+        or "age" not in persons.columns
+        or "household_id" not in households.columns
+        or "household_id" not in persons.columns
+    ):
+        return sample_frame_with_state_floor(
+            households,
+            sample_n=sample_n,
+            random_seed=random_seed,
+            weight_col="household_weight",
+            state_floor=state_floor,
+        )
+
+    coverage = persons[["household_id", "age"]].merge(
+        households[["household_id", "state_fips"]],
+        on="household_id",
+        how="inner",
+    )
+    coverage["age_band"] = coverage["age"].map(_cps_age_band_key)
+    coverage["state_fips"] = pd.to_numeric(
+        coverage["state_fips"], errors="coerce"
+    ).astype("Int64")
+    coverage = coverage.dropna(subset=["state_fips", "age_band"]).copy()
+    if coverage.empty:
+        return sample_frame_with_state_floor(
+            households,
+            sample_n=sample_n,
+            random_seed=random_seed,
+            weight_col="household_weight",
+            state_floor=state_floor,
+        )
+
+    rng = np.random.default_rng(random_seed)
+    selected_ids: set[int] = set()
+    for _, group in coverage.groupby(["state_fips", "age_band"], sort=True):
+        group_household_ids = pd.Index(group["household_id"].unique())
+        already_selected = [hid for hid in group_household_ids if hid in selected_ids]
+        missing = resolved_state_age_floor - len(already_selected)
+        if missing <= 0:
+            continue
+        available_ids = [hid for hid in group_household_ids if hid not in selected_ids]
+        if not available_ids:
+            continue
+        candidate_households = households[
+            households["household_id"].isin(available_ids)
+        ].copy()
+        sampled = sample_frame_without_replacement(
+            candidate_households,
+            sample_n=min(missing, len(candidate_households)),
+            random_seed=int(rng.integers(0, np.iinfo(np.int32).max)),
+            weight_col="household_weight",
+        )
+        selected_ids.update(int(hid) for hid in sampled["household_id"].tolist())
+
+    if sample_n is not None and len(selected_ids) > sample_n:
+        raise ValueError(
+            "state_age_floor requires more sampled households than sample_n allows: "
+            f"selected={len(selected_ids)}, sample_n={sample_n}"
+        )
+
+    if not selected_ids:
+        return sample_frame_with_state_floor(
+            households,
+            sample_n=sample_n,
+            random_seed=random_seed,
+            weight_col="household_weight",
+            state_floor=state_floor,
+        )
+
+    selected = households[households["household_id"].isin(selected_ids)].copy()
+    remaining_n = int(sample_n) - len(selected)
+    if remaining_n <= 0:
+        return selected
+
+    remainder = households[~households["household_id"].isin(selected_ids)].copy()
+    remainder_sample = sample_frame_without_replacement(
+        remainder,
+        sample_n=remaining_n,
+        random_seed=int(rng.integers(0, np.iinfo(np.int32).max)),
+        weight_col="household_weight",
+    )
+    return pd.concat([selected, remainder_sample], axis=0, ignore_index=False)
+
+
+def _cps_age_band_key(age: float | int | None) -> str | None:
+    value = pd.to_numeric(pd.Series([age]), errors="coerce").iloc[0]
+    if pd.isna(value):
+        return None
+    age_int = int(value)
+    if age_int < 0:
+        return None
+    if age_int >= 85:
+        return "85_plus"
+    lower = (age_int // 5) * 5
+    upper = lower + 5
+    return f"{lower}_{upper}"
 
 
 @dataclass
@@ -523,6 +841,8 @@ class CPSASECSourceProvider:
             persons=persons,
             sample_n=provider_filters.get("sample_n"),
             random_seed=int(provider_filters.get("random_seed", 0)),
+            state_floor=provider_filters.get("state_floor"),
+            state_age_floor=provider_filters.get("state_age_floor"),
         )
         frame = _build_observation_frame(
             households=households,
@@ -592,6 +912,8 @@ class CPSASECParquetSourceProvider:
             persons=persons,
             sample_n=provider_filters.get("sample_n"),
             random_seed=int(provider_filters.get("random_seed", 0)),
+            state_floor=provider_filters.get("state_floor"),
+            state_age_floor=provider_filters.get("state_age_floor"),
         )
         frame = _build_observation_frame(
             households=households,
@@ -764,6 +1086,11 @@ def load_cps_asec(
     else:
         households = _derive_households(persons)
 
+    persons = _attach_cps_ssn_card_type(
+        persons=persons,
+        households=households,
+        persons_raw=persons_raw,
+    )
     persons = _attach_household_geography_to_persons(
         persons=persons,
         households=households,
@@ -1041,6 +1368,253 @@ def _process_persons(df: pl.DataFrame, year: int) -> pl.DataFrame:
     result = result.with_columns(pl.lit(year).alias("year"))
 
     return result
+
+
+def _attach_cps_ssn_card_type(
+    *,
+    persons: pl.DataFrame,
+    households: pl.DataFrame,
+    persons_raw: pl.DataFrame,
+) -> pl.DataFrame:
+    """Derive PE-style CPS SSN card types from raw CPS columns."""
+    if "ssn_card_type" in persons.columns:
+        return persons
+
+    fallback = persons.with_columns(pl.lit("CITIZEN").alias("ssn_card_type"))
+    required_person_columns = {
+        "PRCITSHP",
+        "PEINUSYR",
+        "A_HSCOL",
+        "A_AGE",
+        "A_MARITL",
+        "A_SPOUSE",
+        "MCARE",
+        "CAID",
+        "PEN_SC1",
+        "PEN_SC2",
+        "RESNSS1",
+        "RESNSS2",
+        "IHSFLG",
+        "CHAMPVA",
+        "MIL",
+        "PEIO1COW",
+        "A_MJOCC",
+        "SS_YN",
+        "SPM_ID",
+        "SPM_CAPHOUSESUB",
+        "PEAFEVER",
+        "SSI_YN",
+        "WSAL_VAL",
+        "SEMP_VAL",
+    }
+    if not required_person_columns.issubset(set(persons_raw.columns)):
+        return fallback
+    if not {"household_id"}.issubset(set(persons.columns)):
+        return fallback
+    if not {"household_id", "household_weight"}.issubset(set(households.columns)):
+        return fallback
+    if len(persons_raw) != len(persons):
+        return fallback
+
+    household_weights = households.select(["household_id", "household_weight"]).to_pandas()
+    household_weight_map = dict(
+        zip(
+            pd.to_numeric(household_weights["household_id"], errors="coerce"),
+            pd.to_numeric(household_weights["household_weight"], errors="coerce").fillna(0.0),
+        )
+    )
+    person_household_ids = pd.to_numeric(
+        persons["household_id"].to_pandas(),
+        errors="coerce",
+    )
+    person_weights = person_household_ids.map(household_weight_map).fillna(0.0).to_numpy()
+
+    raw = persons_raw.select(sorted(required_person_columns)).to_pandas()
+
+    def numeric_series(column: str, default: float = 0.0) -> pd.Series:
+        return pd.to_numeric(raw[column], errors="coerce").fillna(default)
+
+    def select_random_subset_to_target(
+        eligible_ids: np.ndarray,
+        current_weighted: float,
+        target_weighted: float,
+        *,
+        random_seed: int,
+    ) -> np.ndarray:
+        if len(eligible_ids) == 0:
+            return np.array([], dtype=int)
+
+        if current_weighted > target_weighted:
+            excess_weighted = current_weighted - target_weighted
+            total_reassignable_weight = float(np.sum(person_weights[eligible_ids]))
+            if total_reassignable_weight <= 0:
+                return np.array([], dtype=int)
+            share_to_move = min(excess_weighted / total_reassignable_weight, 1.0)
+            rng = np.random.default_rng(seed=random_seed)
+            random_draw = rng.random(len(eligible_ids))
+            return eligible_ids[random_draw < share_to_move]
+
+        needed_weighted = target_weighted - current_weighted
+        total_weight = float(np.sum(person_weights[eligible_ids]))
+        if total_weight <= 0:
+            return np.array([], dtype=int)
+        share_to_move = min(needed_weighted / total_weight, 1.0)
+        rng = np.random.RandomState(random_seed)
+        n_to_move = int(len(eligible_ids) * share_to_move)
+        if n_to_move <= 0:
+            return np.array([], dtype=int)
+        return rng.choice(
+            eligible_ids,
+            size=n_to_move,
+            replace=False,
+        )
+
+    prcitshp = numeric_series("PRCITSHP").astype(int)
+    peinusyr = numeric_series("PEINUSYR").astype(int)
+    age = numeric_series("A_AGE").astype(int)
+    marital = numeric_series("A_MARITL").astype(int)
+    spouse_pointer = numeric_series("A_SPOUSE").astype(int)
+    medicare = numeric_series("MCARE").astype(int)
+    medicaid = numeric_series("CAID").astype(int)
+    pension_source_1 = numeric_series("PEN_SC1").astype(int)
+    pension_source_2 = numeric_series("PEN_SC2").astype(int)
+    social_security_reason_1 = numeric_series("RESNSS1").astype(int)
+    social_security_reason_2 = numeric_series("RESNSS2").astype(int)
+    ihs = numeric_series("IHSFLG").astype(int)
+    champva = numeric_series("CHAMPVA").astype(int)
+    military_insurance = numeric_series("MIL").astype(int)
+    class_of_worker = numeric_series("PEIO1COW").astype(int)
+    major_occupation = numeric_series("A_MJOCC").astype(int)
+    social_security_recipient = numeric_series("SS_YN").astype(int)
+    spm_unit_id = numeric_series("SPM_ID")
+    capped_housing_subsidy = numeric_series("SPM_CAPHOUSESUB")
+    veteran = numeric_series("PEAFEVER").astype(int)
+    ssi_recipient = numeric_series("SSI_YN").astype(int)
+    wage_income = numeric_series("WSAL_VAL")
+    self_employment_income = numeric_series("SEMP_VAL")
+    student_status = numeric_series("A_HSCOL").astype(int)
+
+    ssn_card_type = np.zeros(len(raw), dtype=np.int64)
+    citizens_mask = prcitshp.isin([1, 2, 3, 4]).to_numpy()
+    noncitizens = prcitshp.eq(5).to_numpy()
+    ssn_card_type[citizens_mask] = 1
+
+    potentially_undocumented = ~np.isin(ssn_card_type, [1, 2])
+    arrived_before_1982 = peinusyr.isin([1, 2, 3, 4, 5, 6, 7]).to_numpy()
+    is_naturalized = prcitshp.eq(4).to_numpy()
+    is_adult = age.ge(18).to_numpy()
+    has_five_plus_years = peinusyr.isin(list(range(8, 27))).to_numpy()
+    has_three_plus_years = peinusyr.isin(list(range(8, 28))).to_numpy()
+    is_married = marital.isin([1, 2]).to_numpy() & spouse_pointer.gt(0).to_numpy()
+    eligible_naturalized = is_naturalized & is_adult & (
+        has_five_plus_years | (has_three_plus_years & is_married)
+    )
+    has_medicare = medicare.eq(1).to_numpy()
+    has_federal_pension = pension_source_1.isin([3]).to_numpy() | pension_source_2.isin([3]).to_numpy()
+    has_ss_disability = social_security_reason_1.isin([2]).to_numpy() | social_security_reason_2.isin([2]).to_numpy()
+    has_ihs = ihs.eq(1).to_numpy()
+    has_medicaid = medicaid.eq(1).to_numpy()
+    has_champva = champva.eq(1).to_numpy()
+    has_military_insurance = military_insurance.eq(1).to_numpy()
+    is_government_worker = class_of_worker.isin([1, 2, 3]).to_numpy()
+    is_military_occupation = major_occupation.eq(11).to_numpy()
+    is_government_employee = is_government_worker | is_military_occupation
+    has_social_security = social_security_recipient.eq(1).to_numpy()
+    spm_housing_map = (
+        pd.DataFrame(
+            {
+                "SPM_ID": spm_unit_id,
+                "SPM_CAPHOUSESUB": capped_housing_subsidy,
+            }
+        )
+        .dropna(subset=["SPM_ID"])
+        .groupby("SPM_ID", sort=False)["SPM_CAPHOUSESUB"]
+        .max()
+    )
+    has_housing_assistance = spm_unit_id.map(spm_housing_map).fillna(0).gt(0).to_numpy()
+    is_military_connected = veteran.eq(1).to_numpy() | is_military_occupation
+    has_ssi = ssi_recipient.eq(1).to_numpy()
+
+    assumed_documented = (
+        arrived_before_1982
+        | eligible_naturalized
+        | has_medicare
+        | has_federal_pension
+        | has_ss_disability
+        | has_ihs
+        | has_medicaid
+        | has_champva
+        | has_military_insurance
+        | is_government_employee
+        | has_social_security
+        | has_housing_assistance
+        | is_military_connected
+        | has_ssi
+    )
+    ssn_card_type[potentially_undocumented & assumed_documented] = 3
+
+    worker_mask = (
+        (ssn_card_type != 3)
+        & noncitizens
+        & ((wage_income.gt(0).to_numpy()) | (self_employment_income.gt(0).to_numpy()))
+    )
+    student_mask = (
+        (ssn_card_type != 3)
+        & noncitizens
+        & student_status.eq(2).to_numpy()
+    )
+
+    worker_ids = np.flatnonzero(worker_mask)
+    selected_workers = select_random_subset_to_target(
+        worker_ids,
+        current_weighted=float(np.sum(person_weights[worker_ids])),
+        target_weighted=PE_CPS_UNDOCUMENTED_WORKERS_TARGET,
+        random_seed=0,
+    )
+    student_ids = np.flatnonzero(student_mask)
+    selected_students = select_random_subset_to_target(
+        student_ids,
+        current_weighted=float(np.sum(person_weights[student_ids])),
+        target_weighted=PE_CPS_UNDOCUMENTED_STUDENTS_TARGET,
+        random_seed=1,
+    )
+    ssn_card_type[selected_workers] = 2
+    ssn_card_type[selected_students] = 2
+
+    current_undocumented = float(np.sum(person_weights[ssn_card_type == 0]))
+    if current_undocumented < PE_CPS_UNDOCUMENTED_TARGET:
+        mixed_household_candidates: list[int] = []
+        household_values = person_household_ids.to_numpy()
+        for household_id in pd.unique(household_values):
+            household_mask = household_values == household_id
+            household_codes = ssn_card_type[household_mask]
+            if not (np.any(household_codes == 0) and np.any(household_codes == 3)):
+                continue
+            household_indices = np.flatnonzero(household_mask)
+            mixed_household_candidates.extend(
+                household_indices[household_codes == 3].tolist()
+            )
+        if mixed_household_candidates:
+            selected_indices = select_random_subset_to_target(
+                np.asarray(mixed_household_candidates, dtype=int),
+                current_weighted=current_undocumented,
+                target_weighted=PE_CPS_UNDOCUMENTED_TARGET,
+                random_seed=100,
+            )
+            ssn_card_type[selected_indices] = 0
+
+    code_to_str = {
+        0: "NONE",
+        1: "CITIZEN",
+        2: "NON_CITIZEN_VALID_EAD",
+        3: "OTHER_NON_CITIZEN",
+    }
+    return persons.with_columns(
+        pl.Series(
+            "ssn_card_type",
+            pd.Series(ssn_card_type).map(code_to_str).tolist(),
+        )
+    )
 
 
 def _processed_persons_have_household_geography(persons: pl.DataFrame) -> bool:

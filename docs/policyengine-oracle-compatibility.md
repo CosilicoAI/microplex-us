@@ -79,6 +79,27 @@ That profile now also includes:
     dataset, and finally materializes parity / native-audit sidecars from the
     updated bundle instead of relying on an ad hoc notebook or shell sequence
 
+## Current calibration rule
+
+Oracle compatibility does not mean "optimize against every DB row in one flat
+solve."
+
+Current rule:
+
+- measure every serious run against the full active PolicyEngine targets DB
+- compute full-oracle loss with an explicit penalty for unsupported target rows
+- keep supported-only diagnostics visible as a separate channel
+- let the calibration planner classify target rows into:
+  - `solve_now`
+  - `solve_later`
+  - `audit_only`
+- allow narrow deferred later passes and keep them only when they improve the
+  current full-oracle score
+
+This keeps the full DB as the shared oracle without pretending that every DB
+row should always be an active calibration constraint in the same numerical
+stage.
+
 ## Why this rule exists
 
 If we mix:
@@ -96,6 +117,15 @@ We may still end up with a better system, but we will not know whether it is:
 - a closer match to incumbent interface behavior
 - a materially different model stack
 - or both
+
+Related guardrail:
+
+- do not treat a late export-layer port of an upstream PE concept as a
+  substitute for upstream construction parity
+- if a concept properly belongs in source construction, tax-unit construction,
+  or source/family imputation, an export-layer patch can still be useful as a
+  probe, but it should be recorded as a challenger implementation boundary
+  rather than silently promoted into the default path
 
 The incumbent-compatibility track is meant to answer a simpler question first:
 
@@ -154,6 +184,14 @@ When we face a design choice during the incumbent-compatibility pass:
    only on the margin.
 5. Write the deviation down as `intentional` rather than letting it masquerade
    as oracle compatibility.
+
+One important corollary:
+
+- rejecting a late export-layer patch does **not** automatically reject the
+  underlying model concept
+- sometimes the concept is right, but the implementation point is wrong
+- in that case the concept stays in scope, but it must be reintroduced at the
+  correct upstream layer rather than as a last-minute PE-input bolt-on
 
 ## Examples
 

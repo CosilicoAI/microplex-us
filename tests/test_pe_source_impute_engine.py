@@ -267,7 +267,15 @@ def test_prepare_block_inputs_projects_entity_and_preserves_compatible_shared_va
 
     assert isinstance(prepared, PESourceImputePreparedBlockInputs)
     assert prepared.entity_key == "household_id"
+    assert prepared.raw_shared_vars == ("age", "state_fips", "tenure")
+    assert prepared.shared_vars_after_model_exclusion == (
+        "age",
+        "state_fips",
+        "tenure",
+    )
     assert prepared.shared_vars_for_block == ("age", "state_fips", "tenure")
+    assert prepared.entity_compatible_shared_vars == ("age", "state_fips", "tenure")
+    assert prepared.projection_applied is True
     assert prepared.condition_surface is None
     assert prepared.donor_fit_source["household_id"].tolist() == [1, 2]
     assert prepared.current_generation_source.columns.tolist() == [
@@ -312,5 +320,13 @@ def test_prepare_block_inputs_builds_condition_surface_when_requested() -> None:
     )
 
     assert prepared.condition_surface is not None
+    assert prepared.raw_shared_vars == ("age", "sex", "state_fips")
+    assert prepared.shared_vars_after_model_exclusion == (
+        "age",
+        "sex",
+        "state_fips",
+    )
     assert prepared.condition_surface.spec.key == "acs"
     assert prepared.shared_vars_for_block == ("age", "sex", "state_fips")
+    assert prepared.entity_compatible_shared_vars == ()
+    assert prepared.projection_applied is False

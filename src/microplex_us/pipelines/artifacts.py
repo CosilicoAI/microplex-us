@@ -25,6 +25,10 @@ from microplex_us.pipelines.index_db import (
 from microplex_us.pipelines.pe_native_scores import (
     compute_us_pe_native_scores,
 )
+from microplex_us.pipelines.summarize_child_tax_unit_agi_drift import (
+    DEFAULT_VARIABLES as DEFAULT_CHILD_TAX_UNIT_AGI_DRIFT_VARIABLES,
+    summarize_child_tax_unit_agi_drift,
+)
 from microplex_us.pipelines.registry import (
     FrontierMetric,
     append_us_microplex_run_registry_entry,
@@ -69,6 +73,7 @@ class USMicroplexArtifactPaths:
     policyengine_harness: Path | None = None
     policyengine_native_scores: Path | None = None
     policyengine_native_audit: Path | None = None
+    child_tax_unit_agi_drift: Path | None = None
     run_registry: Path | None = None
     run_index_db: Path | None = None
 
@@ -235,6 +240,31 @@ def _resolve_saved_artifact_file(
     return path
 
 
+def _summarize_child_tax_unit_agi_drift_ratios(
+    payload: dict[str, Any],
+    *,
+    stage: str,
+    variables: tuple[str, ...],
+) -> dict[str, Any]:
+    stages = dict(payload.get("stages", {}))
+    stage_payload = dict(stages.get(stage, {}))
+    subsets = dict(stage_payload.get("subsets", {}))
+    adults = dict(subsets.get("adults", {}))
+    dependents = dict(subsets.get("dependents_under_20", {}))
+    ratios: dict[str, float | None] = {}
+    for variable in variables:
+        adult_sum = adults.get(variable, {}).get("sum")
+        child_sum = dependents.get(variable, {}).get("sum")
+        if adult_sum in (None, 0):
+            ratios[variable] = None
+        else:
+            ratios[variable] = float(child_sum or 0.0) / float(adult_sum)
+    return {
+        "stage": stage,
+        "dependents_under_20_sum_share": ratios,
+    }
+
+
 def save_us_microplex_artifacts(
     result: USMicroplexBuildResult,
     output_dir: str | Path,
@@ -255,6 +285,8 @@ def save_us_microplex_artifacts(
     run_registry_path: str | Path | None = None,
     run_index_path: str | Path | None = None,
     run_registry_metadata: dict[str, Any] | None = None,
+    enable_child_tax_unit_agi_drift: bool = False,
+    child_tax_unit_agi_drift_variables: tuple[str, ...] | None = None,
 ) -> USMicroplexArtifactPaths:
     """Persist a build result as a reproducible artifact bundle."""
     output_dir = Path(output_dir)
@@ -380,6 +412,33 @@ def save_us_microplex_artifacts(
             if require_policyengine_native_score:
                 raise
 
+    child_tax_unit_agi_drift_path = None
+    child_tax_unit_agi_drift_summary: dict[str, Any] | None = None
+    if enable_child_tax_unit_agi_drift:
+        try:
+            drift_path = output_dir / "child_tax_unit_agi_drift.json"
+            variables = (
+                child_tax_unit_agi_drift_variables
+                or DEFAULT_CHILD_TAX_UNIT_AGI_DRIFT_VARIABLES
+            )
+            payload = summarize_child_tax_unit_agi_drift(
+                output_dir,
+                variables=variables,
+            )
+            drift_path.write_text(
+                json.dumps(payload, indent=2, sort_keys=True)
+            )
+            child_tax_unit_agi_drift_path = drift_path
+            child_tax_unit_agi_drift_summary = _summarize_child_tax_unit_agi_drift_ratios(
+                payload,
+                stage="calibrated",
+                variables=variables,
+            )
+        except Exception as exc:  # pragma: no cover - diagnostic best-effort
+            child_tax_unit_agi_drift_summary = {
+                "error": f"{type(exc).__name__}: {exc}",
+            }
+
     manifest = {
         "created_at": datetime.now(UTC).isoformat(),
         "config": result.config.to_dict(),
@@ -424,6 +483,14 @@ def save_us_microplex_artifacts(
         manifest["policyengine_native_scores"] = dict(
             native_scores_payload.get("summary", {})
         )
+    if child_tax_unit_agi_drift_path is not None:
+        manifest["artifacts"]["child_tax_unit_agi_drift"] = (
+            child_tax_unit_agi_drift_path.name
+        )
+    if child_tax_unit_agi_drift_summary is not None:
+        manifest.setdefault("diagnostics", {})[
+            "child_tax_unit_agi_drift"
+        ] = child_tax_unit_agi_drift_summary
     if harness_summary is not None or native_scores_payload is not None:
         resolved_run_registry_path = Path(run_registry_path or output_dir.parent / "run_registry.jsonl")
         run_entry = build_us_microplex_run_registry_entry(
@@ -509,6 +576,7 @@ def save_us_microplex_artifacts(
         policyengine_harness=policyengine_harness_path,
         policyengine_native_scores=policyengine_native_scores_path,
         policyengine_native_audit=None,
+        child_tax_unit_agi_drift=child_tax_unit_agi_drift_path,
         run_registry=resolved_run_registry_path,
         run_index_db=resolved_run_index_path,
     )
@@ -535,6 +603,8 @@ def save_versioned_us_microplex_artifacts(
     run_registry_path: str | Path | None = None,
     run_index_path: str | Path | None = None,
     run_registry_metadata: dict[str, Any] | None = None,
+    enable_child_tax_unit_agi_drift: bool = False,
+    child_tax_unit_agi_drift_variables: tuple[str, ...] | None = None,
 ) -> USMicroplexArtifactPaths:
     """Persist a build under a stable versioned directory beneath one output root."""
     output_root = Path(output_root)
@@ -561,6 +631,8 @@ def save_versioned_us_microplex_artifacts(
         run_registry_path=run_registry_path or output_root / "run_registry.jsonl",
         run_index_path=run_index_path or output_root,
         run_registry_metadata=run_registry_metadata,
+        enable_child_tax_unit_agi_drift=enable_child_tax_unit_agi_drift,
+        child_tax_unit_agi_drift_variables=child_tax_unit_agi_drift_variables,
     )
     return USMicroplexArtifactPaths(
         output_dir=paths.output_dir,
@@ -576,6 +648,7 @@ def save_versioned_us_microplex_artifacts(
         policyengine_harness=paths.policyengine_harness,
         policyengine_native_scores=paths.policyengine_native_scores,
         policyengine_native_audit=paths.policyengine_native_audit,
+        child_tax_unit_agi_drift=paths.child_tax_unit_agi_drift,
         run_registry=paths.run_registry,
         run_index_db=paths.run_index_db,
     )
@@ -605,6 +678,8 @@ def build_and_save_versioned_us_microplex(
     run_registry_path: str | Path | None = None,
     run_index_path: str | Path | None = None,
     run_registry_metadata: dict[str, Any] | None = None,
+    enable_child_tax_unit_agi_drift: bool = False,
+    child_tax_unit_agi_drift_variables: tuple[str, ...] | None = None,
 ) -> USMicroplexVersionedBuildArtifacts:
     """Build a US microplex dataset, save a versioned bundle, and report frontier gap."""
     build_result = build_us_microplex(persons, households, config=config)
@@ -627,6 +702,8 @@ def build_and_save_versioned_us_microplex(
         run_registry_path=run_registry_path,
         run_index_path=run_index_path,
         run_registry_metadata=run_registry_metadata,
+        enable_child_tax_unit_agi_drift=enable_child_tax_unit_agi_drift,
+        child_tax_unit_agi_drift_variables=child_tax_unit_agi_drift_variables,
     )
 
 
@@ -652,6 +729,8 @@ def save_versioned_us_microplex_build_result(
     run_registry_path: str | Path | None = None,
     run_index_path: str | Path | None = None,
     run_registry_metadata: dict[str, Any] | None = None,
+    enable_child_tax_unit_agi_drift: bool = False,
+    child_tax_unit_agi_drift_variables: tuple[str, ...] | None = None,
 ) -> USMicroplexVersionedBuildArtifacts:
     """Save an already-built result as a versioned bundle and report frontier gap."""
     return _finalize_versioned_build_artifacts(
@@ -673,6 +752,8 @@ def save_versioned_us_microplex_build_result(
         run_registry_path=run_registry_path,
         run_index_path=run_index_path,
         run_registry_metadata=run_registry_metadata,
+        enable_child_tax_unit_agi_drift=enable_child_tax_unit_agi_drift,
+        child_tax_unit_agi_drift_variables=child_tax_unit_agi_drift_variables,
     )
 
 
@@ -700,6 +781,8 @@ def build_and_save_versioned_us_microplex_from_source_provider(
     run_registry_path: str | Path | None = None,
     run_index_path: str | Path | None = None,
     run_registry_metadata: dict[str, Any] | None = None,
+    enable_child_tax_unit_agi_drift: bool = False,
+    child_tax_unit_agi_drift_variables: tuple[str, ...] | None = None,
 ) -> USMicroplexVersionedBuildArtifacts:
     """Build from one source provider, save a versioned bundle, and report frontier gap."""
     pipeline = USMicroplexPipeline(config)
@@ -723,6 +806,8 @@ def build_and_save_versioned_us_microplex_from_source_provider(
         run_registry_path=run_registry_path,
         run_index_path=run_index_path,
         run_registry_metadata=run_registry_metadata,
+        enable_child_tax_unit_agi_drift=enable_child_tax_unit_agi_drift,
+        child_tax_unit_agi_drift_variables=child_tax_unit_agi_drift_variables,
     )
 
 
@@ -750,6 +835,8 @@ def build_and_save_versioned_us_microplex_from_source_providers(
     run_registry_path: str | Path | None = None,
     run_index_path: str | Path | None = None,
     run_registry_metadata: dict[str, Any] | None = None,
+    enable_child_tax_unit_agi_drift: bool = False,
+    child_tax_unit_agi_drift_variables: tuple[str, ...] | None = None,
 ) -> USMicroplexVersionedBuildArtifacts:
     """Build from multiple source providers, save a versioned bundle, and report frontier gap."""
     pipeline = USMicroplexPipeline(config)
@@ -773,6 +860,8 @@ def build_and_save_versioned_us_microplex_from_source_providers(
         run_registry_path=run_registry_path,
         run_index_path=run_index_path,
         run_registry_metadata=run_registry_metadata,
+        enable_child_tax_unit_agi_drift=enable_child_tax_unit_agi_drift,
+        child_tax_unit_agi_drift_variables=child_tax_unit_agi_drift_variables,
     )
 
 
@@ -799,6 +888,8 @@ def build_and_save_versioned_us_microplex_from_data_dir(
     run_registry_path: str | Path | None = None,
     run_index_path: str | Path | None = None,
     run_registry_metadata: dict[str, Any] | None = None,
+    enable_child_tax_unit_agi_drift: bool = False,
+    child_tax_unit_agi_drift_variables: tuple[str, ...] | None = None,
 ) -> USMicroplexVersionedBuildArtifacts:
     """Build from a CPS-style parquet directory, save a versioned bundle, and report frontier gap."""
     pipeline = USMicroplexPipeline(config)
@@ -822,6 +913,8 @@ def build_and_save_versioned_us_microplex_from_data_dir(
         run_registry_path=run_registry_path,
         run_index_path=run_index_path,
         run_registry_metadata=run_registry_metadata,
+        enable_child_tax_unit_agi_drift=enable_child_tax_unit_agi_drift,
+        child_tax_unit_agi_drift_variables=child_tax_unit_agi_drift_variables,
     )
 
 
@@ -847,6 +940,8 @@ def _finalize_versioned_build_artifacts(
     run_registry_path: str | Path | None,
     run_index_path: str | Path | None,
     run_registry_metadata: dict[str, Any] | None,
+    enable_child_tax_unit_agi_drift: bool = False,
+    child_tax_unit_agi_drift_variables: tuple[str, ...] | None = None,
 ) -> USMicroplexVersionedBuildArtifacts:
     artifact_paths = save_versioned_us_microplex_artifacts(
         build_result,
@@ -866,6 +961,8 @@ def _finalize_versioned_build_artifacts(
         run_registry_path=run_registry_path,
         run_index_path=run_index_path,
         run_registry_metadata=run_registry_metadata,
+        enable_child_tax_unit_agi_drift=enable_child_tax_unit_agi_drift,
+        child_tax_unit_agi_drift_variables=child_tax_unit_agi_drift_variables,
     )
     current_entry = None
     frontier_entry = None
