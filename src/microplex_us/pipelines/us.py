@@ -1744,7 +1744,26 @@ class USMicroplexPipeline:
             scaffold_input=scaffold_input,
         )
         seed_data = self._apply_dependent_tax_leaf_soft_caps(seed_data)
+        _emit_us_pipeline_progress(
+            "US microplex build: seed ready",
+            scaffold_source=scaffold_input.frame.source.name,
+            sources=_format_progress_values(fusion_plan.source_names),
+            rows=int(len(seed_data)),
+            columns=int(len(seed_data.columns)),
+            donor_integrated_variables=int(
+                len(donor_integration["integrated_variables"])
+            ),
+        )
+        _emit_us_pipeline_progress(
+            "US microplex build: targets start",
+            rows=int(len(seed_data)),
+        )
         targets = self.build_targets(seed_data)
+        _emit_us_pipeline_progress(
+            "US microplex build: targets complete",
+            marginal_targets=int(len(targets.marginal)),
+            continuous_targets=int(len(targets.continuous)),
+        )
         synthesis_variables = self._resolve_synthesis_variables(
             scaffold_input,
             fusion_plan=fusion_plan,
@@ -1752,9 +1771,23 @@ class USMicroplexPipeline:
             available_columns=set(seed_data.columns),
             observed_frame=seed_data,
         )
+        _emit_us_pipeline_progress(
+            "US microplex build: synthesis variables ready",
+            condition_vars=int(len(synthesis_variables.condition_vars)),
+            target_vars=int(len(synthesis_variables.target_vars)),
+        )
+        _emit_us_pipeline_progress(
+            "US microplex build: synthesis start",
+            rows=int(len(seed_data)),
+        )
         synthetic_data, synthesizer, synthesis_metadata = self.synthesize(
             seed_data,
             synthesis_variables=synthesis_variables,
+        )
+        _emit_us_pipeline_progress(
+            "US microplex build: synthesis complete",
+            rows=int(len(synthetic_data)),
+            columns=int(len(synthetic_data.columns)),
         )
         synthesis_metadata = {
             **synthesis_metadata,
@@ -1776,19 +1809,65 @@ class USMicroplexPipeline:
                 set(seed_data.columns)
             ),
         }
+        _emit_us_pipeline_progress(
+            "US microplex build: support enforcement start",
+            rows=int(len(synthetic_data)),
+        )
         synthetic_data = self.ensure_target_support(synthetic_data, seed_data, targets)
+        _emit_us_pipeline_progress(
+            "US microplex build: support enforcement complete",
+            rows=int(len(synthetic_data)),
+            columns=int(len(synthetic_data.columns)),
+        )
         if self.config.policyengine_targets_db is not None:
+            _emit_us_pipeline_progress(
+                "US microplex build: policyengine tables start",
+                rows=int(len(synthetic_data)),
+            )
             synthetic_tables = self.build_policyengine_entity_tables(synthetic_data)
+            _emit_us_pipeline_progress(
+                "US microplex build: policyengine tables complete",
+                households=int(len(synthetic_tables.households)),
+                persons=int(len(synthetic_tables.persons)),
+            )
+            _emit_us_pipeline_progress(
+                "US microplex build: policyengine calibration start",
+                backend=self.config.calibration_backend,
+            )
             (
                 policyengine_tables,
                 calibrated_data,
                 calibration_summary,
             ) = self.calibrate_policyengine_tables(synthetic_tables)
+            _emit_us_pipeline_progress(
+                "US microplex build: policyengine calibration complete",
+                backend=self.config.calibration_backend,
+                calibrated_rows=int(len(calibrated_data)),
+            )
         else:
+            _emit_us_pipeline_progress(
+                "US microplex build: calibration start",
+                backend=self.config.calibration_backend,
+                rows=int(len(synthetic_data)),
+            )
             calibrated_data, calibration_summary = self.calibrate(
                 synthetic_data, targets
             )
+            _emit_us_pipeline_progress(
+                "US microplex build: calibration complete",
+                backend=self.config.calibration_backend,
+                calibrated_rows=int(len(calibrated_data)),
+            )
+            _emit_us_pipeline_progress(
+                "US microplex build: policyengine tables start",
+                rows=int(len(calibrated_data)),
+            )
             policyengine_tables = self.build_policyengine_entity_tables(calibrated_data)
+            _emit_us_pipeline_progress(
+                "US microplex build: policyengine tables complete",
+                households=int(len(policyengine_tables.households)),
+                persons=int(len(policyengine_tables.persons)),
+            )
 
         return USMicroplexBuildResult(
             config=self.config,
