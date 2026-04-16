@@ -401,6 +401,31 @@ def download_puf(cache_dir: Path | None = None) -> Path:
     return Path(puf_path), Path(demo_path)
 
 
+def _resolve_policyengine_repo_local_puf_paths(
+    policyengine_us_data_repo: str | Path | None,
+) -> tuple[Path, Path | None] | None:
+    """Resolve raw PUF CSVs from a local policyengine-us-data checkout."""
+
+    if policyengine_us_data_repo is None:
+        return None
+    try:
+        repo_root = resolve_policyengine_us_data_repo_root(policyengine_us_data_repo)
+    except FileNotFoundError:
+        return None
+    candidate_dirs = (
+        repo_root / "policyengine_us_data" / "storage",
+        repo_root / "data" / "raw",
+    )
+    for candidate_dir in candidate_dirs:
+        puf_path = candidate_dir / "puf_2015.csv"
+        demographics_path = candidate_dir / "demographics_2015.csv"
+        if puf_path.exists():
+            return puf_path, (
+                demographics_path if demographics_path.exists() else None
+            )
+    return None
+
+
 def load_puf_raw(puf_path: Path, demographics_path: Path | None = None) -> pd.DataFrame:
     """Load raw PUF data from CSV."""
     print(f"Loading PUF from {puf_path}...")
@@ -1772,8 +1797,16 @@ def load_puf(
     Returns:
         DataFrame with common variable names, ready for stacking with CPS
     """
-    # Download if needed
-    puf_path, demo_path = download_puf(cache_dir)
+    # Prefer a repo-local raw PUF copy when available to avoid remote auth/cache
+    # requirements during rebuild runs.
+    local_repo_paths = _resolve_policyengine_repo_local_puf_paths(
+        policyengine_us_data_repo
+    )
+    if local_repo_paths is not None:
+        puf_path, demo_path = local_repo_paths
+        print(f"Using repo-local PUF from {puf_path}...")
+    else:
+        puf_path, demo_path = download_puf(cache_dir)
 
     # Load raw data
     raw = load_puf_raw(puf_path, demo_path)
@@ -2195,8 +2228,15 @@ class PUFSourceProvider:
             )
         )
         if puf_path is None:
-            loader = self.loader or download_puf
-            loaded_puf_path, loaded_demographics_path = loader(self.cache_dir)
+            local_repo_paths = _resolve_policyengine_repo_local_puf_paths(
+                policyengine_us_data_repo
+            )
+            if local_repo_paths is not None:
+                loaded_puf_path, loaded_demographics_path = local_repo_paths
+                print(f"Using repo-local PUF from {loaded_puf_path}...")
+            else:
+                loader = self.loader or download_puf
+                loaded_puf_path, loaded_demographics_path = loader(self.cache_dir)
             puf_path = loaded_puf_path
             if demographics_path is None:
                 demographics_path = loaded_demographics_path

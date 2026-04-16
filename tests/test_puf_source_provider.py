@@ -1058,6 +1058,46 @@ def test_download_puf_prefers_existing_local_files_without_hub_lookup(tmp_path, 
     assert resolved_demo_path == demographics_path
 
 
+def test_puf_source_provider_prefers_policyengine_repo_local_raw_files(
+    tmp_path, monkeypatch
+):
+    repo_root = tmp_path / "policyengine-us-data"
+    storage_dir = repo_root / "policyengine_us_data" / "storage"
+    storage_dir.mkdir(parents=True)
+    pd.DataFrame(
+        {
+            "RECID": [101],
+            "MARS": [1],
+            "XTOT": [1],
+            "S006": [100.0],
+            "E00200": [50_000.0],
+            "E02400": [0.0],
+            "E01400": [0.0],
+            "AGE_HEAD": [45],
+            "GENDER": [1],
+        }
+    ).to_csv(storage_dir / "puf_2015.csv", index=False)
+    pd.DataFrame({"RECID": [101]}).to_csv(
+        storage_dir / "demographics_2015.csv", index=False
+    )
+
+    def fail_loader(*args, **kwargs):
+        raise AssertionError("remote/cache loader should not run when repo-local PUF exists")
+
+    provider = PUFSourceProvider(
+        target_year=2015,
+        policyengine_us_data_repo=repo_root,
+        loader=fail_loader,
+        social_security_share_model_loader=_mock_social_security_share_model_loader,
+    )
+
+    frame = provider.load_frame(SourceQuery(period=2015))
+    persons = frame.tables[EntityType.PERSON]
+
+    assert len(persons) == 1
+    assert persons["employment_income"].sum() == 50_000.0
+
+
 def test_map_puf_variables_seed_controls_age_imputation():
     puf = pd.DataFrame(
         {
