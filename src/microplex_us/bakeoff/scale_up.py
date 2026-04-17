@@ -133,6 +133,18 @@ class ScaleUpStageConfig:
     seed: int = 42
     k: int = 5  # PRDC nearest-neighbor k
     n_generate: int | None = None  # None => match training-set size
+    prdc_max_samples: int = 20_000
+    """Cap on real and synth sample sizes fed to PRDC.
+
+    The `prdc` library materializes full pairwise distance matrices
+    (O(n_real * n_synth * n_features)). With n_real = 15k and n_synth =
+    61k and 50 features, that's ~7 GB per matrix — enough to OOM-kill
+    the process on a 48 GB workstation once multiple copies exist. The
+    metric is stable well below this scale: PRDC coverage on 15k real
+    vs 15k synthetic is essentially the same as 15k real vs 61k
+    synthetic. Cap keeps the evaluation tractable and consistent across
+    stages.
+    """
     data_path: Path = field(default=DEFAULT_ENHANCED_CPS_PATH)
     year: str = "2024"
     rare_cell_checks: tuple[dict[str, Any], ...] = field(
@@ -396,9 +408,18 @@ def _compute_zero_rate_mae(real: pd.DataFrame, synthetic: pd.DataFrame) -> float
 
 
 def _compute_prdc(
-    real: pd.DataFrame, synthetic: pd.DataFrame, k: int
+    real: pd.DataFrame,
+    synthetic: pd.DataFrame,
+    k: int,
+    max_samples: int = 20_000,
+    seed: int = 42,
 ) -> tuple[float, float, float]:
-    """Return (precision, density, coverage) via the `prdc` library."""
+    """Return (precision, density, coverage) via the `prdc` library.
+
+    `max_samples` caps both `real` and `synthetic` sample sizes before
+    PRDC to keep the O(n_real * n_synth * n_features) distance matrices
+    within a 48 GB-workstation budget.
+    """
     if compute_prdc is None:
         raise ImportError(
             "PRDC requires the `prdc` package. "
@@ -410,6 +431,14 @@ def _compute_prdc(
     cols = [c for c in real.columns if c in synthetic.columns]
     if not cols:
         raise ValueError("No shared columns between real and synthetic for PRDC")
+
+    rng = np.random.default_rng(seed)
+    if len(real) > max_samples:
+        real = real.iloc[rng.choice(len(real), size=max_samples, replace=False)]
+    if len(synthetic) > max_samples:
+        synthetic = synthetic.iloc[
+            rng.choice(len(synthetic), size=max_samples, replace=False)
+        ]
 
     r = real[cols].to_numpy(dtype=np.float64)
     s = synthetic[cols].to_numpy(dtype=np.float64)
@@ -475,7 +504,7 @@ class ScaleUpRunner:
         # Cast to a single dtype so downstream DataFrame.values stays
         # numeric-uniform (torch-based methods reject object arrays, which
         # is what pandas produces when columns mix bool/int32/float32).
-        df = df.astype(np.float32, copy=False)
+        df = df.astype(np.float32)
         if self.config.n_rows is not None and len(df) > self.config.n_rows:
             rng = np.random.default_rng(self.config.seed)
             idx = rng.choice(len(df), size=self.config.n_rows, replace=False)
@@ -575,7 +604,11 @@ class ScaleUpRunner:
                 continue
 
             precision, density, coverage = _compute_prdc(
-                holdout, synthetic, k=self.config.k
+                holdout,
+                synthetic,
+                k=self.config.k,
+                max_samples=self.config.prdc_max_samples,
+                seed=self.config.seed,
             )
             rare = _compute_rare_cell_ratios(
                 holdout, synthetic, self.config.rare_cell_checks

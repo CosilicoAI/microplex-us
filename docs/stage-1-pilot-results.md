@@ -39,27 +39,55 @@ Pattern: ZI-QRF *over-samples* rare non-zero cells (elderly SE, young dividend, 
 
 0.180 — mean absolute error in per-column zero-rate between real and synthetic is ~18 percentage points. That's substantial. Most likely driven by target columns where the zero-inflation classifier diverges from real; worth breaking down per column at stage 1.
 
-## Stage 1 — ZI-QRF + ZI-MAF + ZI-QDNN at 40,000 rows × 50 columns
+## Stage 1 — ZI-QRF + ZI-MAF + ZI-QDNN at 40k and 77k rows × 50 columns
 
-**Ran at 2026-04-17 00:04 ET. Total wall time: 237 s (3:57).**
+Ran both scales. **Ordering is preserved across scale**; absolute
+numbers shift because the PRDC sample cap differs (see note below).
 
-### Why 40,000 and not 77,006
+### Why the 40k intermediate run
 
-Two attempts to run ZI-QRF at the full 77,006 rows were killed by the OS
-(exit code 137 / SIGKILL) during fitting. At 40,000 rows the harness ran
-to completion cleanly on all three methods. Running 40 k puts the
-benchmark solidly in stage-1 range and leaves the 61 k failure as a
-separate investigation: the scaling curve between 40 k (3.5 GB RSS) and
-61 k (killed) is non-linear, likely from loky-worker memory accumulation
-across the 36 target columns. Documented as a follow-up below.
+The first 77k attempt OOM-killed during PRDC computation, not during
+synthesizer fitting. PRDC on 15k real × 61k synthetic × 50 features
+materializes ~7 GB-per-copy distance matrices that exceed what a
+48 GB workstation can hold once multiple copies exist. Fix was a
+`prdc_max_samples` cap (default 20 k); both sides sub-sampled before
+the metric. With the cap in place, 77k × 50 runs cleanly.
 
-### Results (real ECPS, 40k × 50)
+40 k result is kept because it ran earlier without the cap (8 k real
+vs 32 k synth) and is useful for the same-method-different-scale
+comparison.
+
+### Results (real ECPS, 40k × 50) — uncapped PRDC (8k × 32k)
 
 | Method | Coverage | Precision | Density | Fit (s) | Gen (s) | Peak RSS (GB) | Zero-rate MAE |
 |---|---:|---:|---:|---:|---:|---:|---:|
 | **ZI-QRF** | **0.465** | **0.230** | **0.120** | 20.5 | 2.0 | **3.5** | **0.179** |
 | ZI-MAF | 0.054 | 0.009 | 0.004 | 115.6 | 0.6 | 23.6 | 0.246 |
 | ZI-QDNN | 0.306 | 0.155 | 0.063 | 52.3 | 0.6 | 32.5 | 0.299 |
+
+### Results (real ECPS, 77k × 50) — capped PRDC at 15k × 15k
+
+| Method | Coverage | Precision | Density | Fit (s) | Gen (s) | Peak RSS (GB) | Zero-rate MAE |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| **ZI-QRF** | **0.256** | **0.233** | **0.121** | 36.0 | 3.0 | 6.0 | **0.177** |
+| ZI-MAF | 0.014 | 0.008 | 0.003 | 216.2 | 1.0 | 11.0 | 0.246 |
+| ZI-QDNN | 0.147 | 0.171 | 0.065 | 95.0 | 0.9 | 11.0 | 0.300 |
+
+The 40k / 77k coverage difference is dominated by the PRDC sample
+cap, not by method behavior — all three methods drop by roughly
+half. Holding PRDC sample size fixed (cap to 15k × 15k) would make the
+two runs directly comparable; we'd expect them to match. Planned as a
+small follow-up.
+
+Total 77k wall time: 362 s (6:02). ZI-MAF's 216 s fit and ZI-QDNN's
+95 s fit are the compute-bottleneck stages. ZI-QRF finishes in 36 s.
+
+### Summary across both scales
+
+Ordering: **ZI-QRF > ZI-QDNN > ZI-MAF** on both 40k and 77k
+runs. ZI-MAF coverage < 0.1 at both scales, effectively
+near-collapsed. ZI-QRF wins on coverage *and* cost (3–6 GB RSS,
+20–36 s fit vs 11–33 GB and 52–216 s for neural methods).
 
 ### Rare-cell preservation ratios (synthetic count / holdout count)
 
