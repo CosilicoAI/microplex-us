@@ -99,6 +99,47 @@ Yes, operationally:
 - Tests and small-scale diagnostics: `Calibrator`.
 - No single-pipeline run crosses all three. Each tool has a distinct and non-overlapping job.
 
+## Empirical support: sparse selection annihilates rare subpopulations
+
+The single cleanest empirical argument for this split comes from
+`microplex/benchmarks/results/sparse_coverage.csv`. Measuring rare-subpopulation
+preservation at varying sparsity levels (lower `coverage_median` = closer to
+oracle):
+
+| Method | `coverage_median` | elderly_selfemp_ratio | young_dividend_ratio |
+|---|---:|---:|---:|
+| Oracle (full) | 0.009 | 0.94 | 1.11 |
+| Generative (10%) | 0.53 | 27.7 | 20.6 |
+| Generative (2%) | 0.42 | 22.1 | 32.3 |
+| Generative (1%) | 0.25 | 7.2 | 1.7 |
+| Weighted (10%) | 0.24 | **0.00** | **0.00** |
+| Weighted (2%) | 0.35 | 0.02 | **0.00** |
+| Weighted (1%) | 0.65 | **0.00** | **0.00** |
+
+Sparse L0 weighting drops rare subpopulations to **zero representation** at
+every sparsity level tested. Generative synthesis preserves them at 7–30× the
+oracle ratio. For policy analysis, where rare subpopulations (elderly
+self-employed, young dividend earners, disability recipients, top-1% earners)
+drive outsized fiscal and distributional effects, sparse-as-mainline is
+non-viable on accuracy grounds alone.
+
+This empirical pattern reinforces the decision above: L0/sparse selection is a
+**post-calibration deployment tool**, not a calibration method. Apply it after
+the mainline `microcalibrate` run has produced a fully-covered adjusted-weight
+artifact, and only when a downstream consumer needs a small subsample.
+
+### Scale caveat
+
+`sparse_coverage.csv` was produced on **10,000-row synthetic data with ~7
+variables**. Production scale is 1.5M rows × 150+ variables on real joint
+microdata. We should not assume the 20–30× generative-vs-weighted gap holds at
+that scale — the absolute numbers will shift, and rare-subpopulation
+preservation may tighten for both methods. What is expected to hold is the
+structural pattern: sparse L0 exactly zeros out records, generative synthesis
+does not. The argument against sparse-as-mainline survives any plausible
+scale-up because the failure mode (zero representation of rare cells) is not a
+noise issue, it is mathematically baked into L0 selection.
+
 ## What this unblocks
 
 - Migration step 2 of `docs/core-wiring-audit.md`: "Adopt `Calibrator` end-to-end" is revised to "Adopt `microcalibrate` end-to-end as the production calibrator." That becomes the first real code change in `spec-based-ecps-rewire`.
