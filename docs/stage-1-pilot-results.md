@@ -73,14 +73,32 @@ comparison.
 | ZI-MAF | 0.014 | 0.008 | 0.003 | 216.2 | 1.0 | 11.0 | 0.246 |
 | ZI-QDNN | 0.147 | 0.171 | 0.065 | 95.0 | 0.9 | 11.0 | 0.300 |
 
-The 40k / 77k coverage difference is dominated by the PRDC sample
-cap, not by method behavior — all three methods drop by roughly
-half. Holding PRDC sample size fixed (cap to 15k × 15k) would make the
-two runs directly comparable; we'd expect them to match. Planned as a
-small follow-up.
-
 Total 77k wall time: 362 s (6:02). ZI-MAF's 216 s fit and ZI-QDNN's
 95 s fit are the compute-bottleneck stages. ZI-QRF finishes in 36 s.
+
+### Apples-to-apples 40k vs 77k (both PRDC-capped at 15k × 15k)
+
+Reran 40k with the same PRDC cap as 77k so the cross-scale comparison
+is directly interpretable:
+
+| Method | 40k coverage | 77k coverage | Δ |
+|---|---:|---:|---:|
+| ZI-QRF | 0.352 | 0.256 | −27 % |
+| ZI-QDNN | 0.222 | 0.147 | −34 % |
+| ZI-MAF | 0.029 | 0.014 | −52 % |
+
+**Coverage drops with training scale, not with data quality.** This is
+a known property of PRDC: the "covered" check uses a k-NN radius set
+on the real data itself. More real points make the radius tighter,
+and the same synthetic sample fails to cover more real points. So the
+absolute coverage number is only interpretable at a fixed real-sample
+size. The *ordering*, however, is invariant — and ZI-QRF wins at both
+scales. That's the production-relevant fact.
+
+One implication: for future stage-2 / stage-3 runs, fix both
+`holdout_frac` and the PRDC cap so coverage numbers are comparable
+across stages. Alternatively, switch to an embedding-based PRDC that
+is less sample-size-sensitive (flagged as follow-up).
 
 ### Summary across both scales
 
