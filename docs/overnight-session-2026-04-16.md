@@ -126,11 +126,12 @@ After the stage-1 evidence landed, I continued with the open items:
    learned 16-dim latent space. Settles whether the stage-1 ordering
    is metric-driven or method-driven. Not yet executed.
 4. **ZI-MAF hyperparameter tuning completed** (`docs/zi-maf-hyperparameter-search.md`) — four configs ran on 40 k × 50. Coverage goes from 0.026 (default) to 0.033 (wide+long, 16× params + 8 layers, 28 min fit). ZI-QRF on the same data gets 0.352 in 19 s. **ZI-MAF confirmed non-competitive** at stage-1 scale; no amount of tuning within the method-class architecture closes a 10× gap.
-5. **Quickstart doc** (`docs/quickstart-rewire.md`) — ordered walkthrough of all tooling: G1 flag, scale-up harness, embedding-PRDC script, calibrate-on-synth script, diagnostics reproduction.
-6. **Scripts for follow-on experiments**: `scripts/embedding_prdc_compare.py` (PRDC in learned 16-dim latent vs raw 50-dim) and `scripts/calibrate_on_synthesizer.py` (does calibration rescue weak synthesis?). Both executable, not yet run.
-7. **Method-kwargs config** — `ScaleUpStageConfig.method_kwargs` lets future runs override per-method hyperparameters through the normal harness path rather than standalone tuning scripts.
+5. **Embedding-PRDC validation completed** (`docs/embedding-prdc-validation.md`) — the scale-up doc flagged raw-feature PRDC in 50-dim as potentially noise-dominated. Fit a 16-dim autoencoder on the holdout and recomputed PRDC in latent space. **Ordering preserved in both spaces: ZI-QRF > ZI-QDNN > ZI-MAF.** ZI-QRF 0.348→0.309 raw→embed; ZI-MAF 0.025→0.038 raw→embed (still near-collapsed). The stage-1 ordering is robust.
+6. **Quickstart doc** (`docs/quickstart-rewire.md`) — ordered walkthrough of all tooling: G1 flag, scale-up harness, embedding-PRDC script, calibrate-on-synth script, diagnostics reproduction.
+7. **Calibrate-on-synthesizer script** (`scripts/calibrate_on_synthesizer.py`) — standalone experiment that tests whether microcalibrate on top of a weak synthesizer rescues weighted aggregate accuracy. Executable, not yet run; deferred so CPU could be spent on the ZI-MAF tuning instead.
+8. **Method-kwargs config** — `ScaleUpStageConfig.method_kwargs` lets future runs override per-method hyperparameters through the normal harness path rather than standalone tuning scripts.
 
-Updated PR #3 count: **19 commits**, all green tests, all pushed.
+Updated PR #3 count: **20 commits**, all green tests, all pushed. Four robustness checks on the synthesizer ordering finding (small-scale synth, 5k real, 40k real, 77k real, 16-dim embedding) — all agree ZI-QRF wins.
 
 ## How to run stage 1 yourself
 
