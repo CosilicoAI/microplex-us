@@ -472,6 +472,10 @@ class ScaleUpRunner:
         self.logger.info(
             "loaded enhanced_cps: %d rows, %d cols", len(df), len(df.columns)
         )
+        # Cast to a single dtype so downstream DataFrame.values stays
+        # numeric-uniform (torch-based methods reject object arrays, which
+        # is what pandas produces when columns mix bool/int32/float32).
+        df = df.astype(np.float32, copy=False)
         if self.config.n_rows is not None and len(df) > self.config.n_rows:
             rng = np.random.default_rng(self.config.seed)
             idx = rng.choice(len(df), size=self.config.n_rows, replace=False)

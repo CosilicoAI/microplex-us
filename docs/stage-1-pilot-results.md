@@ -39,38 +39,133 @@ Pattern: ZI-QRF *over-samples* rare non-zero cells (elderly SE, young dividend, 
 
 0.180 — mean absolute error in per-column zero-rate between real and synthetic is ~18 percentage points. That's substantial. Most likely driven by target columns where the zero-inflation classifier diverges from real; worth breaking down per column at stage 1.
 
-## Stage 1 — ZI-QRF + ZI-MAF + ZI-QDNN at 77,006 rows × 50 columns
+## Stage 1 — ZI-QRF + ZI-MAF + ZI-QDNN at 40,000 rows × 50 columns
 
-**Status: running at 2026-04-16 23:50 ET.** Results will be appended here when the job completes.
+**Ran at 2026-04-17 00:04 ET. Total wall time: 237 s (3:57).**
 
-Expected completion based on ballpark from `docs/synthesizer-benchmark-scale-up.md`:
+### Why 40,000 and not 77,006
 
-- ZI-QRF fit: ~15 minutes (36 target cols × ~25s each on 61k rows × 100 trees)
-- ZI-MAF fit: probably 45 min – 2 hours on CPU (no MPS integration in the benchmark class; one flow per column × 50 epochs × 256 batch size)
-- ZI-QDNN fit: ~20 min (smaller network, CPU-friendly)
-- Generation: 5–15 min per method
+Two attempts to run ZI-QRF at the full 77,006 rows were killed by the OS
+(exit code 137 / SIGKILL) during fitting. At 40,000 rows the harness ran
+to completion cleanly on all three methods. Running 40 k puts the
+benchmark solidly in stage-1 range and leaves the 61 k failure as a
+separate investigation: the scaling curve between 40 k (3.5 GB RSS) and
+61 k (killed) is non-linear, likely from loky-worker memory accumulation
+across the 36 target columns. Documented as a follow-up below.
 
-Total stage 1 wall time: 1–3 hours.
+### Results (real ECPS, 40k × 50)
 
-Output: `artifacts/scale_up_stage1.json`, `artifacts/scale_up_stage1.log`.
-
-### Results (TO BE POPULATED)
-
-Template table — update in place once the job completes:
-
-| Method | Coverage | Precision | Density | Fit (s) | Gen (s) | Peak RSS | Zero-rate MAE |
+| Method | Coverage | Precision | Density | Fit (s) | Gen (s) | Peak RSS (GB) | Zero-rate MAE |
 |---|---:|---:|---:|---:|---:|---:|---:|
-| ZI-QRF | — | — | — | — | — | — | — |
-| ZI-MAF | — | — | — | — | — | — | — |
-| ZI-QDNN | — | — | — | — | — | — | — |
+| **ZI-QRF** | **0.465** | **0.230** | **0.120** | 20.5 | 2.0 | **3.5** | **0.179** |
+| ZI-MAF | 0.054 | 0.009 | 0.004 | 115.6 | 0.6 | 23.6 | 0.246 |
+| ZI-QDNN | 0.306 | 0.155 | 0.063 | 52.3 | 0.6 | 32.5 | 0.299 |
 
-### Rare-cell preservation ratios (TO BE POPULATED)
+### Rare-cell preservation ratios (synthetic count / holdout count)
 
-| Method | elderly_SE | young_div | disabled_SSDI | top_1% |
+| Method | elderly_SE | young_dividend | disabled_SSDI | top_1% |
 |---|---:|---:|---:|---:|
-| ZI-QRF | — | — | — | — |
-| ZI-MAF | — | — | — | — |
-| ZI-QDNN | — | — | — | — |
+| ZI-QRF | 2.4 | 3.8 | **0.0** | 3.95 |
+| ZI-MAF | 103.6 | 3.8 | **0.0** | 3.95 |
+| ZI-QDNN | 116.7 | 3.4 | **0.0** | 3.95 |
+
+Neural methods severely over-produce `elderly_self_employed` (100×+) —
+suggests their zero-inflation classifiers are fundamentally
+miscalibrated for this cell on real data. Every method drives
+`disabled_ssdi` to 0.0, consistent with the pilot finding. Every method
+over-produces top-1% employment at ~4×.
+
+## Major finding: the small-benchmark ordering inverts at production scale
+
+| Method | 10k × 7 synthetic (benchmark_multi_seed, CPS column) | 40k × 50 real ECPS |
+|---|---:|---:|
+| ZI-MAF | 0.499 ← winner | **0.054** |
+| ZI-QDNN | 0.406 | 0.306 |
+| ZI-QRF | 0.347 | **0.465** ← winner |
+
+**Read from this result before trusting any small-scale benchmark.** The
+published ranking that named ZI-MAF (and by implication ZI-QDNN as the
+near-term production direction in the SS-model doc) best reversed
+completely as soon as we moved to:
+
+1. Real joint distributions instead of analytically-generated synthetic.
+2. 50 columns instead of 7 (~7× feature dimensionality).
+3. 40 k rows instead of 10 k (4× data).
+
+## Interpretation
+
+1. **ZI-MAF at 0.054 is near-collapsed.** Not merely "third-best" — it's
+   producing samples that aren't close to any holdout record. Three
+   plausible causes, any combination of which might be active:
+   - Default hyperparameters (n_layers=4, hidden_dim=32, 50 epochs) are
+     too small for 50-dim targets. The network is a per-column flow, so
+     each of the 36 flows has only ~1k–5k effective parameters. May be
+     fundamentally under-capacity.
+   - Zero-inflation handling in ZI-MAF combines a classifier (RF, 50
+     trees) for P(zero) with a MAF for nonzero values. When the
+     classifier is imprecise on rare non-zero cells, the MAF has very
+     few positive samples to train on, and mode-collapses.
+   - The loss log-transforms positive values and standardizes; for
+     heavy-tailed distributions (top-1 % income) this degrades
+     conditional tail estimation.
+2. **ZI-QDNN at 0.306 is mid-pack.** Better than ZI-MAF but materially
+   worse than ZI-QRF. Suggests the quantile DNN's conditional
+   estimates are reasonable but not tree-accurate. Worth noting RSS
+   was 32 GB — highest of the three — which would OOM on a typical
+   workstation without swap. Not a production-ready cost profile
+   without batch-size or architecture tuning.
+3. **ZI-QRF at 0.465 is the clear winner.** 3.5 GB RSS, 20-second fit,
+   and nearly 2× ZI-QDNN's coverage. This is the production default for
+   the rewire's cross-section synthesizer step.
+
+## Implications for the SS-model methodology doc
+
+The SS-model methodology doc's "production direction: ZI-QDNN" claim
+does not survive this benchmark. At production scale on real data with
+default hyperparameters, neither ZI-MAF nor ZI-QDNN is competitive with
+ZI-QRF. The doc should be updated to note this finding, and the
+longitudinal extension should treat ZI-QRF as at minimum a strong
+baseline.
+
+Two caveats that keep the SS-model direction alive:
+
+1. Hyperparameter-tuned ZI-MAF / ZI-QDNN *might* beat ZI-QRF. The
+   scale-up doc listed "ZI-MAF needs careful hyperparameter tuning on
+   real data" as a known risk; stage-1 confirms the risk.
+2. Trajectory / pathwise generation is a different problem from
+   cross-sectional conditional modeling. A sequence-model win at
+   longitudinal need not follow from cross-sectional results.
+3. Both neural methods used 32-GB-class memory to train; at the 3.4 M
+   row v6 scale the naive extrapolation is ~1.6 TB. Tree methods'
+   modest memory profile may be decisive on a workstation regardless
+   of quality.
+
+## Follow-up work flagged by this run
+
+1. **61k ZI-QRF OOM diagnosis.** Scaling is clean up to 40 k (3.5 GB
+   RSS). 61 k fails silently in < 2 min with SIGKILL. Most likely
+   cause: loky workers accumulating memory across the 36 target
+   columns. Fix paths: `n_jobs=4` instead of `-1`, or a
+   worker-recycling wrapper, or just disable parallelism and accept
+   slower fit.
+2. **ZI-MAF hyperparameter search.** Before accepting
+   ZI-MAF-is-not-viable as the final answer, run with n_layers=8,
+   hidden_dim=128, epochs=200 and see if coverage recovers. One
+   evening of tuning could either rescue the method or definitively
+   rule it out.
+3. **Embedding-based PRDC.** Raw-feature PRDC in 50 dimensions is
+   predicted by the scale-up doc to degenerate. Fit a 16-dim
+   autoencoder on holdout, re-run PRDC in that space, and check
+   whether the method ordering changes. If it does, the 50 k result
+   is a metric artifact, not a method verdict.
+4. **Per-column zero-rate breakdown.** All three methods drive
+   `disabled_ssdi` to 0.0 synthetic count. Needs per-column MAE
+   reporting to identify which other columns systematically break.
+5. **`microcalibrate` applied on top.** The synthesizer results above
+   are uncalibrated. The mainline pipeline runs synthesis then
+   calibration. Worth repeating stage 1 with `MicrocalibrateAdapter`
+   applied to the generated records and measuring whether calibration
+   lifts ZI-MAF / ZI-QDNN coverage back into the competitive range.
 
 ## Interpretation guide (for when results land)
 
