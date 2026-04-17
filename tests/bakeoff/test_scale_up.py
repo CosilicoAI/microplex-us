@@ -142,3 +142,22 @@ def test_default_column_sets_are_sensible() -> None:
     assert len(DEFAULT_CONDITION_COLS) >= 5
     assert len(DEFAULT_TARGET_COLS) >= 20
     assert len(total) <= 60, "Stage-1 default exceeds ~50-column budget"
+
+
+def test_incremental_jsonl_persists_each_method(
+    small_config: ScaleUpStageConfig, tmp_path: Path
+) -> None:
+    """Each completed method gets written as JSONL before the next starts."""
+    import json as _json
+
+    runner = ScaleUpRunner(small_config)
+    incremental = tmp_path / "stage_incremental.jsonl"
+    results = runner.run(incremental_path=incremental)
+
+    assert incremental.exists()
+    lines = [ln for ln in incremental.read_text().splitlines() if ln.strip()]
+    assert len(lines) == len(results)
+    # Round-trip: each line decodes to a ScaleUpResult-shaped dict.
+    for line in lines:
+        d = _json.loads(line)
+        assert {"method", "stage", "coverage", "fit_wall_seconds"} <= set(d)
