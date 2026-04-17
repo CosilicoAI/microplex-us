@@ -163,6 +163,34 @@ def test_incremental_jsonl_persists_each_method(
         assert {"method", "stage", "coverage", "fit_wall_seconds"} <= set(d)
 
 
+def test_method_kwargs_forwarded_to_constructor(
+    small_config: ScaleUpStageConfig,
+) -> None:
+    """Method-level hyperparameter overrides reach the method class."""
+    # ZI-QRF accepts n_estimators as a constructor kwarg. Override to
+    # 3 trees so we can verify it propagates.
+    cfg = ScaleUpStageConfig(
+        stage=small_config.stage,
+        n_rows=small_config.n_rows,
+        methods=("ZI-QRF",),
+        condition_cols=small_config.condition_cols,
+        target_cols=small_config.target_cols,
+        holdout_frac=small_config.holdout_frac,
+        seed=small_config.seed,
+        k=small_config.k,
+        n_generate=small_config.n_generate,
+        data_path=small_config.data_path,
+        year=small_config.year,
+        rare_cell_checks=small_config.rare_cell_checks,
+        method_kwargs={"ZI-QRF": {"n_estimators": 3}},
+    )
+    runner = ScaleUpRunner(cfg)
+    df = runner.load_frame()
+    train, _ = runner.split(df)
+    synthetic, _ = runner.fit_and_generate("ZI-QRF", train, n_generate=50)
+    assert len(synthetic) == 50
+
+
 def test_zero_rate_per_column_populated(small_config: ScaleUpStageConfig) -> None:
     """Per-column zero-rate breakdown is recorded for every target column."""
     runner = ScaleUpRunner(small_config)

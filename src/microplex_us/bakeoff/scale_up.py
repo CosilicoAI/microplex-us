@@ -134,6 +134,16 @@ class ScaleUpStageConfig:
     k: int = 5  # PRDC nearest-neighbor k
     n_generate: int | None = None  # None => match training-set size
     prdc_max_samples: int = 20_000
+    method_kwargs: dict[str, dict[str, Any]] = field(default_factory=dict)
+    """Per-method hyperparameter overrides.
+
+    Keys are the method registry names (`"ZI-QRF"`, `"ZI-MAF"`,
+    `"ZI-QDNN"`, ...); values are dicts of kwargs forwarded to the
+    method's constructor. Empty dict means "use method class defaults".
+
+    Example:
+        method_kwargs={"ZI-MAF": {"n_layers": 8, "hidden_dim": 128, "epochs": 200}}
+    """
     """Cap on real and synth sample sizes fed to PRDC.
 
     The `prdc` library materializes full pairwise distance matrices
@@ -476,7 +486,7 @@ def _compute_prdc(
     )
 
 
-def _build_method(method_name: str) -> Any:
+def _build_method(method_name: str, kwargs: dict[str, Any] | None = None) -> Any:
     from microplex.eval.benchmark import (
         CTGANMethod,
         MAFMethod,
@@ -502,7 +512,7 @@ def _build_method(method_name: str) -> Any:
         raise ValueError(
             f"Unknown method {method_name!r}. Known: {sorted(registry)}"
         )
-    return registry[method_name]()
+    return registry[method_name](**(kwargs or {}))
 
 
 class ScaleUpRunner:
@@ -543,7 +553,9 @@ class ScaleUpRunner:
         self, method_name: str, train: pd.DataFrame, n_generate: int
     ) -> tuple[pd.DataFrame, dict[str, float]]:
         """Fit method on `train` and generate `n_generate` synthetic records."""
-        method = _build_method(method_name)
+        method = _build_method(
+            method_name, kwargs=self.config.method_kwargs.get(method_name)
+        )
 
         # The benchmark methods take a multi-source dict; pass a single source.
         sources = {"enhanced_cps_2024": train.copy()}
