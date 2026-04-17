@@ -161,3 +161,30 @@ def test_incremental_jsonl_persists_each_method(
     for line in lines:
         d = _json.loads(line)
         assert {"method", "stage", "coverage", "fit_wall_seconds"} <= set(d)
+
+
+def test_zero_rate_per_column_populated(small_config: ScaleUpStageConfig) -> None:
+    """Per-column zero-rate breakdown is recorded for every target column."""
+    runner = ScaleUpRunner(small_config)
+    results = runner.run()
+    assert len(results) == 1
+    r = results[0]
+    assert r.zero_rate_per_column, "Expected non-empty zero_rate_per_column"
+    for col, entry in r.zero_rate_per_column.items():
+        assert set(entry) == {"real", "synth", "abs_diff"}
+        assert 0.0 <= entry["real"] <= 1.0
+        assert 0.0 <= entry["synth"] <= 1.0
+        assert entry["abs_diff"] >= 0.0
+        # abs_diff should be consistent with real/synth values.
+        assert abs(entry["abs_diff"] - abs(entry["real"] - entry["synth"])) < 1e-9
+    # Confirm all target columns are covered.
+    covered = set(r.zero_rate_per_column)
+    assert set(small_config.target_cols) <= covered
+    # And that the scalar MAE is close to the mean of abs_diff over target cols.
+    target_diffs = [
+        r.zero_rate_per_column[c]["abs_diff"] for c in small_config.target_cols
+    ]
+    # MAE is averaged over all shared columns (conditioning + target), so this
+    # is only a rough consistency check: the per-target mean should be
+    # within the scalar MAE's ballpark.
+    assert min(target_diffs) <= r.zero_rate_mae + 1e-9
