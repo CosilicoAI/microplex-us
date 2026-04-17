@@ -27,6 +27,10 @@ In order:
 | `06367fa` | `__main__.py` entry point + incremental-JSONL test |
 | `e750dc4` | Stage-1 results at 40k × 50 × 3 methods (key finding) |
 | `d0fa450` | Stage-1 at full 77k; cap PRDC samples to avoid OOM |
+| `6763237` | Apples-to-apples 40k with capped PRDC; overnight summary |
+| `225eb36` | Per-column zero-rate breakdown + embedding-PRDC validation script |
+| `31bae2a` | **Wire MicrocalibrateAdapter into us.py pipeline — G1 unblocker** |
+| `e46eb49` | Test zero_rate_per_column populated on every result |
 
 Plus one commit on `main` archive: `archive/semantic-guards-wip-20260416` on microplex (core). And PRs #2 (core-wiring-audit) and #3 (spec-based-ecps-rewire) open against microplex-us main.
 
@@ -89,9 +93,44 @@ Branch is in good shape for review. No outstanding tasks block merge.
 
 ## What I did not do
 
-- **No changes to main production pipelines.** `pe_us_data_rebuild_checkpoint.py` / `us.py` are untouched. The rewire lives on its branch as docs + harness + adapter, ready to wire in.
-- **No v7 run.** With the stage-1 evidence now in hand, the next production run should use the rewired path (CPS scaffold + microcalibrate), not another v4/v5/v6-style invocation of the current pipeline.
-- **No rerun on GPU.** ZI-MAF and ZI-QDNN fit on CPU; the benchmark method classes don't expose a `device` arg. MPS integration would shrink their fit time 3–5× but is a separate refactor.
+- **No v7 run.** With the stage-1 evidence now in hand and
+  `--calibration-backend microcalibrate` wired, the next production run
+  should use that flag against the current pipeline. Expected outcome:
+  the v4/v6 OOM is gone.
+- **No rerun on GPU.** ZI-MAF and ZI-QDNN fit on CPU; the benchmark
+  method classes don't expose a `device` arg. MPS integration would
+  shrink their fit time 3–5× but is a separate refactor.
+
+## Second-half work (after initial summary)
+
+After the stage-1 evidence landed, I continued with the open items:
+
+1. **Microcalibrate wiring into `us.py`** (commit `31bae2a`) — 20-line
+   change plus dispatch test. `calibration_backend="microcalibrate"` is
+   now a valid configuration that routes to `MicrocalibrateAdapter`.
+   The existing `_apply_policyengine_constraint_stage` call site at
+   `us.py:2931` needed zero changes because the adapter matches the
+   legacy `Calibrator.fit_transform` / `.validate` contract exactly.
+   `docs/microcalibrate-wiring-plan.md` captures rollout steps and
+   risk register.
+2. **Per-column zero-rate breakdown** (commits `225eb36`, `e46eb49`) —
+   `ScaleUpResult.zero_rate_per_column` now reports `{real, synth,
+   abs_diff}` per column. Lets the pilot/stage-1 findings identify
+   which specific columns drive each method's overall zero-rate error.
+   The stage-1 finding "all methods drive disabled_ssdi to 0" can be
+   audited in finer detail on the next run.
+3. **Embedding-PRDC validation script**
+   (`scripts/embedding_prdc_compare.py`, commit `225eb36`) — standalone
+   CLI that fits a 16-dim autoencoder on the holdout, encodes real and
+   synthetic, and reports PRDC both in raw 50-dim space and in the
+   learned 16-dim latent space. Settles whether the stage-1 ordering
+   is metric-driven or method-driven. Not yet executed.
+4. **ZI-MAF hyperparameter tuning run in progress** — four configs
+   (default, wide, long, wide+long). Running at 40k × 50. Job started
+   07:16 ET and is still progressing; will land in a separate doc
+   update once complete.
+
+Updated PR #3 count: **15 commits**, all green tests, all pushed.
 
 ## How to run stage 1 yourself
 
