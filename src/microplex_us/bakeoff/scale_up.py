@@ -329,13 +329,24 @@ def _load_enhanced_cps(
 
 
 def _peak_rss_gb() -> float:
-    """Current process's max resident set size in GB."""
+    """Current process's max resident set size in GB.
+
+    Unit of `ru_maxrss` is platform-dependent:
+      - Linux: kilobytes
+      - macOS (Darwin): bytes
+      - FreeBSD: kilobytes (but verify)
+
+    Cross-checked against psutil on macOS Python 3.14: ru_maxrss is in bytes
+    (e.g., 190_873_600 raw = 0.18 GB matches `psutil.Process().memory_info().rss`).
+    """
+    import sys
+
     r = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
-    # On macOS ru_maxrss is bytes, on Linux it's kilobytes. Detect by magnitude:
-    if r < 1024 * 1024 * 1024:  # less than 1 GB means kilobytes
-        bytes_rss = r * 1024
-    else:
+    if sys.platform == "darwin":
         bytes_rss = r
+    else:
+        # Linux and most BSDs: kilobytes
+        bytes_rss = r * 1024
     return bytes_rss / (1024**3)
 
 
