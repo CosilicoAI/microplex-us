@@ -486,6 +486,54 @@ def _compute_prdc(
     )
 
 
+def _snap_categorical_shared_cols(
+    synthetic: pd.DataFrame,
+    train: pd.DataFrame,
+    shared_cols: list[str],
+) -> pd.DataFrame:
+    """Snap categorical-looking shared-column synthetic values to training-pool values.
+
+    `microplex.eval.benchmark._MultiSourceBase.generate` adds Gaussian noise
+    (sigma=0.1) to EVERY shared-column value before regenerating the
+    non-shared columns. This pollutes binary and categorical conditioning
+    variables (e.g., `is_military=1` becomes `1.04`; `cps_race=3` becomes
+    `2.97`, `state_fips=6` becomes `6.11`).
+
+    Heuristic: a shared column is "categorical-looking" if every value in
+    the training pool is exactly integer-valued (up to float precision).
+    Those columns have every synthetic value snapped to its nearest
+    training-pool value. Continuous shared columns (non-integer training
+    values) keep the noise — it may legitimately add variation for them.
+
+    Examples of columns this catches: all is_* flags, cps_race, state_fips,
+    own_children_in_household.
+
+    Examples of columns left alone: age (if fractional), pre_tax_contributions.
+    """
+    out = synthetic.copy()
+    for col in shared_cols:
+        if col not in out.columns or col not in train.columns:
+            continue
+        train_vals = train[col].to_numpy()
+        # Integer-valued iff every value equals its rounded version.
+        if not np.all(np.isclose(train_vals, np.round(train_vals), atol=1e-6)):
+            continue
+        uniques = np.sort(pd.unique(train_vals))
+        synth_vals = out[col].to_numpy()
+        # For every synthetic value, find the nearest training-pool value.
+        idx = np.searchsorted(uniques, synth_vals)
+        idx = np.clip(idx, 0, len(uniques) - 1)
+        left = uniques[np.clip(idx - 1, 0, len(uniques) - 1)]
+        right = uniques[idx]
+        snapped = np.where(
+            np.abs(synth_vals - left) <= np.abs(synth_vals - right),
+            left,
+            right,
+        )
+        out[col] = snapped.astype(train[col].dtype, copy=False)
+    return out
+
+
 def _build_method(method_name: str, kwargs: dict[str, Any] | None = None) -> Any:
     from microplex.eval.benchmark import (
         CTGANMethod,
@@ -570,6 +618,8 @@ class ScaleUpRunner:
         t_gen = time.perf_counter()
         synthetic = method.generate(n_generate, seed=self.config.seed)
         gen_wall = time.perf_counter() - t_gen
+
+        synthetic = _snap_categorical_shared_cols(synthetic, train, shared_cols)
 
         return synthetic, {
             "fit_wall_seconds": fit_wall,
