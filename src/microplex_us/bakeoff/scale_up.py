@@ -202,6 +202,7 @@ class ScaleUpResult:
     coverage: float
     rare_cell_ratios: dict[str, float]
     zero_rate_mae: float
+    zero_rate_per_column: dict[str, dict[str, float]] = field(default_factory=dict)
     notes: str = ""
 
     def to_dict(self) -> dict[str, Any]:
@@ -405,6 +406,23 @@ def _compute_zero_rate_mae(real: pd.DataFrame, synthetic: pd.DataFrame) -> float
         s_zero = float((synthetic[c] == 0).mean())
         errs.append(abs(r_zero - s_zero))
     return float(np.mean(errs)) if errs else 0.0
+
+
+def _compute_zero_rate_per_column(
+    real: pd.DataFrame, synthetic: pd.DataFrame
+) -> dict[str, dict[str, float]]:
+    """Per-column {real_zero_rate, synth_zero_rate, abs_diff} breakdown."""
+    cols = [c for c in real.columns if c in synthetic.columns]
+    out: dict[str, dict[str, float]] = {}
+    for c in cols:
+        r_zero = float((real[c] == 0).mean())
+        s_zero = float((synthetic[c] == 0).mean())
+        out[c] = {
+            "real": r_zero,
+            "synth": s_zero,
+            "abs_diff": abs(r_zero - s_zero),
+        }
+    return out
 
 
 def _compute_prdc(
@@ -614,6 +632,7 @@ class ScaleUpRunner:
                 holdout, synthetic, self.config.rare_cell_checks
             )
             zero_mae = _compute_zero_rate_mae(holdout, synthetic)
+            zero_per_col = _compute_zero_rate_per_column(holdout, synthetic)
 
             result = ScaleUpResult(
                 stage=self.config.stage,
@@ -630,6 +649,7 @@ class ScaleUpRunner:
                 coverage=coverage,
                 rare_cell_ratios=rare,
                 zero_rate_mae=zero_mae,
+                zero_rate_per_column=zero_per_col,
                 notes="",
             )
             results.append(result)
