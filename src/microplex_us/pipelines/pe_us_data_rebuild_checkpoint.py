@@ -2032,6 +2032,34 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--defer-native-audit", action="store_true")
     parser.add_argument("--defer-imputation-ablation", action="store_true")
     parser.add_argument("--require-policyengine-native-score", action="store_true")
+    parser.add_argument(
+        "--calibration-backend",
+        choices=[
+            "entropy",
+            "ipf",
+            "chi2",
+            "sparse",
+            "hardconcrete",
+            "pe_l0",
+            "microcalibrate",
+            "none",
+        ],
+        default=None,
+        help=(
+            "Weighting/calibration backend. Default is the config default "
+            "(entropy). Use `microcalibrate` for the identity-preserving "
+            "gradient-descent chi-squared backend that survived the v6 OOM."
+        ),
+    )
+    parser.add_argument(
+        "--calibration-max-iter",
+        type=int,
+        default=None,
+        help=(
+            "Max iterations / epochs for the calibration solver. Passed "
+            "through to USMicroplexBuildConfig.calibration_max_iter."
+        ),
+    )
     args = parser.parse_args(argv)
 
     config_overrides = {
@@ -2042,6 +2070,10 @@ def main(argv: list[str] | None = None) -> None:
         config_overrides["donor_imputer_condition_selection"] = (
             args.donor_imputer_condition_selection
         )
+    if args.calibration_backend is not None:
+        config_overrides["calibration_backend"] = args.calibration_backend
+    if args.calibration_max_iter is not None:
+        config_overrides["calibration_max_iter"] = int(args.calibration_max_iter)
 
     result = run_policyengine_us_data_rebuild_checkpoint(
         output_root=args.output_root,
