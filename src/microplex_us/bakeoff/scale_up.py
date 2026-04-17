@@ -514,8 +514,17 @@ class ScaleUpRunner:
             "peak_rss_gb_during_fit": peak_fit_rss,
         }
 
-    def run(self) -> list[ScaleUpResult]:
-        """Run every configured method on the loaded frame; return results."""
+    def run(
+        self,
+        incremental_path: Path | None = None,
+    ) -> list[ScaleUpResult]:
+        """Run every configured method on the loaded frame; return results.
+
+        If `incremental_path` is given, each method's `ScaleUpResult` is
+        appended to that path as JSONL *as soon as it completes*. This
+        guarantees at least partial output if a later method crashes or
+        the host is interrupted.
+        """
         df = self.load_frame()
         train, holdout = self.split(df)
         n_generate = self.config.n_generate or len(train)
@@ -526,6 +535,11 @@ class ScaleUpRunner:
             n_generate,
         )
 
+        if incremental_path is not None:
+            incremental_path.parent.mkdir(parents=True, exist_ok=True)
+            # Truncate any prior JSONL so this run's output is self-contained.
+            incremental_path.write_text("")
+
         results: list[ScaleUpResult] = []
         for method_name in self.config.methods:
             self.logger.info("== fitting %s ==", method_name)
@@ -535,25 +549,25 @@ class ScaleUpRunner:
                 )
             except Exception as exc:  # pragma: no cover
                 self.logger.error("method %s failed: %s", method_name, exc)
-                results.append(
-                    ScaleUpResult(
-                        stage=self.config.stage,
-                        method=method_name,
-                        seed=self.config.seed,
-                        n_train_rows=len(train),
-                        n_holdout_rows=len(holdout),
-                        n_cols=len(df.columns),
-                        fit_wall_seconds=0.0,
-                        generate_wall_seconds=0.0,
-                        peak_rss_gb_during_fit=0.0,
-                        precision=0.0,
-                        density=0.0,
-                        coverage=0.0,
-                        rare_cell_ratios={},
-                        zero_rate_mae=0.0,
-                        notes=f"FAILED: {type(exc).__name__}: {exc}",
-                    )
+                result = ScaleUpResult(
+                    stage=self.config.stage,
+                    method=method_name,
+                    seed=self.config.seed,
+                    n_train_rows=len(train),
+                    n_holdout_rows=len(holdout),
+                    n_cols=len(df.columns),
+                    fit_wall_seconds=0.0,
+                    generate_wall_seconds=0.0,
+                    peak_rss_gb_during_fit=0.0,
+                    precision=0.0,
+                    density=0.0,
+                    coverage=0.0,
+                    rare_cell_ratios={},
+                    zero_rate_mae=0.0,
+                    notes=f"FAILED: {type(exc).__name__}: {exc}",
                 )
+                results.append(result)
+                self._persist_incremental(incremental_path, result)
                 continue
 
             precision, density, coverage = _compute_prdc(
@@ -564,25 +578,25 @@ class ScaleUpRunner:
             )
             zero_mae = _compute_zero_rate_mae(holdout, synthetic)
 
-            results.append(
-                ScaleUpResult(
-                    stage=self.config.stage,
-                    method=method_name,
-                    seed=self.config.seed,
-                    n_train_rows=len(train),
-                    n_holdout_rows=len(holdout),
-                    n_cols=len(df.columns),
-                    fit_wall_seconds=timing["fit_wall_seconds"],
-                    generate_wall_seconds=timing["generate_wall_seconds"],
-                    peak_rss_gb_during_fit=timing["peak_rss_gb_during_fit"],
-                    precision=precision,
-                    density=density,
-                    coverage=coverage,
-                    rare_cell_ratios=rare,
-                    zero_rate_mae=zero_mae,
-                    notes="",
-                )
+            result = ScaleUpResult(
+                stage=self.config.stage,
+                method=method_name,
+                seed=self.config.seed,
+                n_train_rows=len(train),
+                n_holdout_rows=len(holdout),
+                n_cols=len(df.columns),
+                fit_wall_seconds=timing["fit_wall_seconds"],
+                generate_wall_seconds=timing["generate_wall_seconds"],
+                peak_rss_gb_during_fit=timing["peak_rss_gb_during_fit"],
+                precision=precision,
+                density=density,
+                coverage=coverage,
+                rare_cell_ratios=rare,
+                zero_rate_mae=zero_mae,
+                notes="",
             )
+            results.append(result)
+            self._persist_incremental(incremental_path, result)
             self.logger.info(
                 "  %s: coverage=%.3f precision=%.3f density=%.3f fit=%.1fs gen=%.1fs peak_rss=%.2fGB",
                 method_name,
@@ -594,6 +608,17 @@ class ScaleUpRunner:
                 timing["peak_rss_gb_during_fit"],
             )
         return results
+
+    @staticmethod
+    def _persist_incremental(
+        path: Path | None, result: ScaleUpResult
+    ) -> None:
+        """Append one `ScaleUpResult` as a JSONL row (if path is set)."""
+        if path is None:
+            return
+        with path.open("a") as f:
+            f.write(json.dumps(result.to_dict(), default=str))
+            f.write("\n")
 
 
 def _results_to_dataframe(results: list[ScaleUpResult]) -> pd.DataFrame:
@@ -630,7 +655,22 @@ def main(argv: list[str] | None = None) -> int:
         default="INFO",
         choices=["DEBUG", "INFO", "WARNING", "ERROR"],
     )
+    parser.add_argument(
+        "--incremental-jsonl",
+        type=Path,
+        default=None,
+        help=(
+            "Optional path to a JSONL file where each method's result is "
+            "appended as soon as it completes. Defaults to the final "
+            "--output path with '.partial.jsonl' appended."
+        ),
+    )
     args = parser.parse_args(argv)
+
+    if args.incremental_jsonl is None:
+        args.incremental_jsonl = args.output.with_suffix(
+            args.output.suffix + ".partial.jsonl"
+        )
 
     logging.basicConfig(
         level=getattr(logging, args.log_level),
@@ -655,7 +695,7 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     runner = ScaleUpRunner(cfg)
-    results = runner.run()
+    results = runner.run(incremental_path=args.incremental_jsonl)
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(
