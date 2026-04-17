@@ -1405,7 +1405,14 @@ class USMicroplexBuildConfig:
     n_synthetic: int = 100_000
     synthesis_backend: Literal["bootstrap", "synthesizer", "seed"] = "synthesizer"
     calibration_backend: Literal[
-        "entropy", "ipf", "chi2", "sparse", "hardconcrete", "pe_l0", "none"
+        "entropy",
+        "ipf",
+        "chi2",
+        "sparse",
+        "hardconcrete",
+        "pe_l0",
+        "microcalibrate",
+        "none",
     ] = "entropy"
     calibration_tol: float = 1e-6
     calibration_max_iter: int = 100
@@ -2464,6 +2471,20 @@ class USMicroplexPipeline:
                 epochs=max(self.config.calibration_max_iter, 100),
                 device=self.config.device,
                 tol=self.config.calibration_tol,
+            )
+        if self.config.calibration_backend == "microcalibrate":
+            from microplex_us.calibration import (
+                MicrocalibrateAdapter,
+                MicrocalibrateAdapterConfig,
+            )
+
+            return MicrocalibrateAdapter(
+                MicrocalibrateAdapterConfig(
+                    epochs=max(self.config.calibration_max_iter, 32),
+                    learning_rate=1e-3,
+                    device=self.config.device,
+                    seed=self.config.random_seed,
+                )
             )
         raise ValueError(
             f"Unsupported calibration backend: {self.config.calibration_backend}"
