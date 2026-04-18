@@ -16,13 +16,18 @@ Four of five reviewers reach Major Revisions. The draft is not submittable in it
 
 ## Critical findings (blocker before submission)
 
-### B1. Two "independent robustness checks" used the pre-snap broken pipeline
+### B1. Two "independent robustness checks" used the pre-snap broken pipeline [RESOLVED]
 
-The reproducibility reviewer identified that `artifacts/embedding_prdc_compare.json` (Apr 17 08:03) and `artifacts/calibrate_on_synthesizer.json` (Apr 17 08:06) predate the snap fixes (harness-side at 12:06, upstream-core at 12:20). Both scripts call `method.fit` and `method.generate` directly without invoking `_snap_categorical_shared_cols`. The numbers they report are under the broken noise-injection regime.
+The reproducibility reviewer identified that `artifacts/embedding_prdc_compare.json` (Apr 17 08:03) and `artifacts/calibrate_on_synthesizer.json` (Apr 17 08:06) predated the snap fixes (harness-side at 12:06, upstream-core at 12:20). Both scripts called `method.fit` and `method.generate` directly without invoking `_snap_categorical_shared_cols`.
 
-The paper's claim that "ordering is preserved under four independent robustness checks" technically still holds — ZI-QRF beats ZI-MAF under the broken pipeline too — but the framing obscures that two of the four checks are measurements of a system-we-ourselves-diagnosed-as-broken.
+**Resolution (2026-04-17 21:15/21:17)**: both scripts were re-run against the post-fix upstream `microplex` (commit `81a5e10`, "Only smooth-noise continuous shared cols, not categorical ones"). The pre-fix artifacts were preserved with a `.pre-snap.json` suffix for audit; the post-fix artifacts replaced the original `.json` filenames. Comparison:
 
-**Action**: rerun `scripts/embedding_prdc_compare.py` and `scripts/calibrate_on_synthesizer.py` with either (a) the upstream `microplex` fix merged into the sibling clone or (b) the scripts rewritten to call `ScaleUpRunner.fit_and_generate` which applies `_snap_categorical_shared_cols`. Update artifacts. This is the first thing to do when resuming paper work.
+| Artifact | Pre-snap coverage (ZI-QRF, 40k raw) | Post-snap coverage (ZI-QRF, 40k raw) |
+|---|---:|---:|
+| `embedding_prdc_compare.json` | 0.348 | 0.982 |
+| `calibrate_on_synthesizer.json` | pre-cal rel-err 0.256 | pre-cal rel-err 0.317, post-cal 0.105 |
+
+Ordering is preserved (ZI-QRF > ZI-QDNN > ZI-MAF) under both regimes; absolute post-snap numbers are the ones reported in §5. Paper text at lines 252–268 already references the post-snap artifacts.
 
 ### B2. The 36 "target columns" are input variables, not policy outputs
 
