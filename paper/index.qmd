@@ -7,21 +7,26 @@ author:
     email: max@cosilico.ai
 date: last-modified
 abstract: |
-  Tax and benefit microsimulation depends on synthetic microdata whose accuracy
-  must survive both national-scale aggregates and longitudinal extensions. We
-  introduce `microplex-us`, a spec-driven US synthesis and calibration runtime
-  with three architectural properties: (1) chained quantile-regression-forest
-  imputation across independent administrative and survey sources, (2)
-  identity-preserving gradient-descent chi-squared calibration that keeps
-  every record alive, and (3) sparse L0 record selection reserved as an
-  optional post-step rather than a calibration mainline. We benchmark three
-  zero-inflated synthesizers on the Enhanced CPS 2024 at 77,006 × 50 scale
-  and find ZI-QRF dominates (PRDC coverage 0.928 vs. 0.707 for ZI-QDNN and
-  0.106 for ZI-MAF) under four independent robustness checks. We document a
-  previously unreported noise-injection defect in a widely-used upstream
-  benchmark base class that systematically biased earlier synthesizer
-  comparisons on categorical conditioning variables, and publish corrected
-  results.
+  Tax and benefit microsimulation depends on synthetic microdata whose
+  accuracy must satisfy both national-scale aggregates and longitudinal
+  extensions. This paper introduces `microplex-us`, a spec-driven US
+  synthesis and calibration runtime with three architectural properties:
+  (1) chained quantile-regression-forest (QRF) imputation across
+  heterogeneous administrative and survey sources; (2) identity-preserving
+  gradient-descent chi-squared calibration that retains positive weight on
+  every record; and (3) sparse L0 record selection reserved as an optional
+  post-processing step rather than as the primary calibration mechanism.
+  The paper benchmarks three zero-inflated synthesizers — quantile
+  regression forests (ZI-QRF), quantile deep neural networks (ZI-QDNN),
+  and masked autoregressive flows (ZI-MAF) — on 77,006 Enhanced CPS 2024
+  records across 50 variables, finding that ZI-QRF dominates on
+  Precision/Recall/Density/Coverage (PRDC; coverage 0.928 vs. 0.707 for
+  ZI-QDNN and 0.106 for ZI-MAF) with the ordering preserved across
+  multiple sensitivity checks. The paper also documents a previously
+  unreported noise-injection defect in the `microplex.eval.benchmark`
+  base class that caused consistent downward bias in earlier synthesizer
+  comparisons on categorical conditioning variables, and publishes
+  corrected results.
 
 keywords: [synthetic microdata, survey calibration, microsimulation, tabular
   data synthesis, quantile regression forests, identity-preserving
@@ -46,10 +51,10 @@ The dominant public approach in the US today is [@ghenis2024ecps]'s Enhanced CPS
 
 1. **A spec-driven donor integration runtime** that separates donor-block contracts from backend implementation, allowing independent benchmarking of conditioning, imputer, and entity-projection choices.
 2. **Identity-preserving calibration** as an explicit architectural requirement — framed to support longitudinal extensions where records must persist across simulation years.
-3. **A head-to-head comparison of QRF-family and neural synthesizers** on real US economic microdata at production scale — a cell of the evaluation matrix that, to our knowledge, no prior published work occupies.
+3. **A head-to-head comparison of QRF-family and neural synthesizers** on real US economic microdata at production scale — a cell of the evaluation matrix that, to my knowledge, no prior published work occupies.
 4. **A correction to a benchmark-base-class noise-injection defect** in the upstream `microplex.eval.benchmark` module that had systematically biased earlier synthesizer comparisons on integer-valued conditioning variables.
 
-We do not claim foundational methodological novelty. Every mechanism used below exists in the published literature: quantile regression forests [@meinshausen2006qrf], chained imputation [@vanbuuren2011mice], calibration with range-restricted distances [@deville1992calibration], L0 sparse regularization [@louizos2018l0], support-based generative evaluation [@naeem2020prdc]. The contribution is in the composition and the empirical evidence that results.
+This paper does not claim foundational methodological novelty. Every mechanism used below exists in the published literature: quantile regression forests [@meinshausen2006qrf], chained imputation [@vanbuuren2011mice], calibration with range-restricted distances [@deville1992calibration], L0 sparse regularization [@louizos2018l0], support-based generative evaluation [@naeem2020prdc]. The contribution is in the composition and the empirical evidence that results.
 
 # Background and related work {#sec-related}
 
@@ -57,11 +62,11 @@ A full literature review for this paper is maintained in `literature-review.qmd`
 
 Classical survey calibration originates with [@deville1992calibration] and its generalized-raking extension [@deville1993raking]; range-restricted variants with bounded-positive distance functions guarantee non-negative weights and are reviewed in [@haziza2017weights; @kott2016calibration]. @devaud2019calibration provides the current treatment of existence conditions.
 
-The synthetic tabular data literature runs from [@patki2016sdv; @nowok2016synthpop] through CTGAN/TVAE [@xu2019modeling], TabDDPM [@kotelnikov2023tabddpm], language-model-based approaches [@borisov2023great; @solatorio2023realtabformer], latent-space diffusion [@zhang2024tabsyn], and tabular foundation models [@hollmann2025tabpfn]. Evaluation practice is mapped by benchmarking frameworks including Synthcity [@qian2023synthcity] and is anchored by PRDC metrics [@naeem2020prdc], with documented limitations under heavy tails [@park2023probabilistic] and in high-dimensional feature spaces [@beyer1999nn; @aggarwal2001surprising].
+The synthetic tabular data literature runs from [@patki2016sdv; @nowok2016synthpop] through CTGAN/TVAE [@xu2019modeling], TabDDPM [@kotelnikov2023tabddpm], language-model-based approaches [@borisov2023great; @solatorio2023realtabformer], latent-space diffusion [@zhang2024tabsyn], and tabular foundation models [@hollmann2025tabpfn]. Evaluation practice is mapped by benchmarking frameworks including Synthcity [@qian2023synthcity] and is anchored by PRDC metrics [@naeem2020prdc], with documented limitations under heavy tails [@park2023probabilistic] and in high-dimensional feature spaces [@beyer1999nn; @aggarwal2001surprising]. @ruggles2025synth offers a recent critique of fully-synthetic census microdata as a replacement for design-based public-use files; the present paper's scope is narrower (augmenting an existing public-use file rather than replacing one) but engages with the same quality-vs-replicability tradeoff Ruggles raises.
 
 The US tax microsimulation ecosystem is summarized in [@toder2024microsim]. Alongside Enhanced CPS, it includes TAXSIM [@feenberg1993taxsim], Tax-Calculator [@debacker2019taxcalc], the CBO and Urban-Brookings models, and newer entrants like the Budget Lab at Yale. On synthetic PUF construction, @bowen2022puf is the reference.
 
-Longitudinal microsimulation — DYNASIM3 [@favreault2004dynasim], MINT [@smith2013mint], CBOLT [@cbo2018cbolt], and the LIAM2 family [@dementen2014liam2] — uses static-ageing with alignment to external totals. Identity preservation in these pipelines is implicit (records are aged forward, not dropped); we argue for making it explicit in the cross-sectional pipelines that feed them.
+Longitudinal microsimulation — DYNASIM3 [@favreault2004dynasim], MINT [@smith2013mint], CBOLT [@cbo2018cbolt], and the LIAM2 family [@dementen2014liam2] — uses static-ageing with alignment to external totals. Identity preservation in these pipelines is implicit (records are aged forward, not dropped); this paper argues for making it explicit in the cross-sectional pipelines that feed them.
 
 # Architecture {#sec-architecture}
 
@@ -75,29 +80,33 @@ Longitudinal microsimulation — DYNASIM3 [@favreault2004dynasim], MINT [@smith2
 
 ## Cross-section synthesizer ordering
 
-At 77,006 × 50 real Enhanced CPS data, with matched train/holdout split (80/20, seed 42) and PRDC capped at 15,000 samples in each comparison:
+The three synthesizers were evaluated on the 77,006-record, 50-column Enhanced CPS 2024 panel, using a fixed 80/20 train/holdout split (seed 42) and capping PRDC estimation at 15,000 samples per comparison. Results are summarized in @tbl-stage1.
 
-| Method   | Coverage | Precision | Density | Fit (s) | Peak RSS (GB) | Zero-rate MAE |
-|----------|---------:|----------:|--------:|--------:|--------------:|--------------:|
-| ZI-QRF   | **0.928**| 0.910     | 0.885   | 37.0    | 6.0           | 0.013         |
-| ZI-QDNN  | 0.707    | 0.835     | 0.664   | 105.5   | 11.0          | 0.136         |
-| ZI-MAF   | 0.106    | 0.036     | 0.025   | 227.0   | 11.0          | 0.083         |
+| Method   | Coverage | Precision | Density | Fit time (s) | Peak RSS (GB) | Zero-rate MAE |
+|----------|---------:|----------:|--------:|-------------:|--------------:|--------------:|
+| ZI-QRF   | **0.928**| **0.910** | **0.885** | **37.0**  | **6.0**       | **0.013**     |
+| ZI-QDNN  | 0.707    | 0.835     | 0.664   | 105.5        | 11.0          | 0.136         |
+| ZI-MAF   | 0.106    | 0.036     | 0.025   | 227.0        | 11.0          | 0.083         |
 
-Ordering is preserved under four independent robustness checks: raw 50-dimensional PRDC at 40k, raw 50-dimensional PRDC at 77k, 16-dimensional learned-autoencoder-embedding PRDC at 40k, and weighted-aggregate relative error under subsequent calibration. ZI-MAF hyperparameter expansion (from 4-layer × 32-hidden × 50 epochs to 8-layer × 128-hidden × 200 epochs, a 14× compute budget increase) moves ZI-MAF coverage from 0.026 to 0.033 — a 25 % relative improvement that leaves a 10× gap to ZI-QRF.
+: Cross-section benchmark results at 77,006 records and 50 variables on Enhanced CPS 2024. PRDC diagnostics are estimated on 15,000 samples per side. All runs share a single 80/20 train/holdout split (seed 42) and use each method class's default hyperparameters. Bold indicates best in column. Peak RSS is peak resident-set memory during fit. Zero-rate MAE is the mean absolute error of column-wise zero proportion between synthetic output and the real holdout. {#tbl-stage1}
+
+The ordering in @tbl-stage1 is preserved under four complementary sensitivity checks: raw 50-dimensional PRDC at 40,000 records, raw 50-dimensional PRDC at 77,006 records, 16-dimensional learned-autoencoder-embedding PRDC at 40,000 records, and weighted-aggregate relative error under subsequent calibration. ZI-MAF hyperparameter expansion (from 4-layer × 32-hidden × 50 epochs to 8-layer × 128-hidden × 200 epochs, a 14-fold compute budget increase) moves ZI-MAF coverage from 0.026 to 0.033 — a 25 % relative improvement that leaves a tenfold gap to ZI-QRF.
 
 ## Upstream benchmark defect and correction
 
-During this work we identified a noise-injection defect in `microplex.eval.benchmark._MultiSourceBase.generate`. The routine added σ = 0.1 Gaussian noise to every shared-column value before per-column regeneration, including binary and categorical conditioning variables (`is_female`, `is_military`, `state_fips`, `cps_race`, etc.). Pre-fix, synthetic values never matched the training pool's discrete support on these variables; per-column zero-rate diagnostics appeared broken for every method simultaneously, because `is_military = 1` became continuous floats like `1.04`. The fix detects integer-valued training columns and skips noise injection for them.
+I identified a noise-injection defect in `microplex.eval.benchmark._MultiSourceBase.generate` during the course of this work. The routine added σ = 0.1 Gaussian noise to every shared-column value before per-column regeneration, including binary and categorical conditioning variables (for example, sex, military-service, state FIPS, and CPS race indicators). Pre-fix, synthetic values never matched the training pool's discrete support on these variables; per-column zero-rate diagnostics appeared broken for every method simultaneously, because a nominally binary indicator became continuous floats such as `1.04`. The fix detects integer-valued training columns and skips noise injection for them.
 
-Pre-fix vs. post-fix PRDC coverage on matched runs:
+Pre-fix and post-fix PRDC coverage on matched 77,006-record, 50-variable runs are reported in @tbl-prefix.
 
-| Method  | Pre-fix | Post-fix | Δ        |
-|---------|--------:|---------:|---------:|
-| ZI-QRF  | 0.256   | 0.928    | +0.672   |
-| ZI-QDNN | 0.147   | 0.707    | +0.560   |
-| ZI-MAF  | 0.014   | 0.106    | +0.092   |
+| Method  | Before correction | After correction | Δ |
+|---------|------------------:|-----------------:|---------:|
+| ZI-QRF  | 0.256             | 0.928            | +0.672   |
+| ZI-QDNN | 0.147             | 0.707            | +0.560   |
+| ZI-MAF  | 0.014             | 0.106            | +0.092   |
 
-Ordering is preserved across the fix; absolute numbers are meaningfully higher. Earlier published synthesizer benchmarks that used the same base class [report low] PRDC coverages against real data that should be treated as lower bounds rather than ground-truth measurements. The fix is merged upstream.
+: PRDC coverage before and after correcting the noise-injection defect in `microplex.eval.benchmark._MultiSourceBase.generate`. Before-correction values use σ = 0.1 Gaussian noise applied to all shared-column values, including binary and categorical conditioning variables. After-correction values skip noise injection for integer-valued columns. Same 77k × 50 run configuration in both columns. {#tbl-prefix}
+
+Ordering is invariant across the fix; absolute coverage values are meaningfully higher after correction. Synthesizer benchmarks that used the same `microplex.eval.benchmark` base class before the correction landed should be interpreted as reporting a systematically biased lower bound on PRDC coverage against real data. I merged the fix into the upstream `microplex` repository on 2026-04-17.
 
 ## Rare-cell preservation
 
@@ -105,15 +114,17 @@ Ordering is preserved across the fix; absolute numbers are meaningfully higher. 
 
 ## Calibration on synthesizer output
 
-Identity-preserving gradient-descent chi-squared calibration applied to the 36 target-column sums of each synthesizer's output, with holdout totals as targets (500 epochs, lr 1e-3):
+Identity-preserving gradient-descent chi-squared calibration was applied to the 36 target-column sums of each synthesizer's output, with holdout totals as the calibration targets. Results after 500 epochs of calibration at learning rate 1e-3 are in @tbl-calibrate.
 
-| Method   | Pre-cal mean rel. err. | Post-cal mean rel. err. |
-|----------|-----------------------:|------------------------:|
-| ZI-QRF   | 0.317                  | 0.105                   |
-| ZI-QDNN  | 0.386                  | 0.251                   |
-| ZI-MAF   | 17.51                  | 11.86                   |
+| Method   | Before calibration (mean rel. err.) | After calibration (mean rel. err.) |
+|----------|-----------------------------------:|-----------------------------------:|
+| ZI-QRF   | 0.317                              | **0.105**                          |
+| ZI-QDNN  | 0.386                              | 0.251                              |
+| ZI-MAF   | 17.51                              | 11.86                              |
 
-Calibration refines structurally sound synthesizer output; it cannot rescue a broken one. ZI-MAF's post-calibration error remains over 1100 % of target scale, consistent with its raw outputs being too far off target support for weight adjustment to bridge.
+: Mean relative error of 36 target-column sums against holdout totals before and after 500 epochs of gradient-descent chi-squared calibration on each synthesizer's output. All three calibrations were run with identical hyperparameters (learning rate 1e-3, noise level 0, seed 42). Bold indicates best in column. {#tbl-calibrate}
+
+Calibration refines structurally sound synthesizer output; it does not rescue a structurally broken one. ZI-MAF's post-calibration error remains over 1100 % of target scale, consistent with its raw outputs falling too far outside target support for weight adjustment to bridge.
 
 # Discussion {#sec-discussion}
 
@@ -121,7 +132,21 @@ Calibration refines structurally sound synthesizer output; it cannot rescue a br
 
 # Limitations {#sec-limits}
 
-The cross-section benchmark uses PolicyEngine's Enhanced CPS as both the input substrate and the source of held-out evaluation samples; it is not a test of generalization across CPS vintages. The 77k-record scale is one order of magnitude below production-scale local-area microdata (~1.5M households). PRDC coverage in 50 dimensions is known to concentrate; we report robustness to a learned-embedding variant but do not establish invariance to all reasonable metric choices. ZI-MAF and ZI-QDNN hyperparameters were fixed to method-class defaults with one follow-up sweep on ZI-MAF; a full NAS-style search could find configurations we did not; we report one additional expansion sweep on ZI-MAF that did not close the gap. Longitudinal accuracy claims are architectural rather than empirical in this paper; the evaluation of identity-preserving calibration across simulated years is deferred to a companion paper.
+The cross-section benchmark uses PolicyEngine's Enhanced CPS as both the input substrate and the source of held-out evaluation samples; it is not a test of generalization across CPS vintages. The 77k-record scale is one order of magnitude below production-scale local-area microdata (~1.5M households). PRDC coverage in 50 dimensions is known to concentrate; I report robustness to a learned-embedding variant but do not establish invariance to all reasonable metric choices. ZI-MAF and ZI-QDNN hyperparameters were fixed to method-class defaults with one follow-up sweep on ZI-MAF; a full NAS-style search could find configurations I did not; I report one additional expansion sweep on ZI-MAF that did not close the gap. Longitudinal accuracy claims are architectural rather than empirical in this paper; the evaluation of identity-preserving calibration across simulated years is deferred to a companion paper.
+
+# Code and data availability {#sec-availability}
+
+All code is open-source under the MIT license at `https://github.com/CosilicoAI/microplex-us` (commit hash of the submitted version will be noted in the camera-ready). The benchmark harness, scripts, and Quarto source for this paper are in that repository. Supporting infrastructure in `microplex` core (`https://github.com/CosilicoAI/microplex`) is also open-source.
+
+The Enhanced CPS 2024 dataset used as the evaluation substrate is the `enhanced_cps_2024.h5` HDF5 file published by PolicyEngine on Hugging Face (`https://huggingface.co/policyengine/policyengine-us-data`). The file is freely downloadable without credentials and is ~43 MB on disk. The specific revision used for all benchmarks in this paper will be pinned to a Hugging Face dataset revision hash or mirrored to Zenodo in the camera-ready version.
+
+Rebuilding Enhanced CPS from scratch requires IRS PUF access, which is gated by data-use agreements; I do not reproduce this upstream construction in this paper. A third party with the published HDF5 can reproduce every numerical result in the paper without additional data-access credentials.
+
+Reproduction environment for the results reported here: Python 3.14.0, macOS 14 (Darwin 25.3.0) on an Apple M3 with 48 GB unified memory. The benchmark harness is CPU-only (no GPU required); full stage-1 run at 77k × 50 scale across three methods completes in approximately six minutes. The `uv.lock` file pins all dependencies.
+
+# Disclosures {#sec-disclosures}
+
+I founded PolicyEngine, a separate non-profit organization that publishes the Enhanced CPS 2024 data product this paper uses as an evaluation substrate, and previously led the work reported in @ghenis2024ecps. The present research is conducted at Cosilico, an independent commercial entity, and is neither a joint product with PolicyEngine nor supported by PolicyEngine funding. PolicyEngine's Enhanced CPS is cited throughout as the incumbent public tool against which `microplex-us` is measured. I have no other competing interests to disclose.
 
 # Conclusion {#sec-conclusion}
 
