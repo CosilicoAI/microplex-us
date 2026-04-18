@@ -102,4 +102,189 @@ class ZICARTMethod(CARTMethod):
         self.zero_inflated = True
 
 
-__all__ = ["CARTMethod", "ZICARTMethod"]
+# --- Alternative zero-inflation classifiers (QDNN family) ----------------
+
+def _patch_zi_classifier(method_instance: Any, classifier_factory: Any) -> None:
+    """Monkey-patch a ZI method's fit so the zero-classifier is a custom one.
+
+    The upstream `_MultiSourceBase.fit` hardcodes
+    `RandomForestClassifier(n_estimators=50, random_state=42, n_jobs=-1)`.
+    This helper re-wraps `fit` so the zero-classifier is built by
+    `classifier_factory()` instead. All other fit/generate behavior is
+    preserved.
+    """
+    import numpy as np
+    import pandas as pd
+
+    original_fit = method_instance.fit.__func__
+
+    def patched_fit(self, sources, shared_cols):
+        self.shared_cols_ = list(shared_cols)
+        all_cols = set(shared_cols)
+        for survey_name, df in sources.items():
+            for col in df.columns:
+                if col not in all_cols:
+                    all_cols.add(col)
+                    self.col_to_survey_[col] = survey_name
+        self.all_cols_ = list(all_cols)
+
+        shared_dfs = []
+        for survey_name, df in sources.items():
+            available = [c for c in shared_cols if c in df.columns]
+            if len(available) == len(shared_cols):
+                shared_dfs.append(df[shared_cols].copy())
+        self.shared_data_ = (
+            pd.concat(shared_dfs, ignore_index=True)
+            if shared_dfs
+            else list(sources.values())[0][shared_cols].copy()
+        )
+
+        for col in self.all_cols_:
+            if col in shared_cols:
+                continue
+            survey_name = self.col_to_survey_[col]
+            survey_df = sources[survey_name]
+            available_shared = [c for c in shared_cols if c in survey_df.columns]
+            X = survey_df[available_shared].values
+            y = survey_df[col].values
+
+            min_val = float(np.nanmin(y))
+            at_min = np.isclose(y, min_val, atol=1e-6)
+            zero_frac = at_min.sum() / len(y)
+            self._col_stats[col] = {"min": min_val, "zero_frac": zero_frac}
+
+            if (
+                self.zero_inflated
+                and zero_frac >= self.zero_threshold
+                and at_min.sum() >= 10
+            ):
+                labels = (~at_min).astype(int)
+                unique_labels = np.unique(labels)
+                if len(unique_labels) < 2:
+                    # Degenerate column — all zeros or all non-zeros in
+                    # training. Fall back to a constant classifier to avoid
+                    # sklearn's single-class error.
+                    constant_prob = float(unique_labels[0])
+
+                    class _Constant:
+                        classes_ = np.array([0, 1])
+
+                        def predict_proba(self, X):
+                            n = len(X)
+                            return np.column_stack(
+                                [np.full(n, 1.0 - constant_prob),
+                                 np.full(n, constant_prob)]
+                            )
+
+                    self._zero_classifiers[col] = _Constant()
+                else:
+                    clf = classifier_factory()
+                    clf.fit(X, labels)
+                    self._zero_classifiers[col] = clf
+                if (~at_min).sum() >= 10:
+                    self._fit_column(col, X[~at_min], y[~at_min])
+            else:
+                self._fit_column(col, X, y)
+        return self
+
+    method_instance.fit = patched_fit.__get__(method_instance, type(method_instance))
+
+
+def _make_zi_variant(base_name: str, classifier_factory: Any):
+    """Create a method class that uses a custom zero-classifier."""
+    from microplex.eval.benchmark import ZIQDNNMethod
+
+    base_classes = {"ZI-QDNN": ZIQDNNMethod}
+    if base_name not in base_classes:
+        raise ValueError(f"Unsupported base method for ZI variant: {base_name}")
+    base_cls = base_classes[base_name]
+
+    class _Variant(base_cls):  # type: ignore[misc, valid-type]
+        def __init__(self, **kwargs: Any) -> None:
+            super().__init__(**kwargs)
+            _patch_zi_classifier(self, classifier_factory)
+
+    return _Variant
+
+
+def _rf_calibrated_factory():
+    from sklearn.calibration import CalibratedClassifierCV
+    from sklearn.ensemble import RandomForestClassifier
+
+    rf = RandomForestClassifier(
+        n_estimators=50, random_state=42, n_jobs=-1
+    )
+    return CalibratedClassifierCV(rf, method="isotonic", cv=3)
+
+
+def _logistic_factory():
+    from sklearn.linear_model import LogisticRegression
+
+    return LogisticRegression(max_iter=500, n_jobs=-1)
+
+
+def _hgb_factory():
+    from sklearn.ensemble import HistGradientBoostingClassifier
+
+    return HistGradientBoostingClassifier(random_state=42)
+
+
+def _dnn_factory():
+    """A small-MLP zero-classifier for parity with the ZI-QDNN draw network.
+
+    Uses sklearn's MLPClassifier (hidden: 64, 32; ReLU; Adam; max_iter=100).
+    Probabilities are via softmax on the output head. Not pre-calibrated;
+    combine with isotonic wrapping if calibration matters.
+    """
+    from sklearn.neural_network import MLPClassifier
+    from sklearn.pipeline import Pipeline
+    from sklearn.preprocessing import StandardScaler
+
+    return Pipeline([
+        ("scaler", StandardScaler()),
+        (
+            "mlp",
+            MLPClassifier(
+                hidden_layer_sizes=(64, 32),
+                activation="relu",
+                solver="adam",
+                max_iter=100,
+                random_state=42,
+                early_stopping=True,
+            ),
+        ),
+    ])
+
+
+class ZIQDNNLogisticMethod:
+    """Placeholder; actual class built by _make_zi_variant at registry time."""
+
+    name = "ZI-QDNN-logistic"
+
+
+class ZIQDNNHGBMethod:
+    name = "ZI-QDNN-hgb"
+
+
+class ZIQDNNCalibratedMethod:
+    name = "ZI-QDNN-calibrated"
+
+
+def zi_qdnn_variant_factory(variant: str):
+    """Return a ZIQDNNMethod subclass with a swapped zero-classifier."""
+    if variant == "logistic":
+        return _make_zi_variant("ZI-QDNN", _logistic_factory)
+    if variant == "hgb":
+        return _make_zi_variant("ZI-QDNN", _hgb_factory)
+    if variant == "calibrated":
+        return _make_zi_variant("ZI-QDNN", _rf_calibrated_factory)
+    if variant == "dnn":
+        return _make_zi_variant("ZI-QDNN", _dnn_factory)
+    raise ValueError(f"Unknown ZI variant: {variant}")
+
+
+__all__ = [
+    "CARTMethod",
+    "ZICARTMethod",
+    "zi_qdnn_variant_factory",
+]
