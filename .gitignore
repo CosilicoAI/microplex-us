@@ -5,3 +5,8 @@ artifacts/
 .DS_Store
 __pycache__/
 *.pyc
+
+# Quarto paper build output
+paper/_output/
+paper/*_files/
+.quarto/
