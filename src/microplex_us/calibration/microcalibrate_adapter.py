@@ -17,7 +17,7 @@ weight vector with an optional L0 regularizer that defaults off.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Sequence
 
 import numpy as np
@@ -121,8 +121,14 @@ class MicrocalibrateAdapter:
                     f"({n_records},) matching the data length."
                 )
 
+        # float32 keeps the adapter's peak allocation at half the
+        # float64 default; downstream torch layer casts to float32
+        # anyway, so this is a free precision-compatible win.
         estimate_matrix = pd.DataFrame(
-            {c.name: np.asarray(c.coefficients, dtype=float) for c in linear_constraints}
+            {
+                c.name: np.asarray(c.coefficients, dtype=np.float32)
+                for c in linear_constraints
+            }
         )
 
         calibrator = Calibration(
@@ -172,9 +178,7 @@ class MicrocalibrateAdapter:
 
         estimates = self._last_calibration.estimate().to_numpy(dtype=float)
         targets = self._last_targets
-        assert targets is not None
         names = self._last_constraint_names
-        assert names is not None
 
         rel_errors = np.where(
             np.abs(targets) > 1e-12,
