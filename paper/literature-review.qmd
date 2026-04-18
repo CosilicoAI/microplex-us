@@ -33,7 +33,7 @@ Two benchmarking frameworks now dominate: `Synthcity` (@qian2023synthcity) and S
 
 Published head-to-head benchmarks on real US tax or income microdata are scarce. @little2025synth compares synthpop, DataSynthesizer, CTGAN, and TVAE on census microdata in four countries and finds CART-based synthpop dominates utility, with CTGAN/TVAE substantially weaker on pairwise dependence. @bowen2022puf document a synthetic supplemental PUF built on IRS Statistics of Income data using sequential CART, framed as a privacy-preserving release for restricted data.
 
-We found **no published head-to-head comparison of quantile regression forests (QRF; @meinshausen2006qrf) or ZI-QRF against modern deep generators (CTGAN, TabDDPM, GReaT, TabSyn) on real US income microdata**. This is the gap our cross-section benchmark fills.
+No published head-to-head comparison of quantile regression forests (QRF; @meinshausen2006qrf) or ZI-QRF against modern deep generators (CTGAN, TabDDPM, GReaT, TabSyn) on real US income microdata appears to exist. This is the gap the cross-section benchmark in this paper fills.
 
 ### Known scaling failure modes
 
@@ -43,21 +43,21 @@ We found **no published head-to-head comparison of quantile regression forests (
 
 ### Canonical calibration
 
-The foundational paper is @deville1992calibration, which defines the calibration estimator as a constrained weight adjustment minimizing a distance function from design weights subject to linear moment constraints. The generalized raking extension in @deville1993raking handles categorical margins via iterative proportional fitting (@deming1940adjustment). Modern practice extends this to range-restricted variants (bounded, logit, truncated-linear distance functions) which guarantee positive weights on every retained record — the property we label *identity preservation* in this paper. @devaud2019calibration provides the most current treatment of existence and feasibility conditions. Reviews by @haziza2017weights and @kott2016calibration map the current landscape.
+The foundational paper is @deville1992calibration, which defines the calibration estimator as a constrained weight adjustment minimizing a distance function from design weights subject to linear moment constraints. The generalized raking extension in @deville1993raking handles categorical margins via iterative proportional fitting [@deming1940adjustment]. Modern practice extends this to range-restricted variants (bounded, logit, truncated-linear distance functions) which guarantee positive weights on every retained record — the property labeled *identity preservation* in the main paper. @devaud2019calibration provides the most current treatment of existence and feasibility conditions. Reviews by @haziza2017weights and @kott2016calibration map the current landscape.
 
 A related line is entropy balancing (@hainmueller2012entropy), which is mathematically close to calibration with a Kullback-Leibler distance and moment constraints. Entropy-balanced weights are always positive.
 
 ### Sparse / L0 calibration
 
-L0 regularization entered machine learning via hard-concrete stochastic gates (@louizos2018l0), which made L0 differentiable and therefore compatible with gradient-based optimization. Applying this to survey calibration — effectively using L0 to select a sparse subset of records that hits a target set — is the mechanism behind `PolicyEngine/L0` and its consumers. We could not locate an earlier paper formally treating L0-regularized survey calibration as a survey-statistics contribution. The technique's provenance is the deep-learning pruning literature; its application to microsim calibration appears to be novel to the PolicyEngine ecosystem.
+L0 regularization entered machine learning via hard-concrete stochastic gates [@louizos2018l0], which made L0 differentiable and therefore compatible with gradient-based optimization. Applying this to survey calibration — effectively using L0 to select a sparse subset of records that hits a target set — is the mechanism implemented in the open-source PolicyEngine L0 package and its dependents. I could not locate an earlier paper formally treating L0-regularized survey calibration as a survey-statistics contribution. The technique's provenance is the deep-learning pruning literature; its application to microsim calibration appears to be novel to the PolicyEngine ecosystem.
 
 ### Identity preservation as an under-named requirement
 
-"Identity-preserving calibration" is not a term of art in the survey statistics literature. The closest named property is "range-restricted calibration with positive lower bound" (e.g., logit or truncated-linear distance functions per @deville1992calibration). In longitudinal microsim, identity is implicit: DYNASIM3 (@favreault2004dynasim), MINT (@smith2013mint), and CBOLT (@cbo2018cbolt) all use static-ageing with alignment to external totals, never dropping records. LIAM2 (@dementen2014liam2) similarly keeps full population records. We argue that explicit recognition of identity preservation as an architectural requirement — rather than an implicit consequence of a particular ageing strategy — is a useful contribution whenever a cross-sectional microdata pipeline must feed a longitudinal model.
+"Identity-preserving calibration" is not a term of art in the survey statistics literature. The closest named property is "range-restricted calibration with positive lower bound" (e.g., logit or truncated-linear distance functions per @deville1992calibration). In longitudinal microsim, identity is implicit: DYNASIM3 [@favreault2004dynasim], MINT [@smith2013mint], and CBOLT [@cbo2018cbolt] all use dynamic-ageing or static-ageing with alignment to external totals, never dropping records. LIAM2 [@dementen2014liam2] similarly keeps full population records. The main paper argues for explicit recognition of identity preservation as an architectural requirement at the cross-sectional imputation and calibration layer, rather than as an implicit consequence of a particular ageing strategy, because the cross-sectional artifact is the input substrate to longitudinal simulation.
 
 ### Chained multi-source QRF imputation
 
-The chained-equations framework for imputation is canonical MICE (@vanbuuren2011mice). Extending it to use random forests as the per-variable draw model is explored in @doove2014chainedrf and implemented in `missForest` (@stekhoven2012missforest) and related tools. Using QRF specifically (@meinshausen2006qrf) for the per-variable draw in a chained microdata synthesis / imputation pipeline — where each stage feeds the next stage's conditioning set — is a natural combination of published components, but we could not locate a single paper that names it as a method in its own right. It appears to be a novel application of existing primitives rather than a fundamentally new algorithm.
+The chained-equations framework for imputation is canonical MICE [@vanbuuren2011mice]. Extending it to use random forests as the per-variable draw model is explored in @doove2014chainedrf; related tools include `missForest` [@stekhoven2012missforest]. Using QRF specifically [@meinshausen2006qrf] for the per-variable draw in a chained microdata synthesis / imputation pipeline — where each stage feeds the next stage's conditioning set — is a natural combination of published components, but no single paper appears to name it as a method in its own right. It is best understood as a novel application of existing primitives rather than a fundamentally new algorithm.
 
 ## Evaluation metrics: what works for tabular microdata
 
@@ -65,7 +65,7 @@ The chained-equations framework for imputation is canonical MICE (@vanbuuren2011
 
 @naeem2020prdc established precision/recall/density/coverage as the support-based quality quad, originally for image generators evaluated in Inception-embedding space. The approach is now widely applied to tabular data in raw-feature or standardized-feature space.
 
-Two documented failure modes matter for our setting:
+Two documented failure modes matter in the present setting:
 
 1. **Outlier inflation of density and coverage.** @park2023probabilistic show that kNN-based support estimation is unreliable in the presence of outliers because the support manifold over-inflates around them. Income microdata with heavy tails (top-1 % employment income, net worth) is exactly the regime where this matters.
 2. **High-dimensional concentration of distances.** @beyer1999nn and @aggarwal2001surprising demonstrate that in high-dimensional spaces, the ratio of maximum to minimum k-NN distance collapses toward 1, making nearest-neighbor-based metrics increasingly noise-dominated. The effect starts becoming non-trivial around 10–15 dimensions and is well-established by 50.
@@ -78,7 +78,7 @@ These critiques motivate (a) reporting multiple metrics alongside PRDC rather th
 
 ### Rare-subpopulation preservation
 
-No canonical metric exists for rare-subgroup preservation. @stadler2022groundhog document that synthesizers systematically drop outlier records under differential privacy, with implications for minority-cell representation. Sub-group TSTR or conditional-marginal TV distance are the field's current ad-hoc solutions. A principled metric is, to our knowledge, an open problem.
+No canonical metric exists for rare-subgroup preservation. @stadler2022groundhog document that synthesizers systematically drop outlier records under differential privacy, with implications for minority-cell representation. Sub-group TSTR or conditional-marginal TV distance are the field's current ad-hoc solutions. A principled metric appears to remain an open problem.
 
 ## US tax-benefit microsimulation
 
@@ -101,7 +101,7 @@ DYNASIM3 (@favreault2004dynasim), MINT (@smith2013mint), and CBOLT (@cbo2018cbol
 
 ### Top-income augmentation precedents
 
-Augmenting Survey of Consumer Finances data with Forbes-style top-wealth records is established practice in distributional national accounts (@piketty2018dina, @saez2016wealth). Porting this augmentation pattern into a tax microsimulation dataset is, as far as we can tell, novel to the PolicyEngine-US-Data lineage; we adopt and extend the approach in `microplex-us`.
+Augmenting Survey of Consumer Finances data with Forbes-style top-wealth records is established practice in distributional national accounts [@piketty2018dina; @saez2016wealth]. Porting this augmentation pattern into a tax microsimulation dataset is, as far as I can tell, novel to the PolicyEngine-US-Data lineage; `microplex-us` adopts the approach without methodological innovation.
 
 ### Small-area estimation
 
@@ -116,4 +116,4 @@ The `microplex-us` project contributes in four places where the literature is th
 3. A composition of chained QRF imputation with `microcalibrate` calibration that has no single-paper precedent, though each component is published.
 4. A spec-driven donor integration runtime that explicitly separates donor-block contracts from backend implementation.
 
-The paper reports empirical results supporting (1) and documents the architectural and software design behind (2)–(4). We do not claim foundational methodological novelty; we do claim that the composition and the empirical finding together advance the state of practice for US tax-benefit microdata construction.
+The main paper reports empirical results supporting (1) and documents the architectural and software design behind (2)–(4). This paper does not claim foundational methodological novelty; it claims that the composition and the empirical finding together advance the state of practice for US tax-benefit microdata construction.

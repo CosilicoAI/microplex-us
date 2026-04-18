@@ -58,19 +58,90 @@ This paper does not claim foundational methodological novelty. Every mechanism u
 
 # Background and related work {#sec-related}
 
-A full literature review for this paper is maintained in `literature-review.qmd`. In summary:
+The present work sits across four literatures: survey calibration, synthetic tabular data generation, tabular-synthesis evaluation metrics, and US tax-benefit microsimulation. A supplementary literature review accompanies this paper with an expanded treatment; the following summary frames the specific prior work each contribution builds on.
 
-Classical survey calibration originates with [@deville1992calibration] and its generalized-raking extension [@deville1993raking]; range-restricted variants with bounded-positive distance functions guarantee non-negative weights and are reviewed in [@haziza2017weights; @kott2016calibration]. @devaud2019calibration provides the current treatment of existence conditions.
+## Survey calibration {#sec-related-calibration}
 
-The synthetic tabular data literature runs from [@patki2016sdv; @nowok2016synthpop] through CTGAN/TVAE [@xu2019modeling], TabDDPM [@kotelnikov2023tabddpm], language-model-based approaches [@borisov2023great; @solatorio2023realtabformer], latent-space diffusion [@zhang2024tabsyn], and tabular foundation models [@hollmann2025tabpfn]. Evaluation practice is mapped by benchmarking frameworks including Synthcity [@qian2023synthcity] and is anchored by PRDC metrics [@naeem2020prdc], with documented limitations under heavy tails [@park2023probabilistic] and in high-dimensional feature spaces [@beyer1999nn; @aggarwal2001surprising]. @ruggles2025synth offers a recent critique of fully-synthetic census microdata as a replacement for design-based public-use files; the present paper's scope is narrower (augmenting an existing public-use file rather than replacing one) but engages with the same quality-vs-replicability tradeoff Ruggles raises.
+Classical calibration originates with @deville1992calibration, which defines the calibration estimator as a constrained weight adjustment minimizing a distance function from design weights subject to linear moment constraints. Generalized raking extends this to categorical margins via iterative proportional fitting [@deville1993raking; @deming1940adjustment]. Range-restricted variants with bounded-positive distance functions (logit, truncated-linear) guarantee non-negative weights by construction. @devaud2019calibration provides the current treatment of existence and feasibility conditions; @haziza2017weights and @kott2016calibration are the recent reviews. Entropy balancing [@hainmueller2012entropy] is mathematically adjacent, using Kullback-Leibler divergence with moment constraints, and also produces strictly positive weights.
 
-The US tax microsimulation ecosystem is summarized in [@toder2024microsim]. Alongside Enhanced CPS, it includes TAXSIM [@feenberg1993taxsim], Tax-Calculator [@debacker2019taxcalc], the CBO and Urban-Brookings models, and newer entrants like the Budget Lab at Yale. On synthetic PUF construction, @bowen2022puf is the reference.
+L0 regularization entered the machine-learning literature via hard-concrete stochastic gates [@louizos2018l0], which made L0 differentiable and compatible with gradient-based optimization. Applying L0 selection to survey calibration as a record-sparsification step is recent; I find no earlier survey-statistics treatment of it as a first-class calibration technique, only as a post-calibration record subset selector for deployment artifacts.
 
-Longitudinal microsimulation — DYNASIM3 [@favreault2004dynasim], MINT [@smith2013mint], CBOLT [@cbo2018cbolt], and the LIAM2 family [@dementen2014liam2] — uses static-ageing with alignment to external totals. Identity preservation in these pipelines is implicit (records are aged forward, not dropped); this paper argues for making it explicit in the cross-sectional pipelines that feed them.
+## Synthetic tabular data generation {#sec-related-tabular}
+
+Modern tabular synthesis starts with the Synthetic Data Vault [@patki2016sdv] and `synthpop` [@nowok2016synthpop], which establishes the CART-based sequential approach. CTGAN and TVAE [@xu2019modeling] introduce neural tabular synthesis; TabDDPM [@kotelnikov2023tabddpm] brings diffusion. Language-model-based approaches appear in GReaT [@borisov2023great] and REaLTabFormer [@solatorio2023realtabformer]. TabSyn [@zhang2024tabsyn] combines latent-space score-based diffusion with competitive benchmarks. Tabular foundation models now include TabPFN v2 [@hollmann2025tabpfn], though its primary contribution is prediction rather than synthesis.
+
+Quantile regression forests [@meinshausen2006qrf] are not usually grouped with the tabular-synthesis literature, but they are the method Enhanced CPS and several industrial microsim pipelines use for per-column imputation. In the benchmarking below I treat ZI-QRF on equal footing with the neural synthesizers.
+
+Published head-to-head comparisons of QRF-family and neural synthesizers on real US economic microdata at production scale are scarce. @little2025synth compares synthpop, DataSynthesizer, CTGAN, and TVAE on census microdata in four countries and finds CART-based synthpop dominates; @bowen2022puf document a synthetic supplemental PUF built on IRS Statistics of Income data using sequential CART. Neither includes QRF or ZI-QRF against modern deep generators. @ruggles2025synth offers a recent critique of fully-synthetic census microdata as a replacement for design-based public-use files; the present paper's scope is narrower (augmenting an existing public-use file rather than replacing one).
+
+## Evaluation metrics {#sec-related-metrics}
+
+@naeem2020prdc establishes precision, recall, density, and coverage as the support-based quality quad, originally validated in image-generator Inception-embedding space. Benchmarking frameworks including Synthcity [@qian2023synthcity] and SDMetrics aggregate PRDC alongside column-wise Kolmogorov-Smirnov distances, pairwise correlation differences, and Train-on-Synthetic/Test-on-Real utility.
+
+Two documented failure modes matter for the present work. First, @park2023probabilistic show that outliers inflate density and coverage because the $k$-NN support construction over-inflates the manifold around them — a material concern for heavy-tailed income microdata. Second, @beyer1999nn and @aggarwal2001surprising show $k$-NN distances concentrate in high-dimensional spaces, causing the coverage radius to degenerate above ~10-15 dimensions. These motivate reporting multiple metrics alongside PRDC and testing whether orderings survive dimensionality reduction; I do both in the results section. @alaa2022precision introduces sample-level $\alpha$-precision and $\beta$-recall as more outlier-robust alternatives.
+
+## US tax microsimulation {#sec-related-tax-microsim}
+
+@toder2024microsim is the current umbrella review of the US tax-microsim ecosystem. Active models include TAXSIM [@feenberg1993taxsim], Tax-Calculator [@debacker2019taxcalc], the Tax Policy Center and CBO in-house models [@cbo2018taxmodel], the Budget Lab at Yale, and PolicyEngine-US-Data (Enhanced CPS; @ghenis2024ecps). These differ along several axes: whether they ship a calculator, a microdata constructor, or both; what substrate microdata they use (CPS-PUF matched, pure CPS, pure PUF, administrative linkage); how they augment for top incomes; and whether they are open-source. Enhanced CPS is the public-microdata contribution that `microplex-us` builds on.
+
+@bowen2022puf is the canonical methodology paper for synthetic IRS PUF, using sequential CART under differential-privacy constraints. The Forbes-style top-wealth augmentation pattern that enters tax-microsim microdata via PolicyEngine-US-Data has precedent in distributional-national-accounts work: @piketty2018dina and @saez2016wealth augment SCF with top-wealth records for capitalized-income estimation. Porting this augmentation pattern into a production tax-microsim pipeline is, to my knowledge, first done in PolicyEngine-US-Data; I adopt it without further innovation.
+
+## Longitudinal microsimulation {#sec-related-longitudinal}
+
+DYNASIM3 [@favreault2004dynasim], MINT [@smith2013mint], CBOLT [@cbo2018cbolt], and the LIAM2 family [@dementen2014liam2; surveyed in @odonoghue2001dynamicsurvey] are the dominant US and international longitudinal microsimulation models. All use static-ageing with alignment to external totals and therefore preserve record identity implicitly — records are aged forward, not dropped. Identity preservation is not a named concept in the survey statistics or longitudinal-microsim literatures. The closest named property in classical calibration is *range-restricted calibration with positive lower bound* [@deville1992calibration]. I argue in §3.4 for making identity preservation an explicit architectural requirement at the cross-sectional imputation and calibration layer, because the cross-sectional artifact is the input substrate to longitudinal simulation and breaking identity there is the quickest way to make a microsim un-chainable across years.
 
 # Architecture {#sec-architecture}
 
-`microplex-us` is structured around four layers: source providers, declarative donor blocks, a chained imputation engine, and a calibration backend protocol. The top-level build entry point (`microplex_us.pipelines.us.USMicroplexPipeline.build_from_source_providers`) composes these layers into a single end-to-end run that produces a PolicyEngine-ingestable HDF5 artifact plus parity diagnostics. This section describes each layer and names the specific design choices that differentiate the runtime from incumbent construction pipelines.
+`microplex-us` is structured around four layers: source providers, declarative donor blocks, a chained imputation engine, and a calibration backend protocol (@fig-pipeline). The top-level build entry point (`microplex_us.pipelines.us.USMicroplexPipeline.build_from_source_providers`) composes these layers into a single end-to-end run that produces a PolicyEngine-ingestable HDF5 artifact plus parity diagnostics. This section describes each layer and names the specific design choices that differentiate the runtime from incumbent construction pipelines.
+
+```{mermaid}
+%%| label: fig-pipeline
+%%| fig-cap: "`microplex-us` pipeline architecture. Source providers load raw survey and administrative microdata at their native entity levels. Donor blocks declare target variables, conditioning surfaces, and zero-inflation policies as JSON manifests. The chained imputation engine integrates each block in a DAG order respecting conditioning-variable dependencies. PolicyEngine entity-table construction projects the flat frame into the multi-entity schema required for simulation. Identity-preserving calibration (`microcalibrate` gradient-descent chi-squared) adjusts per-record weights against the active PolicyEngine targets database. Optional sparse L0 record selection produces deployment subsamples. The final artifact is an HDF5 file directly ingestable by `policyengine-us.Microsimulation`."
+flowchart TD
+    subgraph sources["Source providers"]
+        CPS[CPS ASEC<br/>processed parquet]
+        PUF[IRS SOI PUF<br/>administrative]
+        ACS[ACS PUMS<br/>Census]
+        SIPP[SIPP tips + assets<br/>panels]
+        SCF[SCF wealth<br/>Federal Reserve]
+        FORBES[Forbes top-wealth<br/>backbone]
+    end
+
+    REG[Source + variable<br/>capability registry]
+    BLOCKS[Donor block manifests<br/>declarative JSON]
+
+    subgraph imputation["Chained imputation engine"]
+        DAG[Dependency DAG<br/>from block conditioning]
+        QRF[Quantile Regression Forest<br/>per-variable draws]
+    end
+
+    TABLES[PolicyEngine entity tables<br/>households × persons × tax units × SPM × family]
+
+    subgraph calibration["Calibration"]
+        MC[microcalibrate<br/>gradient-descent chi-squared<br/>identity-preserving]
+        L0[Optional L0 post-step<br/>deployment subsample]
+    end
+
+    H5[HDF5 artifact<br/>policyengine-us ready]
+
+    CPS --> REG
+    PUF --> REG
+    ACS --> REG
+    SIPP --> REG
+    SCF --> REG
+    FORBES --> REG
+    REG --> BLOCKS
+    BLOCKS --> DAG
+    DAG --> QRF
+    QRF --> TABLES
+    TABLES --> MC
+    MC --> L0
+    MC --> H5
+    L0 -.optional.-> H5
+
+    style MC fill:#cfe,stroke:#333
+    style L0 fill:#fec,stroke:#333,stroke-dasharray: 5 5
+```
 
 ## Source providers and variable capabilities {#sec-arch-sources}
 
