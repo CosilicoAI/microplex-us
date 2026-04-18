@@ -546,6 +546,8 @@ def _build_method(method_name: str, kwargs: dict[str, Any] | None = None) -> Any
         ZIQRFMethod,
     )
 
+    from microplex_us.bakeoff.local_methods import CARTMethod, ZICARTMethod
+
     registry = {
         "QRF": QRFMethod,
         "ZI-QRF": ZIQRFMethod,
@@ -555,6 +557,8 @@ def _build_method(method_name: str, kwargs: dict[str, Any] | None = None) -> Any
         "ZI-MAF": ZIMAFMethod,
         "CTGAN": CTGANMethod,
         "TVAE": TVAEMethod,
+        "CART": CARTMethod,
+        "ZI-CART": ZICARTMethod,
     }
     if method_name not in registry:
         raise ValueError(

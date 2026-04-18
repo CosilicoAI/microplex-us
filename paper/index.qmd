@@ -191,6 +191,7 @@ The benchmark uses 14 conditioning variables and 36 synthesizer-target variables
 
 Three zero-inflated synthesizer families are compared, all implemented in `microplex.eval.benchmark` as subclasses of a `_MultiSourceBase` abstract that pools shared conditioning variables across sources and fits one per-target-column model. The zero-inflation variant adds a random-forest classifier predicting `P(y > 0 \mid x)` when the target's training-set zero fraction exceeds 10 %:
 
+- **ZI-CART**: synthpop-style classification and regression trees [@nowok2016synthpop]. For each target variable, a `DecisionTreeRegressor` with `min_samples_leaf = 5` is fit on the shared conditioning variables; at generation time, each synthetic record is routed to a leaf via `tree.apply`, and the synthetic value is sampled uniformly from the training-set outcomes that landed in that leaf. A random-forest zero-classifier is applied on columns with zero fraction above 10 %.
 - **ZI-QRF**: quantile random forests [@meinshausen2006qrf] with 100 trees predicting deciles of the conditional distribution, with a random-forest zero-classifier.
 - **ZI-QDNN**: a quantile deep neural network with two hidden layers (width 64), 50 training epochs, batch size 256, predicting decile-level quantiles under pinball loss.
 - **ZI-MAF**: a masked autoregressive flow [@xu2019modeling] with four layers and hidden dimension 32, 50 training epochs, batch size 256, and a random-forest zero-classifier.
@@ -233,15 +234,18 @@ During the benchmark, I identified and corrected a noise-injection defect in `mi
 
 ## Cross-section synthesizer ordering
 
-The three synthesizers were evaluated on the 77,006-record, 50-column Enhanced CPS 2024 panel, using a fixed 80/20 train/holdout split (seed 42) and capping PRDC estimation at 15,000 samples per comparison. Results are summarized in @tbl-stage1.
+Four synthesizers were evaluated on the 77,006-record, 50-column Enhanced CPS 2024 panel, using a fixed 80/20 train/holdout split (seed 42) and capping PRDC estimation at 15,000 samples per comparison. Headline results are in @tbl-stage1.
 
 | Method   | Coverage | Precision | Density | Fit time (s) | Peak RSS (GB) | Zero-rate MAE |
 |----------|---------:|----------:|--------:|-------------:|--------------:|--------------:|
-| ZI-QRF   | **0.928**| **0.910** | **0.885** | **37.0**  | **6.0**       | **0.013**     |
-| ZI-QDNN  | 0.707    | 0.835     | 0.664   | 105.5        | 11.0          | 0.136         |
-| ZI-MAF   | 0.106    | 0.036     | 0.025   | 227.0        | 11.0          | 0.083         |
+| ZI-QRF   | **0.931**| **0.907** | **0.879** | 38.4      | 9.6           | **0.013**     |
+| ZI-CART  | 0.908    | 0.897     | 0.840   | **5.2**      | **1.3**       | **0.013**     |
+| ZI-QDNN  | 0.707    | 0.834     | 0.673   | 99.4         | 11.0          | 0.136         |
+| ZI-MAF   | 0.093    | 0.030     | 0.022   | 226.0        | 11.0          | 0.081         |
 
 : Cross-section benchmark results at 77,006 records and 50 variables on Enhanced CPS 2024. PRDC diagnostics are estimated on 15,000 samples per side. All runs share a single 80/20 train/holdout split (seed 42) and use each method class's default hyperparameters. Bold indicates best in column. Peak RSS is peak resident-set memory during fit. Zero-rate MAE is the mean absolute error of column-wise zero proportion between synthetic output and the real holdout. {#tbl-stage1}
+
+A three-seed replication at seeds 0, 1, and 2 (all other settings identical) gives ZI-QRF mean coverage 0.931 ± 0.002 and ZI-CART mean coverage 0.910 ± 0.002. The 0.021-point gap is approximately ten standard deviations wide, ruling out seed-variance as an explanation. ZI-QRF is genuinely more accurate than ZI-CART on PRDC coverage, but at 7× the fit time and 7× the peak memory. For production use under a compute budget, this trade-off is load-bearing: at full-scale 1.5-million-household microsimulation, ZI-CART's 1.3 GB RSS extrapolates to approximately 30 GB while ZI-QRF extrapolates to above 200 GB (linear extrapolation, upper bound). ZI-CART is the compute-constrained production default; ZI-QRF is the accuracy-maximizing choice when memory and wall time are not binding.
 
 The ordering in @tbl-stage1 is preserved under four complementary sensitivity checks: raw 50-dimensional PRDC at 40,000 records, raw 50-dimensional PRDC at 77,006 records, 16-dimensional learned-autoencoder-embedding PRDC at 40,000 records, and weighted-aggregate relative error under subsequent calibration. ZI-MAF hyperparameter expansion (from 4-layer × 32-hidden × 50 epochs to 8-layer × 128-hidden × 200 epochs, a 14-fold compute budget increase) moves ZI-MAF coverage from 0.026 to 0.033 — a 25 % relative improvement that leaves a tenfold gap to ZI-QRF.
 
