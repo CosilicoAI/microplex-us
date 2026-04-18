@@ -65,9 +65,36 @@ The interpretation is that the information content of $P(y > 0 \mid x)$ is alrea
 
 What would actually lift ZI-QDNN above 0.71 coverage is not a better zero-classifier but an architectural change: joint zero-mask modeling (one classifier predicting the full 36-dim zero pattern so cross-target zero correlations are captured), joint quantile output (shared-backbone multivariate QDNN), or post-hoc calibration of the quantile network's own pinball-loss output. These are deferred future work.
 
+## Isolated log-loss evaluation
+
+The coverage tie above could mean either (a) the five classifiers produce genuinely similar $P(y > 0 \mid x)$, so the downstream is honestly reporting, or (b) the classifiers differ materially but the QDNN non-zero draw's error swamps the signal. An isolated per-column evaluation decouples the two.
+
+Protocol: same outer 80/20 train/holdout split as the coverage benchmark (seed 42), then an inner 80/20 split within training into fit/val (49,283 fit, 12,321 val). For each of the 36 target columns with training-set zero-fraction ≥ 10 % (26 eligible columns), each classifier is fit on (`X_fit`, `(~at_min)_fit`) and scored on val with log-loss, Brier, equal-width ECE (10 bins), and ROC-AUC.
+
+| Classifier | Log-loss (mean) | Log-loss (median) | Brier | ECE | AUC (mean) | AUC (median) |
+|---|---:|---:|---:|---:|---:|---:|
+| **HistGB** | **0.2252** | **0.1712** | **0.0707** | **0.0050** | **0.809** | **0.822** |
+| DNN | 0.2337 | 0.1956 | 0.0732 | 0.0070 | 0.748 | 0.773 |
+| RF + isotonic (3-fold) | 0.2343 | 0.1834 | 0.0739 | 0.0081 | 0.763 | 0.780 |
+| Logistic regression | 0.2468 | 0.2028 | 0.0770 | 0.0180 | 0.756 | 0.763 |
+| RF default (50 trees, uncalibrated) | 0.3095 | 0.2523 | 0.0810 | 0.0394 | 0.737 | 0.762 |
+
+**The isolated picture is the opposite of the coverage picture.** The default 50-tree RF — the classifier that was effectively tied on PRDC coverage — is the *worst* classifier on log-loss (spread 0.085, about 6× the coverage spread), Brier, AUC, and calibration. Its ECE is ~8× worse than HistGB's. The AUC gap between RF (0.737) and HistGB (0.809) is 7 points — well outside any plausible noise band.
+
+This resolves the earlier ambiguity cleanly:
+
+1. **The ZI classifier choice does matter for the quantity the ZI wrapper is ostensibly predicting.** HistGB has meaningfully better $P(y > 0 \mid x)$ than an uncalibrated 50-tree RF on nearly every axis — log-loss, Brier, calibration, discrimination.
+
+2. **But the downstream QDNN draw swamps the signal.** Seven points of AUC and an order-of-magnitude calibration improvement produce zero coverage gain. The bridging logic (zero with probability $1 - \hat{P}(y > 0 \mid x)$, otherwise draw from the non-zero QDNN) is dominated by error in the non-zero draw, not error in the classifier.
+
+3. **The binding constraint for ZI-QDNN's coverage is downstream of the classifier.** Swapping classifiers alone cannot lift ZI-QDNN past 0.71 coverage — this requires improving the non-zero quantile output (joint modeling, pinball-loss recalibration, architectural change).
+
+There is a secondary implication for uses of the zero-classifier as a diagnostic rather than a generator component: if we ever surface $\hat{P}(y = 0 \mid x)$ as a subgroup-level or record-level signal (e.g., "this household is 80% likely to have zero long-term capital gains"), the RF default is not the right model. HistGB or a calibrated RF should be preferred there, because the calibration and discrimination gaps that are invisible on coverage become directly user-visible on calibration plots and top-k retrieval.
+
 ## Artifacts
 
 - `artifacts/stage1_77k_no_zi.json` — pure QRF, QDNN, MAF at 77k
 - `artifacts/stage1_77k_cart_variants.json` — CART, ZI-CART, ZI-QRF at 77k
 - `artifacts/stage1_77k_4methods.json` — ZI-CART, ZI-QRF, ZI-QDNN, ZI-MAF at 77k
-- `artifacts/zi_classifier_comparison.json` — 5 ZI classifiers on QDNN at 77k
+- `artifacts/zi_classifier_comparison.json` — 5 ZI classifiers on QDNN at 77k (coverage)
+- `artifacts/zi_classifier_isolated_eval.json` — 5 ZI classifiers in isolation (log-loss / Brier / ECE / AUC)
