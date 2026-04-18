@@ -546,13 +546,22 @@ def _build_method(method_name: str, kwargs: dict[str, Any] | None = None) -> Any
         ZIQRFMethod,
     )
 
-    from microplex_us.bakeoff.local_methods import CARTMethod, ZICARTMethod
+    from microplex_us.bakeoff.local_methods import (
+        CARTMethod,
+        ZICARTMethod,
+        ZIQDNNHistGBMethod,
+    )
 
     registry = {
         "QRF": QRFMethod,
         "ZI-QRF": ZIQRFMethod,
         "QDNN": QDNNMethod,
-        "ZI-QDNN": ZIQDNNMethod,
+        # ZI-QDNN defaults to HistGB zero-classifier (microplex-us override).
+        # The upstream RF-backed variant is kept under "ZI-QDNN-RF" so prior
+        # benchmark artifacts (which were produced with RF) remain reproducible.
+        # See docs/zi-factorial.md for the rationale.
+        "ZI-QDNN": ZIQDNNHistGBMethod,
+        "ZI-QDNN-RF": ZIQDNNMethod,
         "MAF": MAFMethod,
         "ZI-MAF": ZIMAFMethod,
         "CTGAN": CTGANMethod,

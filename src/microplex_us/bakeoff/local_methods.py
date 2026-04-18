@@ -256,20 +256,6 @@ def _dnn_factory():
     ])
 
 
-class ZIQDNNLogisticMethod:
-    """Placeholder; actual class built by _make_zi_variant at registry time."""
-
-    name = "ZI-QDNN-logistic"
-
-
-class ZIQDNNHGBMethod:
-    name = "ZI-QDNN-hgb"
-
-
-class ZIQDNNCalibratedMethod:
-    name = "ZI-QDNN-calibrated"
-
-
 def zi_qdnn_variant_factory(variant: str):
     """Return a ZIQDNNMethod subclass with a swapped zero-classifier."""
     if variant == "logistic":
@@ -283,8 +269,25 @@ def zi_qdnn_variant_factory(variant: str):
     raise ValueError(f"Unknown ZI variant: {variant}")
 
 
+# Concrete ZI-QDNN variant with a histogram gradient boosting zero-classifier.
+# This is the `microplex-us` default for ZI-QDNN: on the 77k x 50 Enhanced CPS
+# isolated per-column log-loss evaluation (26 ZI-eligible columns, seed 42),
+# HistGB Pareto-dominates the upstream RF default on log-loss (0.225 vs 0.310),
+# Brier (0.071 vs 0.081), ECE (0.005 vs 0.039), and ROC-AUC (0.809 vs 0.737).
+# See `docs/zi-factorial.md` for the full comparison.
+#
+# PRDC coverage on the same config is insensitive to the swap (0.7017 vs
+# 0.7081); the downstream QDNN draw swamps the classifier-level gap. The
+# default is chosen on intrinsic classifier quality, not on measured
+# synthesis gains. The upstream RF-backed ZIQDNNMethod is still registered
+# under "ZI-QDNN-RF" in `scale_up.py` for regression testing.
+ZIQDNNHistGBMethod = _make_zi_variant("ZI-QDNN", _hgb_factory)
+ZIQDNNHistGBMethod.name = "ZI-QDNN"
+
+
 __all__ = [
     "CARTMethod",
     "ZICARTMethod",
+    "ZIQDNNHistGBMethod",
     "zi_qdnn_variant_factory",
 ]
