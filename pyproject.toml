@@ -13,9 +13,8 @@ authors = [
 ]
 requires-python = ">=3.13"
 dependencies = [
-    "microplex",
+    "microplex[calibrate]",
     "duckdb>=1.2",
-    "microcalibrate>=0.22",
 ]
 
 [project.optional-dependencies]
