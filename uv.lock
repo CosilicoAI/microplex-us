@@ -644,7 +644,7 @@ wheels = [
 
 [[package]]
 name = "microcalibrate"
-version = "0.21.2"
+version = "0.22.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "l0-python" },
@@ -654,9 +654,9 @@ dependencies = [
     { name = "torch" },
     { name = "tqdm" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/f0/db/6b7179a8f67cb5ce2d7392ee7b0b0744ef66477d65790e02db327b756cee/microcalibrate-0.21.2.tar.gz", hash = "sha256:bb8d2c29835db7257e886d9f5cdbcc1337d6642cf5772ac6ae5ffb3561cdd72a", size = 200240, upload-time = "2026-02-24T10:49:13.339Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/b7/11/dc170c33ab42a1c6437c9094696c149ec780161a2cdb2630b6a70c8234dc/microcalibrate-0.22.0.tar.gz", hash = "sha256:360eb241156f3731902a9aa73aea1d39437d97a6a40db1ddd0ab85ef636596ea", size = 216545, upload-time = "2026-04-18T15:21:59.591Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/41/44/3c436340250d01a6d25fd7e684a009207afc1d5691fd893c5fd7db305423/microcalibrate-0.21.2-py3-none-any.whl", hash = "sha256:0db982956566d8d5a4f1f06e0191b05506fc040364f87bd37cb6c42f00a5279d", size = 27002, upload-time = "2026-02-24T10:49:12.503Z" },
+    { url = "https://files.pythonhosted.org/packages/3b/7f/36882ae748084bb7e570417cb81f2791a2d3f29fddeeaa7616c2a100c8ad/microcalibrate-0.22.0-py3-none-any.whl", hash = "sha256:c713220bfe24661fd3fba9d94ccf4352c1b961f7f7a1871d437ac15527dcf431", size = 31563, upload-time = "2026-04-18T15:21:58.69Z" },
 ]
 
 [[package]]

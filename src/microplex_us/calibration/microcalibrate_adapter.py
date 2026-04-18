@@ -47,6 +47,11 @@ class MicrocalibrateAdapterConfig:
     init_mean: float = 0.999
     temperature: float = 0.5
     sparse_learning_rate: float = 0.2
+    # Keep activation memory bounded at v7 scale. 100_000 rows per
+    # backward step keeps the per-batch autograd activation under
+    # ~200 MB at k = 500 constraints (100_000 * 500 * 4 B). None =
+    # full-batch, which OOMs at 1.5M households.
+    batch_size: int | None = 100_000
 
 
 class MicrocalibrateAdapter:
@@ -147,6 +152,7 @@ class MicrocalibrateAdapter:
             init_mean=self.config.init_mean,
             temperature=self.config.temperature,
             sparse_learning_rate=self.config.sparse_learning_rate,
+            batch_size=self.config.batch_size,
         )
 
         performance_df = calibrator.calibrate()
