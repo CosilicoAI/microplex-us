@@ -105,15 +105,15 @@ Ordering is preserved across the fix; absolute numbers are meaningfully higher. 
 
 ## Calibration on synthesizer output
 
-Identity-preserving gradient-descent chi-squared calibration applied to the 36 target-column sums of each synthesizer's output, with holdout totals as targets:
+Identity-preserving gradient-descent chi-squared calibration applied to the 36 target-column sums of each synthesizer's output, with holdout totals as targets (500 epochs, lr 1e-3):
 
 | Method   | Pre-cal mean rel. err. | Post-cal mean rel. err. |
 |----------|-----------------------:|------------------------:|
-| ZI-QRF   | 0.256                  | 0.141                   |
-| ZI-QDNN  | 0.388                  | 0.327                   |
-| ZI-MAF   | 17.98                  | 15.08                   |
+| ZI-QRF   | 0.317                  | 0.105                   |
+| ZI-QDNN  | 0.386                  | 0.251                   |
+| ZI-MAF   | 17.51                  | 11.86                   |
 
-Calibration refines structurally sound synthesizer output; it cannot rescue a broken one.
+Calibration refines structurally sound synthesizer output; it cannot rescue a broken one. ZI-MAF's post-calibration error remains over 1100 % of target scale, consistent with its raw outputs being too far off target support for weight adjustment to bridge.
 
 # Discussion {#sec-discussion}
 

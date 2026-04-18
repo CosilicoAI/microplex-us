@@ -12,15 +12,17 @@
 4. Run `MicrocalibrateAdapter.fit_transform` with 200 epochs, lr 1e-3.
 5. Report mean relative error across target columns before and after calibration.
 
-## Results
+## Results (post-snap-fix rerun with 500 epochs, 2026-04-17 21:17)
 
 | Method | Pre-cal mean rel err | Post-cal mean rel err | Max post-cal err | Cal time |
 |---|---:|---:|---:|---:|
-| **ZI-QRF** | 0.256 | **0.141** | 1.000 | 1.2 s |
-| ZI-QDNN | 0.388 | 0.327 | 1.003 | 0.2 s |
-| ZI-MAF | 17.98 | 15.08 | 214.5 | 0.2 s |
+| **ZI-QRF** | 0.317 | **0.105** | 1.000 | 1.1 s |
+| ZI-QDNN | 0.386 | 0.251 | 1.002 | 0.6 s |
+| ZI-MAF | 17.51 | 11.86 | 168.3 | 0.6 s |
 
-Reading: after calibration, ZI-QRF's weighted synthetic aggregates are within 14 % of the holdout targets on average. ZI-QDNN is at 33 %. ZI-MAF is at **1,508 %** — the synthetic output is so far off the target scale that calibration can't pull it back, even with 200 epochs of gradient descent.
+Reading: after calibration, ZI-QRF's weighted synthetic aggregates are within 10.5 % of the holdout targets on average. ZI-QDNN is at 25.1 %. ZI-MAF is at **1,186 %** — the synthetic output is so far off target scale that calibration can't pull it back, even with 500 epochs of gradient descent.
+
+Pre-snap numbers at 200 epochs (archived as `artifacts/calibrate_on_synthesizer.pre-snap.json`) gave ZI-QRF post-cal 0.141, ZI-QDNN 0.327, ZI-MAF 15.08. The bump to 500 epochs + the snap fix both help; ordering and qualitative conclusion are unchanged.
 
 ## What this tells us
 
@@ -38,17 +40,17 @@ Reading: after calibration, ZI-QRF's weighted synthetic aggregates are within 14
 
 At production scale (1.5 M records × 1255 constraints), the per-epoch step is cheaper per-record but there are vastly more records to move, so even 500-1000 epochs may leave some constraints unsolved. The `MicrocalibrateAdapterConfig.epochs` default of 32 is too low; the `us.py` wiring uses `max(self.config.calibration_max_iter, 32)` which pulls from the pipeline's `calibration_max_iter=100`. Reasonable starting point; tune up if convergence is still incomplete.
 
-## Four-way agreement on synthesizer ordering
+## Four-way agreement on synthesizer ordering (post-snap-fix)
 
-Combined evidence:
+Combined evidence with the upstream shared-col noise fix applied:
 
 | Check | ZI-QRF | ZI-QDNN | ZI-MAF |
 |---|---|---|---|
-| Raw 50-d PRDC (40k) | 0.348 (winner) | 0.219 | 0.025 |
-| Raw 50-d PRDC (77k) | 0.256 (winner) | 0.147 | 0.014 |
-| Embed 16-d PRDC (40k) | 0.309 (winner) | 0.222 | 0.038 |
-| ZI-MAF tuned (wide+long, 40k) | — | — | 0.033 |
-| Calibrate-on-synth mean err (20k) | 0.14 (winner) | 0.33 | 15.08 |
+| Raw 50-d PRDC at 40k (snap) | 0.979 (winner) | 0.796 | 0.168 |
+| Raw 50-d PRDC at 77k (snap) | 0.928 (winner) | 0.707 | 0.106 |
+| Embed 16-d PRDC at 40k (snap) | 0.984 (winner) | 0.819 | 0.201 |
+| ZI-MAF tuned (wide+long, 40k, pre-snap) | — | — | 0.033 |
+| Calibrate-on-synth post-cal mean err (20k, snap) | 0.105 (winner) | 0.251 | 11.86 |
 
 Every axis, every scale, every metric: **ZI-QRF > ZI-QDNN > ZI-MAF**.
 
