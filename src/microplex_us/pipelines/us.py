@@ -297,6 +297,123 @@ class ColumnwiseQRFDonorImputer:
         return synthetic
 
 
+class RegimeAwareDonorImputer:
+    """Donor imputer that wraps `microimpute.ZeroInflatedImputer` per column.
+
+    Each target is fit with an independent `ZeroInflatedImputer`, which
+    auto-detects one of seven regimes (THREE_SIGN / ZI_POSITIVE /
+    ZI_NEGATIVE / SIGN_ONLY / POSITIVE_ONLY / NEGATIVE_ONLY /
+    DEGENERATE_ZERO) from the training distribution and composes a
+    gate classifier + one or two base imputers as appropriate.
+
+    Key advantages over `ColumnwiseQRFDonorImputer`:
+
+    1. Negative values in training are preserved in predictions for
+       three-sign targets (capital gains, partnership/S-corp income,
+       farm income, rental income). The v7 `y > 0` bug is structurally
+       impossible under regime-aware routing.
+    2. Predictions on three-sign targets never land in the interior
+       band between ``max(train_neg)`` and ``min(train_pos)`` — the
+       tripartite gate routes to sign-specific base imputers that each
+       see only one sign of training data.
+
+    This class is a thin columnwise adapter: one `ZeroInflatedImputer`
+    is fit per target, using `microimpute.QRF` as the base. Fit and
+    generate work column-by-column so memory scales with the single
+    largest base imputer, not with the total target count.
+    """
+
+    def __init__(
+        self,
+        condition_vars: list[str],
+        target_vars: list[str],
+        n_estimators: int = 100,
+        nonnegative_vars: set[str] | None = None,
+        classifier_type: str = "hist_gb",
+        min_class_count: int = 10,
+        min_class_fraction: float = 0.01,
+    ) -> None:
+        self.condition_vars = list(condition_vars)
+        self.target_vars = list(target_vars)
+        self.n_estimators = int(n_estimators)
+        self.nonnegative_vars = set(nonnegative_vars or ())
+        self.classifier_type = str(classifier_type)
+        self.min_class_count = int(min_class_count)
+        self.min_class_fraction = float(min_class_fraction)
+        self._fitted: dict[str, Any] = {}
+        self._regimes: dict[str, str] = {}
+
+    def fit(
+        self,
+        data: pd.DataFrame,
+        *,
+        weight_col: str | None = "weight",
+        epochs: int | None = None,
+        batch_size: int | None = None,
+        learning_rate: float | None = None,
+        verbose: bool = False,
+    ) -> RegimeAwareDonorImputer:
+        del weight_col, epochs, batch_size, learning_rate, verbose
+
+        if importlib.util.find_spec("microimpute") is None:
+            raise ImportError(
+                "microimpute>=2.1 is required for donor_imputer_backend="
+                "'regime_aware'; install with `uv pip install microimpute`."
+            )
+        if importlib.util.find_spec("quantile_forest") is None:
+            raise ImportError(
+                "quantile-forest is required for the RegimeAwareDonorImputer "
+                "base QRF."
+            )
+
+        from microimpute.models.qrf import QRF
+        from microimpute.models.zero_inflated import ZeroInflatedImputer
+
+        self._fitted = {}
+        self._regimes = {}
+        for column in self.target_vars:
+            subset = data[self.condition_vars + [column]].dropna()
+            if len(subset) < 25:
+                continue
+            # base_imputer_kwargs={} because microimpute 2.x's
+            # ZeroInflatedImputer._fit_base_single already passes
+            # log_level="ERROR" to the base, and duplicating it here
+            # raises TypeError. Upstream fix tracked.
+            wrapper = ZeroInflatedImputer(
+                base_imputer_class=QRF,
+                base_imputer_kwargs={},
+                min_class_count=self.min_class_count,
+                min_class_fraction=self.min_class_fraction,
+                classifier_type=self.classifier_type,
+            )
+            fitted = wrapper.fit(
+                subset,
+                predictors=list(self.condition_vars),
+                imputed_variables=[column],
+            )
+            self._fitted[column] = fitted
+            self._regimes[column] = wrapper.get_regime(column)
+        return self
+
+    def generate(
+        self,
+        conditions: pd.DataFrame,
+        seed: int | None = None,
+    ) -> pd.DataFrame:
+        synthetic = conditions.copy().reset_index(drop=True)
+        for column in self.target_vars:
+            fitted = self._fitted.get(column)
+            if fitted is None:
+                synthetic[column] = np.nan
+                continue
+            preds = fitted.predict(synthetic[self.condition_vars])
+            values = preds[column].to_numpy(dtype=float)
+            if column in self.nonnegative_vars:
+                values = np.maximum(values, 0.0)
+            synthetic[column] = values
+        return synthetic
+
+
 AGE_LABELS = ["0-17", "18-34", "35-54", "55-64", "65+"]
 INCOME_BINS = [-np.inf, 25_000, 50_000, 100_000, np.inf]
 INCOME_LABELS = ["<25k", "25-50k", "50-100k", "100k+"]
@@ -1449,7 +1566,7 @@ class USMicroplexBuildConfig:
     donor_imputer_learning_rate: float = 1e-3
     donor_imputer_n_layers: int = 2
     donor_imputer_hidden_dim: int = 32
-    donor_imputer_backend: Literal["maf", "qrf", "zi_qrf"] = "maf"
+    donor_imputer_backend: Literal["maf", "qrf", "zi_qrf", "regime_aware"] = "maf"
     donor_imputer_qrf_n_estimators: int = 100
     donor_imputer_qrf_zero_threshold: float = 0.05
     donor_imputer_condition_selection: Literal[
@@ -3872,15 +3989,6 @@ class USMicroplexPipeline:
             variable: variable_semantic_spec_for(variable).support_family
             for variable in target_vars
         }
-        zero_inflated_vars = (
-            {
-                variable
-                for variable, support_family in support_families.items()
-                if support_family is VariableSupportFamily.ZERO_INFLATED_POSITIVE
-            }
-            if backend == "zi_qrf"
-            else set()
-        )
         nonnegative_vars = {
             variable
             for variable, support_family in support_families.items()
@@ -3890,6 +3998,22 @@ class USMicroplexPipeline:
                 VariableSupportFamily.BOUNDED_SHARE,
             }
         }
+        if backend == "regime_aware":
+            return RegimeAwareDonorImputer(
+                condition_vars=condition_vars,
+                target_vars=list(target_vars),
+                n_estimators=self.config.donor_imputer_qrf_n_estimators,
+                nonnegative_vars=nonnegative_vars,
+            )
+        zero_inflated_vars = (
+            {
+                variable
+                for variable, support_family in support_families.items()
+                if support_family is VariableSupportFamily.ZERO_INFLATED_POSITIVE
+            }
+            if backend == "zi_qrf"
+            else set()
+        )
         return ColumnwiseQRFDonorImputer(
             condition_vars=condition_vars,
             target_vars=list(target_vars),

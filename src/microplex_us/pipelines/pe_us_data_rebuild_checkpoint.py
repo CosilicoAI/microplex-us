@@ -2001,7 +2001,7 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--donor-imputer-condition-selection")
     parser.add_argument(
         "--donor-imputer-backend",
-        choices=["maf", "qrf", "zi_qrf"],
+        choices=["maf", "qrf", "zi_qrf", "regime_aware"],
         default=None,
         help=(
             "Donor imputer backend. `zi_qrf` activates the zero-inflated "
