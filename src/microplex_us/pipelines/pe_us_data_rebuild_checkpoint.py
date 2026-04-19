@@ -1999,6 +1999,17 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--n-synthetic", type=int, default=100_000)
     parser.add_argument("--random-seed", type=int, default=42)
     parser.add_argument("--donor-imputer-condition-selection")
+    parser.add_argument(
+        "--donor-imputer-backend",
+        choices=["maf", "qrf", "zi_qrf"],
+        default=None,
+        help=(
+            "Donor imputer backend. `zi_qrf` activates the zero-inflated "
+            "QRF path that skips predict() on gate-predicted-zero rows, "
+            "which is a large wall-clock win on heavy-zero PUF tax "
+            "variables. See docs/next-run-plan.md."
+        ),
+    )
     parser.add_argument("--cps-source-year", type=int, default=2023)
     parser.add_argument("--puf-target-year", type=int)
     parser.add_argument("--puf-cps-reference-year", type=int)
@@ -2070,6 +2081,8 @@ def main(argv: list[str] | None = None) -> None:
         config_overrides["donor_imputer_condition_selection"] = (
             args.donor_imputer_condition_selection
         )
+    if args.donor_imputer_backend is not None:
+        config_overrides["donor_imputer_backend"] = args.donor_imputer_backend
     if args.calibration_backend is not None:
         config_overrides["calibration_backend"] = args.calibration_backend
     if args.calibration_max_iter is not None:
