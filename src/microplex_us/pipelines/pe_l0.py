@@ -12,7 +12,7 @@ import numpy as np
 import pandas as pd
 from microplex.calibration import (
     LinearConstraint,
-    _build_linear_constraint_system,
+    _build_sparse_constraint_system,
     _validate_calibration_inputs,
 )
 from scipy import sparse as sp
@@ -123,7 +123,10 @@ class PolicyEngineL0Calibrator:
             self.linear_constraints_,
         )
 
-        A, b, names, _ = _build_linear_constraint_system(
+        # Build the calibration matrix directly in CSR form to avoid the
+        # ~24 GB dense intermediate that OOM'd v7 at 1.5M records x
+        # ~4k constraints. See microplex.calibration._build_sparse_constraint_system.
+        X_sparse_built, b, names, _ = _build_sparse_constraint_system(
             data,
             marginal_targets,
             continuous_targets,
@@ -131,7 +134,7 @@ class PolicyEngineL0Calibrator:
         )
         self.target_names_ = names
 
-        if A.shape[0] == 0:
+        if X_sparse_built.shape[0] == 0:
             if weight_col in data.columns:
                 self.weights_ = data[weight_col].to_numpy(dtype=float, copy=True)
             else:
@@ -149,7 +152,7 @@ class PolicyEngineL0Calibrator:
             initial_weights = np.ones(len(data), dtype=float)
         initial_weights = np.maximum(initial_weights, 1e-12)
 
-        X_sparse = sp.csr_matrix(A)
+        X_sparse = X_sparse_built
         weights = self._fit_weights(
             X_sparse=X_sparse,
             targets=b.astype(np.float64),
@@ -158,7 +161,7 @@ class PolicyEngineL0Calibrator:
         )
         weights = np.maximum(np.asarray(weights, dtype=float), 0.0)
 
-        residual = A @ weights - b
+        residual = X_sparse @ weights - b
         rel_errors = np.abs(residual) / np.maximum(np.abs(b), 1e-10)
         self.weights_ = weights
         self.calibration_error_ = float(np.sqrt(np.mean(rel_errors**2)))
