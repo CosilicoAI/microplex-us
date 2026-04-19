@@ -223,17 +223,28 @@ class ColumnwiseQRFDonorImputer:
                 column in self.zero_inflated_vars
                 and (y_values == 0).mean() >= self.zero_threshold
                 and (y_values == 0).sum() >= 10
-                and (y_values > 0).sum() >= 10
+                and (y_values != 0).sum() >= 10
             ):
+                # Gate trained as zero vs nonzero (both signs), not as
+                # zero-or-negative vs positive. The old `y > 0` label
+                # silently dropped every negative training row along
+                # with zeros, so the QRF below only ever saw positive
+                # rows and could never emit a negative prediction — the
+                # v7 bug that blanked the negative tail of capital
+                # gains, partnership income, farm income, etc. The
+                # `!= 0` label is the minimal fix; the full upgrade to
+                # `microimpute.ZeroInflatedImputer` (regime-aware
+                # tripartite routing with separate positive / negative
+                # QRFs) is tracked as a follow-up.
                 zero_model = RandomForestClassifier(
                     n_estimators=max(50, self.n_estimators // 2),
                     random_state=42,
                     n_jobs=-1,
                 )
-                zero_model.fit(x_values, (y_values > 0).astype(int))
+                zero_model.fit(x_values, (y_values != 0).astype(int))
                 self._zero_models[column] = zero_model
-                x_values = x_values[y_values > 0]
-                y_values = y_values[y_values > 0]
+                x_values = x_values[y_values != 0]
+                y_values = y_values[y_values != 0]
             if len(y_values) < 25:
                 continue
             model = RandomForestQuantileRegressor(
