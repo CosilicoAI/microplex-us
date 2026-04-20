@@ -591,34 +591,126 @@ def _constraint_active_household_count(
     constraint: Any,
     *,
     epsilon: float = 1e-12,
+    metadata_lookup: dict[str, dict[str, Any]] | None = None,
 ) -> int:
+    """Return the count of households with nonzero coefficient on this constraint.
+
+    If ``metadata_lookup`` (a dict keyed by constraint name containing
+    precomputed scalars) is supplied, the precomputed value is used and
+    the potentially-stripped ``coefficients`` array is not read. This
+    lets upstream callers free ~48 GB of dense coefficient arrays at
+    v7/v8 scale (4k constraints × 1.5M-length float64) without breaking
+    the ledger / feasibility-filter / stage-selection paths that
+    previously scanned the array on every lookup.
+    """
+    if metadata_lookup is not None:
+        cached = metadata_lookup.get(getattr(constraint, "name", None))
+        if cached is not None and "active_households" in cached:
+            return int(cached["active_households"])
     coefficients = np.asarray(getattr(constraint, "coefficients", ()), dtype=float)
     if coefficients.size == 0:
         return 0
     return int(np.count_nonzero(np.abs(coefficients) > epsilon))
 
 
+def _precompute_constraint_metadata(
+    constraints: tuple[Any, ...],
+    *,
+    epsilon: float = 1e-12,
+) -> dict[str, dict[str, Any]]:
+    """Compute per-constraint scalar metadata once, while coefficients are live.
+
+    The ledger, feasibility filter, and stage-selection code all read
+    two scalars per constraint (``active_households``, ``coefficient_mass``)
+    derived from the dense 1.5M-length coefficient array. Computing
+    them upfront (one pass per constraint) lets us strip the dense
+    arrays before the oracle Microsim is invoked without breaking
+    those downstream consumers.
+    """
+    metadata: dict[str, dict[str, Any]] = {}
+    for constraint in constraints:
+        name = getattr(constraint, "name", None)
+        if name is None:
+            continue
+        coefficients = np.asarray(
+            getattr(constraint, "coefficients", ()), dtype=float
+        )
+        if coefficients.size == 0:
+            metadata[name] = {
+                "active_households": 0,
+                "coefficient_mass": 0.0,
+            }
+            continue
+        metadata[name] = {
+            "active_households": int(
+                np.count_nonzero(np.abs(coefficients) > epsilon)
+            ),
+            "coefficient_mass": float(np.abs(coefficients).sum()),
+        }
+    return metadata
+
+
+def _strip_constraint_coefficients(
+    constraints: tuple[Any, ...],
+) -> tuple[LinearConstraint, ...]:
+    """Replace each constraint's coefficient array with a zero-length sentinel.
+
+    The resulting tuple keeps the name, target, and class (so
+    duck-typed consumers still work), but the coefficients are gone,
+    freeing the ~48 GB the pre-filter set occupies at v7/v8 scale.
+    ``_constraint_active_household_count`` and
+    ``_build_policyengine_constraint_records`` will fall through to the
+    pre-computed metadata lookup instead of rescanning.
+    """
+    stripped: list[LinearConstraint] = []
+    for constraint in constraints:
+        stripped.append(
+            LinearConstraint(
+                name=constraint.name,
+                coefficients=np.zeros(0, dtype=float),
+                target=float(constraint.target),
+            )
+        )
+    return tuple(stripped)
+
+
 def _build_policyengine_constraint_records(
     targets: list[TargetSpec],
     constraints: tuple[Any, ...],
+    *,
+    metadata_lookup: dict[str, dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     records: list[dict[str, Any]] = []
     for target, constraint in zip(targets, constraints, strict=True):
         aggregation_name = str(
             getattr(getattr(target, "aggregation", None), "name", target.aggregation)
         ).upper()
+        name = getattr(constraint, "name", None)
+        cached = (
+            metadata_lookup.get(name)
+            if metadata_lookup is not None and name is not None
+            else None
+        )
+        if cached is not None and "coefficient_mass" in cached:
+            coefficient_mass = float(cached["coefficient_mass"])
+        else:
+            coefficient_mass = float(
+                np.abs(
+                    np.asarray(
+                        getattr(constraint, "coefficients", ()), dtype=float
+                    )
+                ).sum()
+            )
         records.append(
             {
                 "target": target,
                 "constraint": constraint,
-                "active_households": _constraint_active_household_count(constraint),
+                "active_households": _constraint_active_household_count(
+                    constraint, metadata_lookup=metadata_lookup
+                ),
                 "geo_priority": _policyengine_target_geo_priority(target),
                 "aggregation_priority": 0 if aggregation_name == "COUNT" else 1,
-                "coefficient_mass": float(
-                    np.abs(
-                        np.asarray(getattr(constraint, "coefficients", ()), dtype=float)
-                    ).sum()
-                ),
+                "coefficient_mass": coefficient_mass,
             }
         )
     return records
@@ -816,6 +908,7 @@ def _build_policyengine_calibration_target_ledger(
     household_count: int,
     min_active_households: int,
     materialization_failures: dict[str, str],
+    compiled_constraint_metadata: dict[str, dict[str, Any]] | None = None,
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     min_required_households = max(1, int(min_active_households))
     structurally_unsupported_names = {
@@ -876,7 +969,11 @@ def _build_policyengine_calibration_target_ledger(
             )
             classified_names.add(target.name)
 
-    for record in _build_policyengine_constraint_records(compiled_targets, compiled_constraints):
+    for record in _build_policyengine_constraint_records(
+        compiled_targets,
+        compiled_constraints,
+        metadata_lookup=compiled_constraint_metadata,
+    ):
         target = record["target"]
         classified_names.add(target.name)
         active_households = int(record["active_households"])
@@ -969,6 +1066,7 @@ def _select_policyengine_deferred_stage_constraints(
     max_constraints_per_household: float | None,
     top_family_count: int | None,
     top_geography_count: int | None,
+    compiled_constraint_metadata: dict[str, dict[str, Any]] | None = None,
 ) -> tuple[list[TargetSpec], tuple[LinearConstraint, ...], dict[str, Any]]:
     ledger_by_name = {
         str(entry["target_name"]): entry
@@ -1000,7 +1098,11 @@ def _select_policyengine_deferred_stage_constraints(
     focus_eligible_count = 0
     min_required_households = max(1, int(min_active_households))
 
-    for record in _build_policyengine_constraint_records(compiled_targets, compiled_constraints):
+    for record in _build_policyengine_constraint_records(
+        compiled_targets,
+        compiled_constraints,
+        metadata_lookup=compiled_constraint_metadata,
+    ):
         target = record["target"]
         if target.name in selected_target_names:
             continue
@@ -3179,6 +3281,16 @@ class USMicroplexPipeline:
         }
         all_selected_targets = list(supported_targets)
         all_selected_constraints = list(constraints)
+        # Pre-compute the ledger-needed scalars once, while compiled_constraints'
+        # coefficient arrays are still live. Downstream calls (ledger +
+        # deferred-stage selection) read from this lookup instead of
+        # rescanning the ~4k × 1.5M float64 arrays three times. The
+        # repeated scans were allocating ~30 GB of transient
+        # ``np.abs(...)`` copies on top of the 48 GB baseline, a
+        # contributor to the v8 197 GB-compressed jetsam kill.
+        compiled_constraint_metadata = _precompute_constraint_metadata(
+            compiled_constraints
+        )
         updated_tables, calibrated_persons, final_stage_summary = (
             _apply_policyengine_constraint_stage(
                 tables,
@@ -3197,6 +3309,7 @@ class USMicroplexPipeline:
             household_count=target_planning_household_count,
             min_active_households=self.config.policyengine_calibration_min_active_households,
             materialization_failures=materialization_failures,
+            compiled_constraint_metadata=compiled_constraint_metadata,
         )
         oracle_loss, oracle_target_priority_lookup = (
             _evaluate_policyengine_target_fit_context(
@@ -3415,6 +3528,7 @@ class USMicroplexPipeline:
                         top_geography_count=(
                             self.config.policyengine_calibration_deferred_stage_top_geography_count
                         ),
+                        compiled_constraint_metadata=compiled_constraint_metadata,
                     )
                 )
                 if not stage_targets:
@@ -3462,6 +3576,7 @@ class USMicroplexPipeline:
                             self.config.policyengine_calibration_min_active_households
                         ),
                         materialization_failures=materialization_failures,
+                        compiled_constraint_metadata=compiled_constraint_metadata,
                     )
                 )
                 candidate_oracle_loss, candidate_target_priority_lookup = (
