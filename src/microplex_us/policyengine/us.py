@@ -1181,11 +1181,17 @@ def resolve_policyengine_excluded_export_variables(
     return excluded_variables
 
 
-def _subset_bundle_by_households(
+def subset_policyengine_tables_by_households(
     tables: PolicyEngineUSEntityTableBundle,
-    household_ids: np.ndarray,
+    household_ids: np.ndarray | pd.Index,
 ) -> PolicyEngineUSEntityTableBundle:
-    """Slice an entity bundle to a subset of household_ids, preserving order."""
+    """Slice an entity bundle to a subset of household_ids, preserving order.
+
+    The returned bundle's ``households`` frame is reordered to match the
+    order of ``household_ids``; related entity tables retain their own
+    internal order but are filtered to only rows whose ``household_id``
+    is in the selection.
+    """
     selected = pd.Index(household_ids, name="household_id")
     order = pd.Series(np.arange(len(selected)), index=selected)
 
@@ -1193,9 +1199,7 @@ def _subset_bundle_by_households(
         tables.households["household_id"].isin(selected)
     ].copy()
     households = (
-        households.assign(
-            _hh_order=households["household_id"].map(order)
-        )
+        households.assign(_hh_order=households["household_id"].map(order))
         .sort_values("_hh_order")
         .drop(columns="_hh_order")
         .reset_index(drop=True)
@@ -1275,7 +1279,7 @@ def materialize_policyengine_us_variables(
             for start in range(0, n_households, batch_size):
                 end = min(start + batch_size, n_households)
                 chunk_ids = household_ids[start:end]
-                chunk_tables = _subset_bundle_by_households(tables, chunk_ids)
+                chunk_tables = subset_policyengine_tables_by_households(tables, chunk_ids)
                 chunk_result, chunk_binding = materialize_policyengine_us_variables(
                     chunk_tables,
                     variables=variables,

@@ -543,39 +543,9 @@ def _subset_policyengine_linear_constraints(
     return tuple(subset)
 
 
-def _subset_policyengine_tables_by_households(
-    tables: PolicyEngineUSEntityTableBundle,
-    household_ids: pd.Index,
-) -> PolicyEngineUSEntityTableBundle:
-    selected_ids = pd.Index(household_ids, name="household_id")
-    household_order = pd.Series(np.arange(len(selected_ids)), index=selected_ids)
-
-    households = tables.households.loc[
-        tables.households["household_id"].isin(selected_ids)
-    ].copy()
-    households = (
-        households.assign(
-            _household_order=households["household_id"].map(household_order)
-        )
-        .sort_values("_household_order")
-        .drop(columns="_household_order")
-        .reset_index(drop=True)
-    )
-
-    def _subset_related(table: pd.DataFrame | None) -> pd.DataFrame | None:
-        if table is None:
-            return None
-        subset = table.loc[table["household_id"].isin(selected_ids)].copy()
-        return subset.reset_index(drop=True)
-
-    return PolicyEngineUSEntityTableBundle(
-        households=households,
-        persons=_subset_related(tables.persons),
-        tax_units=_subset_related(tables.tax_units),
-        spm_units=_subset_related(tables.spm_units),
-        families=_subset_related(tables.families),
-        marital_units=_subset_related(tables.marital_units),
-    )
+from microplex_us.policyengine.us import (
+    subset_policyengine_tables_by_households as _subset_policyengine_tables_by_households,
+)
 
 
 def _policyengine_target_geo_priority(target: TargetSpec) -> int:
@@ -593,16 +563,7 @@ def _constraint_active_household_count(
     epsilon: float = 1e-12,
     metadata_lookup: dict[str, dict[str, Any]] | None = None,
 ) -> int:
-    """Return the count of households with nonzero coefficient on this constraint.
-
-    If ``metadata_lookup`` (a dict keyed by constraint name containing
-    precomputed scalars) is supplied, the precomputed value is used and
-    the potentially-stripped ``coefficients`` array is not read. This
-    lets upstream callers free ~48 GB of dense coefficient arrays at
-    v7/v8 scale (4k constraints × 1.5M-length float64) without breaking
-    the ledger / feasibility-filter / stage-selection paths that
-    previously scanned the array on every lookup.
-    """
+    """Count households with nonzero coefficient. Uses ``metadata_lookup`` when provided."""
     if metadata_lookup is not None:
         cached = metadata_lookup.get(getattr(constraint, "name", None))
         if cached is not None and "active_households" in cached:
@@ -618,15 +579,7 @@ def _precompute_constraint_metadata(
     *,
     epsilon: float = 1e-12,
 ) -> dict[str, dict[str, Any]]:
-    """Compute per-constraint scalar metadata once, while coefficients are live.
-
-    The ledger, feasibility filter, and stage-selection code all read
-    two scalars per constraint (``active_households``, ``coefficient_mass``)
-    derived from the dense 1.5M-length coefficient array. Computing
-    them upfront (one pass per constraint) lets us strip the dense
-    arrays before the oracle Microsim is invoked without breaking
-    those downstream consumers.
-    """
+    """Per-constraint {active_households, coefficient_mass} scalar metadata."""
     metadata: dict[str, dict[str, Any]] = {}
     for constraint in constraints:
         name = getattr(constraint, "name", None)
@@ -653,25 +606,13 @@ def _precompute_constraint_metadata(
 def _strip_constraint_coefficients(
     constraints: tuple[Any, ...],
 ) -> tuple[LinearConstraint, ...]:
-    """Replace each constraint's coefficient array with a zero-length sentinel.
-
-    The resulting tuple keeps the name, target, and class (so
-    duck-typed consumers still work), but the coefficients are gone,
-    freeing the ~48 GB the pre-filter set occupies at v7/v8 scale.
-    ``_constraint_active_household_count`` and
-    ``_build_policyengine_constraint_records`` will fall through to the
-    pre-computed metadata lookup instead of rescanning.
-    """
-    stripped: list[LinearConstraint] = []
-    for constraint in constraints:
-        stripped.append(
-            LinearConstraint(
-                name=constraint.name,
-                coefficients=np.zeros(0, dtype=float),
-                target=float(constraint.target),
-            )
+    """Replace each constraint's coefficient array with a zero-length sentinel."""
+    return tuple(
+        LinearConstraint(
+            name=c.name, coefficients=np.zeros(0, dtype=float), target=float(c.target)
         )
-    return tuple(stripped)
+        for c in constraints
+    )
 
 
 def _build_policyengine_constraint_records(
