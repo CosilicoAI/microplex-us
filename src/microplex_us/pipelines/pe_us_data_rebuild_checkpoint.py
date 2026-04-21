@@ -2071,6 +2071,18 @@ def main(argv: list[str] | None = None) -> None:
             "through to USMicroplexBuildConfig.calibration_max_iter."
         ),
     )
+    parser.add_argument(
+        "--policyengine-materialize-batch-size",
+        type=int,
+        default=None,
+        help=(
+            "If set, splits PolicyEngine variable materialization into "
+            "household chunks of this size. At 1.5M-household scale a "
+            "single Microsimulation is 25-35 GB; batch_size=100_000 "
+            "drops peak to a few GB. Required for workstation runs; "
+            "unset (full-dataset) path targeted Modal GPU."
+        ),
+    )
     args = parser.parse_args(argv)
 
     config_overrides = {
@@ -2087,6 +2099,10 @@ def main(argv: list[str] | None = None) -> None:
         config_overrides["calibration_backend"] = args.calibration_backend
     if args.calibration_max_iter is not None:
         config_overrides["calibration_max_iter"] = int(args.calibration_max_iter)
+    if args.policyengine_materialize_batch_size is not None:
+        config_overrides["policyengine_materialize_batch_size"] = int(
+            args.policyengine_materialize_batch_size
+        )
 
     result = run_policyengine_us_data_rebuild_checkpoint(
         output_root=args.output_root,

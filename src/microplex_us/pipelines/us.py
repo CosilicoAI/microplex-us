@@ -1743,6 +1743,18 @@ class USMicroplexBuildConfig:
     policyengine_oracle_relative_error_cap: float | None = 10.0
     policyengine_target_reform_id: int = 0
     policyengine_simulation_cls: Any | None = None
+    policyengine_materialize_batch_size: int | None = None
+    """Batch size for PolicyEngine variable materialization.
+
+    At 1.5M-household scale a single Microsimulation is 25–35 GB. With
+    a batch size of e.g. 100_000, the pipeline splits the entity tables
+    into chunks and runs one Microsimulation per chunk, reducing peak
+    memory to a few GB. ``None`` (default) keeps the legacy single-pass
+    behavior. Safe for per-household scalar variables (all our
+    calibration targets); unsafe for population-quantile-dependent
+    variables (see docstring on
+    :func:`materialize_policyengine_us_variables`).
+    """
 
     def __post_init__(self) -> None:
         if (
@@ -3792,6 +3804,7 @@ class USMicroplexPipeline:
                 period=target_period,
                 dataset_year=self.config.policyengine_dataset_year or target_period,
                 simulation_cls=self.config.policyengine_simulation_cls,
+                batch_size=self.config.policyengine_materialize_batch_size,
             )
             tables = materialization_result.tables
             bindings = {

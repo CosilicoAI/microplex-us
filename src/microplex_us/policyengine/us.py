@@ -1181,6 +1181,62 @@ def resolve_policyengine_excluded_export_variables(
     return excluded_variables
 
 
+def _subset_bundle_by_households(
+    tables: PolicyEngineUSEntityTableBundle,
+    household_ids: np.ndarray,
+) -> PolicyEngineUSEntityTableBundle:
+    """Slice an entity bundle to a subset of household_ids, preserving order."""
+    selected = pd.Index(household_ids, name="household_id")
+    order = pd.Series(np.arange(len(selected)), index=selected)
+
+    households = tables.households.loc[
+        tables.households["household_id"].isin(selected)
+    ].copy()
+    households = (
+        households.assign(
+            _hh_order=households["household_id"].map(order)
+        )
+        .sort_values("_hh_order")
+        .drop(columns="_hh_order")
+        .reset_index(drop=True)
+    )
+
+    def _slice(df: pd.DataFrame | None) -> pd.DataFrame | None:
+        if df is None:
+            return None
+        return df.loc[df["household_id"].isin(selected)].reset_index(drop=True)
+
+    return PolicyEngineUSEntityTableBundle(
+        households=households,
+        persons=_slice(tables.persons),
+        tax_units=_slice(tables.tax_units),
+        spm_units=_slice(tables.spm_units),
+        families=_slice(tables.families),
+        marital_units=_slice(tables.marital_units),
+    )
+
+
+def _concat_bundles(
+    bundles: list[PolicyEngineUSEntityTableBundle],
+) -> PolicyEngineUSEntityTableBundle:
+    """Concatenate a list of entity bundles into one, preserving order."""
+
+    def _join(field: str) -> pd.DataFrame | None:
+        frames = [getattr(b, field) for b in bundles if getattr(b, field) is not None]
+        if not frames:
+            return None
+        return pd.concat(frames, ignore_index=True)
+
+    return PolicyEngineUSEntityTableBundle(
+        households=_join("households"),
+        persons=_join("persons"),
+        tax_units=_join("tax_units"),
+        spm_units=_join("spm_units"),
+        families=_join("families"),
+        marital_units=_join("marital_units"),
+    )
+
+
 def materialize_policyengine_us_variables(
     tables: PolicyEngineUSEntityTableBundle,
     *,
@@ -1191,8 +1247,49 @@ def materialize_policyengine_us_variables(
     microsimulation_kwargs: dict[str, Any] | None = None,
     temp_dir: str | Path | None = None,
     direct_override_variables: tuple[str, ...] = (),
+    batch_size: int | None = None,
 ) -> tuple[PolicyEngineUSEntityTableBundle, dict[str, PolicyEngineUSVariableBinding]]:
-    """Calculate PolicyEngine variables on a temporary export and attach them to tables."""
+    """Calculate PolicyEngine variables on a temporary export and attach them to tables.
+
+    Memory control: when ``batch_size`` is set, the function loops over
+    disjoint household chunks of that size, materializing variables on
+    each chunk (one temp h5 + one Microsimulation per chunk) and
+    concatenating results. Peak Microsimulation working set drops from
+    O(n_households) to O(batch_size) with no change in output — this is
+    additive for the per-household scalar variables we use as calibration
+    targets (employment income, EITC, CTC, federal income tax, etc.), and
+    the per-chunk Microsims are independent of each other.
+
+    Variables with cross-household semantics (national quantile
+    thresholds, poverty rates that depend on the full income
+    distribution) would be incorrect under batching and are not supported
+    when ``batch_size`` is not ``None``. Use ``batch_size=None`` for
+    those.
+    """
+    if batch_size is not None and batch_size > 0:
+        n_households = len(tables.households)
+        if n_households > batch_size:
+            chunk_bundles: list[PolicyEngineUSEntityTableBundle] = []
+            chunk_bindings: dict[str, PolicyEngineUSVariableBinding] = {}
+            household_ids = tables.households["household_id"].to_numpy()
+            for start in range(0, n_households, batch_size):
+                end = min(start + batch_size, n_households)
+                chunk_ids = household_ids[start:end]
+                chunk_tables = _subset_bundle_by_households(tables, chunk_ids)
+                chunk_result, chunk_binding = materialize_policyengine_us_variables(
+                    chunk_tables,
+                    variables=variables,
+                    period=period,
+                    dataset_year=dataset_year,
+                    simulation_cls=simulation_cls,
+                    microsimulation_kwargs=microsimulation_kwargs,
+                    temp_dir=temp_dir,
+                    direct_override_variables=direct_override_variables,
+                    batch_size=None,
+                )
+                chunk_bundles.append(chunk_result)
+                chunk_bindings.update(chunk_binding)
+            return _concat_bundles(chunk_bundles), chunk_bindings
     requested_variables = tuple(dict.fromkeys(str(variable) for variable in variables))
     if not requested_variables:
         return tables, {}
@@ -1259,8 +1356,16 @@ def materialize_policyengine_us_variables_safely(
     microsimulation_kwargs: dict[str, Any] | None = None,
     temp_dir: str | Path | None = None,
     direct_override_variables: tuple[str, ...] = (),
+    batch_size: int | None = None,
 ) -> PolicyEngineUSVariableMaterializationResult:
-    """Materialize PE variables, degrading to per-variable failures when needed."""
+    """Materialize PE variables, degrading to per-variable failures when needed.
+
+    ``batch_size`` forwards to :func:`materialize_policyengine_us_variables`.
+    With a non-``None`` positive value, the full-dataset Microsimulation
+    (25–35 GB peak at 1.5M households) is replaced with N per-chunk
+    Microsims (each ~2–3 GB). Results are concatenated; output is
+    identical for per-household scalar variables.
+    """
     requested_variables = tuple(dict.fromkeys(str(variable) for variable in variables))
     if not requested_variables:
         return PolicyEngineUSVariableMaterializationResult(
@@ -1278,6 +1383,7 @@ def materialize_policyengine_us_variables_safely(
             microsimulation_kwargs=microsimulation_kwargs,
             temp_dir=temp_dir,
             direct_override_variables=direct_override_variables,
+            batch_size=batch_size,
         )
     except Exception:
         return _materialize_policyengine_us_variables_one_by_one(
