@@ -10,3 +10,4 @@ __pycache__/
 paper/_output/
 paper/*_files/
 .quarto/
+.gitnexus
