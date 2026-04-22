@@ -55,14 +55,27 @@ def _make_bundle(n: int = 50) -> PolicyEngineUSEntityTableBundle:
 
 
 class TestRecalibrateFromPipelineCheckpoint:
-    def test_post_imputation_checkpoint_dispatches_to_calibrate(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    @pytest.mark.parametrize("stage", ["post_imputation", "post_microsim"])
+    def test_checkpoint_dispatches_to_calibrate(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        stage: str,
     ) -> None:
+        """Both supported stages load their bundle and dispatch to calibrate.
+
+        For ``post_microsim``, microsim is skipped inside
+        ``_resolve_policyengine_calibration_targets`` because all
+        materialized vars are present as columns; for
+        ``post_imputation``, microsim runs normally. The helper only
+        orchestrates the load and hand-off, so the parametrized test
+        covers both paths.
+        """
         from microplex_us.pipelines.us import recalibrate_policyengine_us_from_checkpoint
 
         bundle = _make_bundle(n=40)
         save_us_pipeline_checkpoint(
-            bundle, tmp_path / "checkpoint", stage="post_imputation"
+            bundle, tmp_path / "checkpoint", stage=stage
         )
 
         observed_tables: list[PolicyEngineUSEntityTableBundle] = []
@@ -94,20 +107,23 @@ class TestRecalibrateFromPipelineCheckpoint:
             observed_tables[0].households, bundle.households
         )
         assert result.calibration_summary == {"mock": True}
-        assert result.loaded_stage == "post_imputation"
-        pd.testing.assert_frame_equal(result.policyengine_tables.households, bundle.households)
+        assert result.loaded_stage == stage
+        pd.testing.assert_frame_equal(
+            result.policyengine_tables.households, bundle.households
+        )
 
-    def test_post_microsim_stage_rejected_in_v1(
-        self, tmp_path: Path
-    ) -> None:
+    def test_unsupported_stage_raises(self, tmp_path: Path) -> None:
+        """A metadata.json with an unknown stage is rejected."""
         from microplex_us.pipelines.us import recalibrate_policyengine_us_from_checkpoint
 
-        bundle = _make_bundle(n=10)
-        save_us_pipeline_checkpoint(
-            bundle, tmp_path / "checkpoint", stage="post_microsim"
+        (tmp_path / "checkpoint").mkdir()
+        import json
+
+        (tmp_path / "checkpoint" / "metadata.json").write_text(
+            json.dumps({"format_version": 1, "stage": "bogus"})
         )
         cfg = USMicroplexBuildConfig(policyengine_targets_db=tmp_path / "targets.db")
-        with pytest.raises(NotImplementedError, match="post_microsim"):
+        with pytest.raises(ValueError, match="Cannot resume"):
             recalibrate_policyengine_us_from_checkpoint(cfg, tmp_path / "checkpoint")
 
     def test_missing_checkpoint_raises(self, tmp_path: Path) -> None:

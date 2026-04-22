@@ -1,13 +1,18 @@
 """Recalibrate a saved US microplex checkpoint with a new calibration config.
 
-Load a ``post_imputation`` pipeline checkpoint previously saved via
+Load a ``post_imputation`` or ``post_microsim`` pipeline checkpoint
+previously saved via
 ``pe_us_data_rebuild_checkpoint --pipeline-checkpoint-save-post-imputation-path``
-and rerun the calibration stage without repeating the ~11 hours of
-synthesis + donor imputation.
+(or ``--pipeline-checkpoint-save-post-microsim-path``) and rerun the
+calibration stage without repeating the ~11 hours of synthesis + donor
+imputation. A ``post_microsim`` checkpoint additionally skips the
+microsim materialization step because the materialized vars are
+already on the bundle as columns.
 
 Intended for rapid iteration on calibration backends / target sets /
-sparsity schedules: change one flag, run for ~30 min instead of half a
-day.
+sparsity schedules: change one flag, run for ~30 min
+(``post_imputation``) or ~1–2 min + calibration fit
+(``post_microsim``) instead of half a day.
 """
 
 from __future__ import annotations
@@ -27,8 +32,9 @@ from microplex_us.pipelines.us import (
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description=(
-            "Rerun US microplex calibration from a saved post-imputation "
-            "checkpoint (skips the ~11 h synthesis stage)."
+            "Rerun US microplex calibration from a saved checkpoint. Works "
+            "with both post_imputation (skips ~11 h synthesis) and "
+            "post_microsim (additionally skips ~30 min microsim) stages."
         ),
     )
     parser.add_argument(
@@ -37,7 +43,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         required=True,
         help=(
             "Path to a directory written by the main pipeline with "
-            "--pipeline-checkpoint-save-post-imputation-path."
+            "--pipeline-checkpoint-save-post-imputation-path or "
+            "--pipeline-checkpoint-save-post-microsim-path."
         ),
     )
     parser.add_argument(

@@ -7080,19 +7080,22 @@ def recalibrate_policyengine_us_from_checkpoint(
 
     Use for fast iteration on calibration config (backend, lambda
     schedule, targets) without paying the ~11 h synthesis + donor
-    imputation cost that produced the bundle.
-
-    v1 supports ``post_imputation`` checkpoints only — ``post_microsim``
-    resume requires pickled compiled constraints and is a follow-up.
+    imputation cost that produced the bundle. Both
+    ``post_imputation`` and ``post_microsim`` checkpoints are
+    supported: the latter skips microsim too because
+    ``infer_policyengine_us_variable_bindings`` picks up the
+    materialized target vars as columns on the bundle, so
+    ``policyengine_us_variables_to_materialize`` returns an empty set
+    and ``_resolve_policyengine_calibration_targets`` short-circuits
+    past the materialization call.
     """
     checkpoint_path = Path(checkpoint_path)
     bundle, metadata = load_us_pipeline_checkpoint(checkpoint_path)
     stage = metadata.get("stage")
-    if stage != "post_imputation":
-        raise NotImplementedError(
-            f"Resume from stage {stage!r} is not supported yet; only "
-            "'post_imputation' is available. post_microsim resume is "
-            "blocked on pickled compiled-constraint serialization."
+    if stage not in {"post_imputation", "post_microsim"}:
+        raise ValueError(
+            f"Cannot resume from checkpoint stage {stage!r}; expected "
+            "'post_imputation' or 'post_microsim'."
         )
 
     pipeline = USMicroplexPipeline(config)
