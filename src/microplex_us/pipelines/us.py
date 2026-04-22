@@ -70,9 +70,11 @@ from microplex_us.policyengine.us import (
     compile_supported_policyengine_us_household_linear_constraints,
     filter_supported_policyengine_us_targets,
     infer_policyengine_us_variable_bindings,
+    load_us_pipeline_checkpoint,
     materialize_policyengine_us_variables_safely,
     policyengine_us_variables_to_materialize,
     resolve_policyengine_excluded_export_variables,
+    save_us_pipeline_checkpoint,
     write_policyengine_us_time_period_dataset,
 )
 from microplex_us.variables import (
@@ -1696,6 +1698,24 @@ class USMicroplexBuildConfig:
     variables (see docstring on
     :func:`materialize_policyengine_us_variables`).
     """
+    pipeline_checkpoint_save_post_imputation_path: str | Path | None = None
+    """Write a post-imputation pipeline checkpoint to this directory.
+
+    Saved right after donor imputation + ``build_policyengine_entity_tables``
+    and before microsim materializes calibration target variables. The
+    ~11 h synthesis + imputation + PE-tables build can be skipped on a
+    rerun that loads from this checkpoint, leaving only microsim (~30
+    min) + calibration fit (~30 min) to redo.
+    """
+    pipeline_checkpoint_save_post_microsim_path: str | Path | None = None
+    """Write a post-microsim pipeline checkpoint to this directory.
+
+    Saved after ``_resolve_policyengine_calibration_targets`` has
+    materialized every calibration target variable onto the bundle, and
+    before the L0/microcalibrate fit loop. A rerun that loads from this
+    checkpoint skips microsim too, leaving only the ~30 min calibration
+    fit — useful for tuning calibration targets or backends.
+    """
 
     def __post_init__(self) -> None:
         if (
@@ -2020,6 +2040,18 @@ class USMicroplexPipeline:
                 households=int(len(synthetic_tables.households)),
                 persons=int(len(synthetic_tables.persons)),
             )
+            if self.config.pipeline_checkpoint_save_post_imputation_path is not None:
+                save_us_pipeline_checkpoint(
+                    synthetic_tables,
+                    self.config.pipeline_checkpoint_save_post_imputation_path,
+                    stage="post_imputation",
+                )
+                _emit_us_pipeline_progress(
+                    "US microplex build: post-imputation checkpoint saved",
+                    path=str(
+                        self.config.pipeline_checkpoint_save_post_imputation_path
+                    ),
+                )
             _emit_us_pipeline_progress(
                 "US microplex build: policyengine calibration start",
                 backend=self.config.calibration_backend,
@@ -2622,12 +2654,19 @@ class USMicroplexPipeline:
 
     def _build_weight_calibrator(
         self,
+        stage_index: int = 1,
     ) -> (
         Calibrator
         | SparseCalibrator
         | HardConcreteCalibrator
         | PolicyEngineL0Calibrator
     ):
+        # Stage 1 selects the sparse support via L0; stages 2+ only
+        # refine weights against additional targets. Re-applying the same
+        # L0 penalty on warm-started weights compounds sparsity and
+        # collapses the support set (v10 went 442k → 1.5k across stages).
+        sparsity_pass = stage_index <= 1
+        l0_penalty = 1e-4 if sparsity_pass else 0.0
         if self.config.calibration_backend in {"entropy", "ipf", "chi2"}:
             return Calibrator(
                 method=self.config.calibration_backend,
@@ -2642,7 +2681,7 @@ class USMicroplexPipeline:
             )
         if self.config.calibration_backend == "hardconcrete":
             return HardConcreteCalibrator(
-                lambda_l0=1e-4,
+                lambda_l0=l0_penalty,
                 epochs=max(self.config.calibration_max_iter, 500),
                 lr=0.1,
                 device=self.config.device,
@@ -2650,7 +2689,7 @@ class USMicroplexPipeline:
             )
         if self.config.calibration_backend == "pe_l0":
             return PolicyEngineL0Calibrator(
-                lambda_l0=1e-4,
+                lambda_l0=l0_penalty,
                 epochs=max(self.config.calibration_max_iter, 100),
                 device=self.config.device,
                 tol=self.config.calibration_tol,
@@ -3046,6 +3085,16 @@ class USMicroplexPipeline:
             provider=provider,
             target_period=target_period,
         )
+        if self.config.pipeline_checkpoint_save_post_microsim_path is not None:
+            save_us_pipeline_checkpoint(
+                tables,
+                self.config.pipeline_checkpoint_save_post_microsim_path,
+                stage="post_microsim",
+            )
+            _emit_us_pipeline_progress(
+                "US microplex build: post-microsim checkpoint saved",
+                path=str(self.config.pipeline_checkpoint_save_post_microsim_path),
+            )
         preselection_supported_targets = list(supported_targets)
         target_planning_household_count = len(tables.households)
         if not supported_targets:
@@ -3110,6 +3159,7 @@ class USMicroplexPipeline:
         def _apply_policyengine_constraint_stage(
             stage_tables: PolicyEngineUSEntityTableBundle,
             stage_constraints: tuple[LinearConstraint, ...],
+            stage_index: int = 1,
         ) -> tuple[PolicyEngineUSEntityTableBundle, pd.DataFrame, dict[str, Any]]:
             stage_input_household_weight_sum = float(
                 stage_tables.households["household_weight"].sum()
@@ -3119,7 +3169,7 @@ class USMicroplexPipeline:
                 calibrated_households = stage_tables.households.copy()
                 pre_rescale_household_weight_sum = stage_input_household_weight_sum
             else:
-                stage_calibrator = self._build_weight_calibrator()
+                stage_calibrator = self._build_weight_calibrator(stage_index=stage_index)
                 calibration_constraints = list(stage_constraints)
                 if self.config.policyengine_calibration_target_total_weight is not None:
                     n_hh = len(stage_tables.households)
@@ -3501,6 +3551,7 @@ class USMicroplexPipeline:
                     _apply_policyengine_constraint_stage(
                         updated_tables,
                         stage_constraints,
+                        stage_index=stage_index,
                     )
                 )
                 candidate_selected_stage_by_name = dict(selected_stage_by_name)

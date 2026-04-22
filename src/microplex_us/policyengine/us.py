@@ -139,6 +139,106 @@ class PolicyEngineUSEntityTableBundle:
         raise KeyError(f"No table available for entity '{entity.value}'")
 
 
+_PIPELINE_CHECKPOINT_TABLES: tuple[str, ...] = (
+    "households",
+    "persons",
+    "tax_units",
+    "spm_units",
+    "families",
+    "marital_units",
+)
+
+_ALLOWED_CHECKPOINT_STAGES: frozenset[str] = frozenset({"post_imputation", "post_microsim"})
+
+
+def save_us_pipeline_checkpoint(
+    bundle: PolicyEngineUSEntityTableBundle,
+    path: str | Path,
+    *,
+    stage: Literal["post_imputation", "post_microsim"],
+) -> Path:
+    """Persist a pipeline-stage bundle to ``path`` as parquet + metadata.
+
+    Writes one parquet file per non-None entity table plus a
+    ``metadata.json`` index tagged with the pipeline ``stage``. Two
+    stages are supported:
+
+    * ``"post_imputation"`` — after donor imputation, before PE microsim
+      materializes target variables. Resuming from here reruns
+      microsim + calibration.
+    * ``"post_microsim"`` — after microsim materialization, before the
+      calibration fit loop. Resuming from here reruns only calibration.
+    """
+    import json
+    import shutil
+
+    if stage not in _ALLOWED_CHECKPOINT_STAGES:
+        raise ValueError(
+            f"stage must be one of {sorted(_ALLOWED_CHECKPOINT_STAGES)}; got {stage!r}"
+        )
+
+    checkpoint_dir = Path(path)
+    if checkpoint_dir.exists():
+        shutil.rmtree(checkpoint_dir)
+    checkpoint_dir.mkdir(parents=True)
+
+    metadata: dict[str, Any] = {"format_version": 1, "stage": stage}
+    for table_name in _PIPELINE_CHECKPOINT_TABLES:
+        frame = getattr(bundle, table_name)
+        if frame is None:
+            metadata[table_name] = None
+            continue
+        frame.to_parquet(checkpoint_dir / f"{table_name}.parquet", index=False)
+        metadata[table_name] = {
+            "rows": int(len(frame)),
+            "columns": list(frame.columns),
+        }
+
+    (checkpoint_dir / "metadata.json").write_text(json.dumps(metadata, indent=2))
+    return checkpoint_dir
+
+
+def load_us_pipeline_checkpoint(
+    path: str | Path,
+    *,
+    expected_stage: Literal["post_imputation", "post_microsim"] | None = None,
+) -> tuple[PolicyEngineUSEntityTableBundle, dict[str, Any]]:
+    """Load a pipeline-stage bundle previously saved by ``save_us_pipeline_checkpoint``.
+
+    Returns ``(bundle, metadata)`` so callers can inspect the saved
+    stage. If ``expected_stage`` is provided, a mismatch raises a clear
+    error — protects against running recalibration from a post-microsim
+    checkpoint when a post-imputation checkpoint was expected or vice
+    versa.
+    """
+    import json
+
+    checkpoint_dir = Path(path)
+    metadata_path = checkpoint_dir / "metadata.json"
+    if not metadata_path.exists():
+        raise FileNotFoundError(
+            f"US pipeline checkpoint not found at {checkpoint_dir}"
+        )
+    metadata = json.loads(metadata_path.read_text())
+
+    saved_stage = metadata.get("stage")
+    if expected_stage is not None and saved_stage != expected_stage:
+        raise ValueError(
+            f"Checkpoint at {checkpoint_dir} has stage {saved_stage!r}, "
+            f"expected {expected_stage!r}"
+        )
+
+    tables: dict[str, pd.DataFrame | None] = {}
+    for table_name in _PIPELINE_CHECKPOINT_TABLES:
+        if metadata.get(table_name) is None:
+            tables[table_name] = None
+            continue
+        tables[table_name] = pd.read_parquet(
+            checkpoint_dir / f"{table_name}.parquet"
+        )
+    return PolicyEngineUSEntityTableBundle(**tables), metadata
+
+
 @dataclass(frozen=True)
 class PolicyEngineUSVariableMaterializationResult:
     """Materialized PE variables plus any per-variable failures."""

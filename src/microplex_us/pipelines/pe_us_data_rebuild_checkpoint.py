@@ -2083,6 +2083,29 @@ def main(argv: list[str] | None = None) -> None:
             "unset (full-dataset) path targeted Modal GPU."
         ),
     )
+    parser.add_argument(
+        "--pipeline-checkpoint-save-post-imputation-path",
+        type=str,
+        default=None,
+        help=(
+            "If set, save a post-imputation pipeline checkpoint to this "
+            "directory (right after donor imputation + PE tables build, "
+            "before microsim). A rerun can resume from this checkpoint "
+            "to skip the ~11 h synthesis stage."
+        ),
+    )
+    parser.add_argument(
+        "--pipeline-checkpoint-save-post-microsim-path",
+        type=str,
+        default=None,
+        help=(
+            "If set, save a post-microsim pipeline checkpoint to this "
+            "directory (after target variables are materialized, before "
+            "the calibration fit loop). A rerun can resume from this "
+            "checkpoint to skip both synthesis and microsim, leaving "
+            "only the calibration fit."
+        ),
+    )
     args = parser.parse_args(argv)
 
     config_overrides = {
@@ -2102,6 +2125,14 @@ def main(argv: list[str] | None = None) -> None:
     if args.policyengine_materialize_batch_size is not None:
         config_overrides["policyengine_materialize_batch_size"] = int(
             args.policyengine_materialize_batch_size
+        )
+    if args.pipeline_checkpoint_save_post_imputation_path is not None:
+        config_overrides["pipeline_checkpoint_save_post_imputation_path"] = (
+            args.pipeline_checkpoint_save_post_imputation_path
+        )
+    if args.pipeline_checkpoint_save_post_microsim_path is not None:
+        config_overrides["pipeline_checkpoint_save_post_microsim_path"] = (
+            args.pipeline_checkpoint_save_post_microsim_path
         )
 
     result = run_policyengine_us_data_rebuild_checkpoint(

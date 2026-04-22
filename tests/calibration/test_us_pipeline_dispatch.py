@@ -82,3 +82,32 @@ def test_invalid_backend_still_raises() -> None:
     pipeline = USMicroplexPipeline(bad_cfg)
     with pytest.raises(ValueError, match="Unsupported calibration backend"):
         pipeline._build_weight_calibrator()
+
+
+def test_pe_l0_deferred_stage_disables_sparsity_penalty() -> None:
+    """Stages ≥2 must refine weights without re-sparsifying.
+
+    v10 ran three L0 stages with `lambda_l0=1e-4` each, warm-starting
+    stages 2/3 from stage 1's already-sparse weights. Loss compounded
+    pruning down to 1,511 active households — unusable. Stages 2+ now
+    drop the sparsity penalty so they only reduce residual error.
+    """
+    cfg = USMicroplexBuildConfig(calibration_backend="pe_l0")
+    pipeline = USMicroplexPipeline(cfg)
+
+    stage1 = pipeline._build_weight_calibrator(stage_index=1)
+    stage2 = pipeline._build_weight_calibrator(stage_index=2)
+    stage3 = pipeline._build_weight_calibrator(stage_index=3)
+
+    assert stage1.lambda_l0 == pytest.approx(1e-4)
+    assert stage2.lambda_l0 == 0.0
+    assert stage3.lambda_l0 == 0.0
+
+
+def test_hardconcrete_deferred_stage_disables_sparsity_penalty() -> None:
+    cfg = USMicroplexBuildConfig(calibration_backend="hardconcrete")
+    pipeline = USMicroplexPipeline(cfg)
+    stage1 = pipeline._build_weight_calibrator(stage_index=1)
+    stage2 = pipeline._build_weight_calibrator(stage_index=2)
+    assert stage1.lambda_l0 == pytest.approx(1e-4)
+    assert stage2.lambda_l0 == 0.0
