@@ -7053,3 +7053,57 @@ def build_us_microplex(
     """Convenience wrapper for the US microplex pipeline."""
     pipeline = USMicroplexPipeline(config)
     return pipeline.build(persons, households)
+
+
+@dataclass
+class USMicroplexRecalibrateResult:
+    """Output of ``recalibrate_policyengine_us_from_checkpoint``.
+
+    Narrower than ``USMicroplexBuildResult`` because synthesis state is
+    unavailable when resuming: no ``seed_data``, no ``synthesizer``, no
+    source frames. Only calibration output is populated.
+    """
+
+    config: USMicroplexBuildConfig
+    loaded_stage: str
+    checkpoint_path: Path
+    policyengine_tables: PolicyEngineUSEntityTableBundle
+    calibrated_data: pd.DataFrame
+    calibration_summary: dict[str, Any]
+
+
+def recalibrate_policyengine_us_from_checkpoint(
+    config: USMicroplexBuildConfig,
+    checkpoint_path: str | Path,
+) -> USMicroplexRecalibrateResult:
+    """Load a saved pipeline checkpoint and rerun calibration against it.
+
+    Use for fast iteration on calibration config (backend, lambda
+    schedule, targets) without paying the ~11 h synthesis + donor
+    imputation cost that produced the bundle.
+
+    v1 supports ``post_imputation`` checkpoints only — ``post_microsim``
+    resume requires pickled compiled constraints and is a follow-up.
+    """
+    checkpoint_path = Path(checkpoint_path)
+    bundle, metadata = load_us_pipeline_checkpoint(checkpoint_path)
+    stage = metadata.get("stage")
+    if stage != "post_imputation":
+        raise NotImplementedError(
+            f"Resume from stage {stage!r} is not supported yet; only "
+            "'post_imputation' is available. post_microsim resume is "
+            "blocked on pickled compiled-constraint serialization."
+        )
+
+    pipeline = USMicroplexPipeline(config)
+    policyengine_tables, calibrated_data, calibration_summary = (
+        pipeline.calibrate_policyengine_tables(bundle)
+    )
+    return USMicroplexRecalibrateResult(
+        config=config,
+        loaded_stage=stage,
+        checkpoint_path=checkpoint_path,
+        policyengine_tables=policyengine_tables,
+        calibrated_data=calibrated_data,
+        calibration_summary=calibration_summary,
+    )
