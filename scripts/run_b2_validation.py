@@ -16,6 +16,7 @@ from pathlib import Path
 from microplex_us.validation.downstream import (
     DOWNSTREAM_BENCHMARKS_2024,
     compute_downstream_comparison,
+    compute_downstream_weighted_aggregate,
 )
 
 
@@ -42,7 +43,7 @@ def main() -> int:
         t0 = time.time()
         print(f"[{time.strftime('%H:%M:%S')}] computing {variable} ...", flush=True)
         try:
-            total = float(sim.calculate(variable, args.period).sum())
+            total = compute_downstream_weighted_aggregate(sim, variable, args.period)
         except Exception as exc:
             print(f"  {variable}: FAILED ({exc})", flush=True)
             aggregates[variable] = float("nan")

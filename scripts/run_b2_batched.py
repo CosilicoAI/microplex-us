@@ -26,7 +26,6 @@ from pathlib import Path
 import h5py
 import numpy as np
 
-
 HOUSEHOLD_ID = "household_id"
 
 ENTITY_ID_COLUMNS = {
@@ -44,6 +43,25 @@ PERSON_TO_GROUP_LINK = {
     "family": "person_family_id",
     "marital_unit": "person_marital_unit_id",
 }
+STRUCTURAL_VARIABLE_ENTITIES = {
+    "household_id": "household",
+    "household_weight": "household",
+    "person_id": "person",
+    "person_household_id": "person",
+    "person_weight": "person",
+    "tax_unit_id": "tax_unit",
+    "person_tax_unit_id": "person",
+    "tax_unit_weight": "tax_unit",
+    "spm_unit_id": "spm_unit",
+    "person_spm_unit_id": "person",
+    "spm_unit_weight": "spm_unit",
+    "family_id": "family",
+    "person_family_id": "person",
+    "family_weight": "family",
+    "marital_unit_id": "marital_unit",
+    "person_marital_unit_id": "person",
+    "marital_unit_weight": "marital_unit",
+}
 
 
 def _load_all_arrays(h5_path: Path, period_key: str) -> dict[str, np.ndarray]:
@@ -55,17 +73,51 @@ def _load_all_arrays(h5_path: Path, period_key: str) -> dict[str, np.ndarray]:
         return out
 
 
-def _entity_of(variable: str, arrays: dict[str, np.ndarray]) -> str:
-    """Classify a variable by matching its array length to an entity's id column."""
+def _load_policyengine_variable_entities() -> dict[str, str]:
+    try:
+        from policyengine_us import (
+            system as policyengine_system_module,  # noqa: PLC0415
+        )
+    except ImportError:
+        return {}
+
+    tax_benefit_system = getattr(policyengine_system_module, "system", None)
+    if tax_benefit_system is None:
+        return {}
+    variables = getattr(tax_benefit_system, "variables", {})
+    entity_map: dict[str, str] = {}
+    for name, metadata in variables.items():
+        entity_key = getattr(getattr(metadata, "entity", None), "key", None)
+        if entity_key is not None:
+            entity_map[str(name)] = str(entity_key)
+    return entity_map
+
+
+def _entity_of(
+    variable: str,
+    arrays: dict[str, np.ndarray],
+    *,
+    variable_entities: dict[str, str] | None = None,
+) -> str:
+    """Classify a variable, preferring PE metadata over fragile length matching."""
+    explicit_entity = STRUCTURAL_VARIABLE_ENTITIES.get(variable)
+    if explicit_entity is not None:
+        return explicit_entity
+    if variable_entities is not None and variable in variable_entities:
+        return variable_entities[variable]
     n = len(arrays[variable])
     entity_lengths = {
         entity: len(arrays[id_col])
         for entity, id_col in ENTITY_ID_COLUMNS.items()
         if id_col in arrays
     }
-    for entity, length in entity_lengths.items():
-        if length == n:
-            return entity
+    matches = [entity for entity, length in entity_lengths.items() if length == n]
+    if len(matches) == 1:
+        return matches[0]
+    if len(matches) > 1:
+        raise ValueError(
+            f"Ambiguous entity for variable {variable!r}: matched {matches} by length"
+        )
     return "unknown"
 
 
@@ -74,7 +126,6 @@ def _build_entity_masks(
 ) -> dict[str, np.ndarray]:
     """Produce boolean masks into each entity array for the households in ``chunk_hh_ids``."""
     hh_id = arrays["household_id"]
-    chunk_set = set(chunk_hh_ids.tolist())
     masks: dict[str, np.ndarray] = {}
     masks["household"] = np.isin(hh_id, chunk_hh_ids)
     person_hh = arrays["person_household_id"]
@@ -94,11 +145,17 @@ def _write_chunk_h5(
     entity_masks: dict[str, np.ndarray],
     period_key: str,
     tmp_path: Path,
+    *,
+    variable_entities: dict[str, str] | None = None,
 ) -> None:
     """Write a subset h5 keeping only rows matching each variable's entity mask."""
     with h5py.File(tmp_path, "w") as f:
         for variable, values in arrays.items():
-            entity = _entity_of(variable, arrays)
+            entity = _entity_of(
+                variable,
+                arrays,
+                variable_entities=variable_entities,
+            )
             mask = entity_masks.get(entity)
             if mask is None or len(values) != len(mask):
                 continue
@@ -118,6 +175,7 @@ def main() -> int:
     period_key = str(args.period)
     print(f"[{time.strftime('%H:%M:%S')}] loading all arrays from {args.dataset}", flush=True)
     arrays = _load_all_arrays(args.dataset, period_key)
+    variable_entities = _load_policyengine_variable_entities()
     print(
         f"[{time.strftime('%H:%M:%S')}] loaded {len(arrays)} variables",
         flush=True,
@@ -132,6 +190,10 @@ def main() -> int:
 
     from policyengine_us import Microsimulation  # noqa: PLC0415
 
+    from microplex_us.validation.downstream import (  # noqa: PLC0415
+        compute_downstream_weighted_aggregate,
+    )
+
     for batch_idx in range(n_batches):
         start = batch_idx * args.batch_size
         end = min(start + args.batch_size, n_hh)
@@ -141,12 +203,21 @@ def main() -> int:
 
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp) / "chunk.h5"
-            _write_chunk_h5(arrays, entity_masks, period_key, tmp_path)
+            _write_chunk_h5(
+                arrays,
+                entity_masks,
+                period_key,
+                tmp_path,
+                variable_entities=variable_entities,
+            )
 
             t0 = time.time()
             sim = Microsimulation(dataset=str(tmp_path))
-            values = sim.calculate(args.variable, args.period)
-            chunk_sum = float(values.sum())
+            chunk_sum = compute_downstream_weighted_aggregate(
+                sim,
+                args.variable,
+                args.period,
+            )
             total += chunk_sum
             elapsed = time.time() - t0
 

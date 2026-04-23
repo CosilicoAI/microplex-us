@@ -16,6 +16,7 @@ from pathlib import Path
 from microplex_us.validation.downstream import (
     DOWNSTREAM_BENCHMARKS_2024,
     compute_downstream_comparison,
+    compute_downstream_weighted_aggregate,
 )
 
 
@@ -33,7 +34,7 @@ def main() -> int:
     sim = Microsimulation(dataset=str(args.dataset))
     print(f"[{time.strftime('%H:%M:%S')}] loaded — computing {args.variable}", flush=True)
     t0 = time.time()
-    total = float(sim.calculate(args.variable, args.period).sum())
+    total = compute_downstream_weighted_aggregate(sim, args.variable, args.period)
     elapsed = time.time() - t0
     print(
         f"[{time.strftime('%H:%M:%S')}] {args.variable} = ${total/1e9:.2f}B "
@@ -42,11 +43,6 @@ def main() -> int:
     )
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
-    if args.output.exists():
-        existing = json.loads(args.output.read_text())
-    else:
-        existing = {}
-
     # Re-read intermediate file if present (accumulates across runs).
     raw_agg_path = args.output.with_suffix(".raw.json")
     raw_aggs = (

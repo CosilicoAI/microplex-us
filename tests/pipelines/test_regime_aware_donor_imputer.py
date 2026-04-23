@@ -37,8 +37,6 @@ import pytest
 pytest.importorskip("quantile_forest")
 pytest.importorskip("microimpute")
 
-from microimpute.models.zero_inflated import ZeroInflatedImputer  # noqa: E402
-
 
 def _three_sign_frame_with_gap(
     n: int = 1500, seed: int = 0
@@ -189,3 +187,43 @@ class TestRegimeAwareFitGenerate:
             f"construction. Sample offenders: "
             f"{sorted(synth_y[(np.abs(synth_y) < 100) & (np.abs(synth_y) > 1e-6)][:10])}"
         )
+
+    def test_same_seed_repeats_identically(self) -> None:
+        from microplex_us.pipelines.us import RegimeAwareDonorImputer
+
+        train = _three_sign_frame_with_gap(n=1200, seed=3)
+        conditions = train[["age", "is_female"]].head(300).reset_index(drop=True)
+        imputer = RegimeAwareDonorImputer(
+            condition_vars=["age", "is_female"],
+            target_vars=["short_term_capital_gains"],
+            n_estimators=25,
+        )
+        imputer.fit(train)
+
+        first = imputer.generate(conditions, seed=123)["short_term_capital_gains"].to_numpy()
+        second = imputer.generate(conditions, seed=123)["short_term_capital_gains"].to_numpy()
+        third = imputer.generate(conditions, seed=999)["short_term_capital_gains"].to_numpy()
+
+        np.testing.assert_array_equal(first, second)
+        assert not np.array_equal(first, third)
+
+    def test_same_seed_repeats_identically_for_multiple_targets(self) -> None:
+        from microplex_us.pipelines.us import RegimeAwareDonorImputer
+
+        train = _three_sign_frame_with_gap(n=1200, seed=4)
+        train["rental_income"] = -0.5 * train["short_term_capital_gains"]
+        conditions = train[["age", "is_female"]].head(300).reset_index(drop=True)
+        imputer = RegimeAwareDonorImputer(
+            condition_vars=["age", "is_female"],
+            target_vars=["short_term_capital_gains", "rental_income"],
+            n_estimators=25,
+        )
+        imputer.fit(train)
+
+        first = imputer.generate(conditions, seed=456)
+        second = imputer.generate(conditions, seed=456)
+        third = imputer.generate(conditions, seed=654)
+
+        for column in ("short_term_capital_gains", "rental_income"):
+            np.testing.assert_array_equal(first[column].to_numpy(), second[column].to_numpy())
+            assert not np.array_equal(first[column].to_numpy(), third[column].to_numpy())

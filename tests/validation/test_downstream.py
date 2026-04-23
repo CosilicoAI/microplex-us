@@ -25,14 +25,18 @@ These tests drive:
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
+from types import ModuleType, SimpleNamespace
 
 import pytest
 
 from microplex_us.validation.downstream import (
     DOWNSTREAM_BENCHMARKS_2024,
     DownstreamBenchmark,
+    compute_downstream_aggregates,
     compute_downstream_comparison,
+    compute_downstream_weighted_aggregate,
 )
 
 
@@ -114,3 +118,99 @@ class TestComputeDownstreamComparison:
         result = compute_downstream_comparison(computed, DOWNSTREAM_BENCHMARKS_2024)
         assert "not_a_benchmark_name" not in result
         assert "eitc" in result
+
+
+class TestComputeDownstreamAggregates:
+    @staticmethod
+    def _fake_simulation(
+        *,
+        values: dict[str, list[float]],
+        entities: dict[str, str],
+    ):
+        class FakeMicrosimulation:
+            def __init__(self, dataset: str = "fake.h5") -> None:
+                self.dataset = dataset
+                self.tax_benefit_system = SimpleNamespace(
+                    get_variable=lambda name: SimpleNamespace(
+                        entity=SimpleNamespace(key=entities[name])
+                    )
+                )
+
+            def calculate(self, variable: str, period: int):
+                assert period == 2024
+                return SimpleNamespace(values=values[variable])
+
+        return FakeMicrosimulation()
+
+    def test_uses_entity_weights_for_weighted_totals(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        class FakeMicrosimulation:
+            def __init__(self, dataset: str) -> None:
+                self.dataset = dataset
+                self.tax_benefit_system = SimpleNamespace(
+                    get_variable=lambda name: SimpleNamespace(
+                        entity=SimpleNamespace(
+                            key={
+                                "eitc": "tax_unit",
+                                "snap": "spm_unit",
+                                "ssi": "person",
+                            }[name]
+                        )
+                    )
+                )
+
+            def calculate(self, variable: str, period: int):
+                assert period == 2024
+                values = {
+                    "eitc": [10.0, 20.0],
+                    "tax_unit_weight": [100.0, 200.0],
+                    "snap": [1.0, 2.0, 3.0],
+                    "spm_unit_weight": [10.0, 20.0, 30.0],
+                    "ssi": [7.0, 11.0],
+                    "person_weight": [2.0, 3.0],
+                }
+                return SimpleNamespace(sum=lambda: sum(values[variable]), values=values[variable])
+
+        fake_module = ModuleType("policyengine_us")
+        fake_module.Microsimulation = FakeMicrosimulation
+        monkeypatch.setitem(sys.modules, "policyengine_us", fake_module)
+
+        aggregates = compute_downstream_aggregates(
+            tmp_path / "fake.h5",
+            period=2024,
+            variables=("eitc", "snap", "ssi"),
+        )
+
+        assert aggregates["eitc"] == pytest.approx(10.0 * 100.0 + 20.0 * 200.0)
+        assert aggregates["snap"] == pytest.approx(
+            1.0 * 10.0 + 2.0 * 20.0 + 3.0 * 30.0
+        )
+        assert aggregates["ssi"] == pytest.approx(7.0 * 2.0 + 11.0 * 3.0)
+
+    def test_weighted_aggregate_rejects_unsupported_entity(self) -> None:
+        simulation = self._fake_simulation(
+            values={"odd_output": [1.0, 2.0]},
+            entities={"odd_output": "benefit_unit"},
+        )
+
+        with pytest.raises(ValueError, match="Unsupported entity"):
+            compute_downstream_weighted_aggregate(
+                simulation,
+                "odd_output",
+                period=2024,
+            )
+
+    def test_weighted_aggregate_rejects_value_weight_length_mismatch(self) -> None:
+        simulation = self._fake_simulation(
+            values={
+                "eitc": [10.0, 20.0, 30.0],
+                "tax_unit_weight": [100.0, 200.0],
+            },
+            entities={"eitc": "tax_unit"},
+        )
+
+        with pytest.raises(ValueError, match="does not match"):
+            compute_downstream_weighted_aggregate(simulation, "eitc", period=2024)

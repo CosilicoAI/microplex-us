@@ -24,9 +24,11 @@ citation. Updates should be traceable to the cited source.
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, field
+from collections.abc import Iterable
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable
+
+import numpy as np
 
 
 @dataclass(frozen=True)
@@ -124,6 +126,15 @@ DOWNSTREAM_BENCHMARKS_2024: tuple[DownstreamBenchmarkSpec, ...] = (
     ),
 )
 
+ENTITY_WEIGHT_VARIABLES: dict[str, str] = {
+    "household": "household_weight",
+    "person": "person_weight",
+    "tax_unit": "tax_unit_weight",
+    "spm_unit": "spm_unit_weight",
+    "family": "family_weight",
+    "marital_unit": "marital_unit_weight",
+}
+
 
 def compute_downstream_comparison(
     aggregates: dict[str, float],
@@ -151,6 +162,39 @@ def compute_downstream_comparison(
     return result
 
 
+def _coerce_simulation_values(values: object) -> np.ndarray:
+    raw = getattr(values, "values", values)
+    return np.asarray(raw, dtype=float)
+
+
+def compute_downstream_weighted_aggregate(
+    simulation: object,
+    variable: str,
+    period: int = 2024,
+) -> float:
+    """Compute one entity-weighted downstream aggregate from a Microsimulation."""
+
+    tax_benefit_system = getattr(simulation, "tax_benefit_system", None)
+    if tax_benefit_system is None:
+        raise ValueError("Microsimulation is missing tax_benefit_system metadata")
+    entity = tax_benefit_system.get_variable(variable).entity
+    entity_key = getattr(entity, "key", None)
+    weight_variable = ENTITY_WEIGHT_VARIABLES.get(entity_key)
+    if weight_variable is None:
+        raise ValueError(
+            f"Unsupported entity {entity_key!r} for downstream aggregate {variable!r}"
+        )
+
+    values = _coerce_simulation_values(simulation.calculate(variable, period))
+    weights = _coerce_simulation_values(simulation.calculate(weight_variable, period))
+    if len(values) != len(weights):
+        raise ValueError(
+            f"Downstream aggregate {variable!r} length {len(values)} does not match "
+            f"{weight_variable!r} length {len(weights)}"
+        )
+    return float(np.dot(values, weights))
+
+
 def compute_downstream_aggregates(
     dataset_path: str | Path,
     period: int = 2024,
@@ -175,6 +219,9 @@ def compute_downstream_aggregates(
     simulation = Microsimulation(dataset=str(dataset_path))
     aggregates: dict[str, float] = {}
     for variable in variables:
-        series = simulation.calculate(variable, period)
-        aggregates[variable] = float(series.sum())
+        aggregates[variable] = compute_downstream_weighted_aggregate(
+            simulation,
+            variable,
+            period,
+        )
     return aggregates

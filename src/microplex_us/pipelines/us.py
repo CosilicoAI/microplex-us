@@ -77,6 +77,9 @@ from microplex_us.policyengine.us import (
     save_us_pipeline_checkpoint,
     write_policyengine_us_time_period_dataset,
 )
+from microplex_us.policyengine.us import (
+    subset_policyengine_tables_by_households as _subset_policyengine_tables_by_households,
+)
 from microplex_us.variables import (
     PE_STYLE_PUF_IRS_DEMOGRAPHIC_PREDICTORS,
     DonorMatchStrategy,
@@ -334,6 +337,7 @@ class RegimeAwareDonorImputer:
         classifier_type: str = "hist_gb",
         min_class_count: int = 10,
         min_class_fraction: float = 0.01,
+        seed: int = 42,
     ) -> None:
         self.condition_vars = list(condition_vars)
         self.target_vars = list(target_vars)
@@ -342,6 +346,7 @@ class RegimeAwareDonorImputer:
         self.classifier_type = str(classifier_type)
         self.min_class_count = int(min_class_count)
         self.min_class_fraction = float(min_class_fraction)
+        self.seed = int(seed)
         self._fitted: dict[str, Any] = {}
         self._regimes: dict[str, str] = {}
 
@@ -387,6 +392,7 @@ class RegimeAwareDonorImputer:
                 min_class_count=self.min_class_count,
                 min_class_fraction=self.min_class_fraction,
                 classifier_type=self.classifier_type,
+                seed=self.seed,
             )
             fitted = wrapper.fit(
                 subset,
@@ -403,17 +409,64 @@ class RegimeAwareDonorImputer:
         seed: int | None = None,
     ) -> pd.DataFrame:
         synthetic = conditions.copy().reset_index(drop=True)
+        master_seed = self.seed if seed is None else int(seed)
+        master_rng = np.random.default_rng(master_seed)
         for column in self.target_vars:
             fitted = self._fitted.get(column)
             if fitted is None:
                 synthetic[column] = np.nan
                 continue
+            column_seed = int(
+                master_rng.integers(0, np.iinfo(np.int32).max, dtype=np.int64)
+            )
+            self._reset_prediction_rngs(fitted, seed=column_seed)
             preds = fitted.predict(synthetic[self.condition_vars])
             values = preds[column].to_numpy(dtype=float)
             if column in self.nonnegative_vars:
                 values = np.maximum(values, 0.0)
             synthetic[column] = values
         return synthetic
+
+    def _reset_prediction_rngs(
+        self,
+        obj: Any,
+        *,
+        seed: int,
+        visited: set[int] | None = None,
+    ) -> None:
+        if visited is None:
+            visited = set()
+        if obj is None or isinstance(obj, (str, bytes, int, float, bool)):
+            return
+        object_id = id(obj)
+        if object_id in visited:
+            return
+        visited.add(object_id)
+
+        if hasattr(obj, "_rng"):
+            obj._rng = np.random.default_rng(seed)
+        child_rng = np.random.default_rng(seed)
+
+        if isinstance(obj, dict):
+            children = list(obj.values())
+        elif isinstance(obj, (list, tuple, set)):
+            children = list(obj)
+        else:
+            children = []
+            for attr_name in ("models", "_per_variable", "_non_numeric_bundle"):
+                child = getattr(obj, attr_name, None)
+                if child is not None:
+                    children.append(child)
+
+        for child in children:
+            child_seed = int(
+                child_rng.integers(0, np.iinfo(np.int32).max, dtype=np.int64)
+            )
+            self._reset_prediction_rngs(
+                child,
+                seed=child_seed,
+                visited=visited,
+            )
 
 
 AGE_LABELS = ["0-17", "18-34", "35-54", "55-64", "65+"]
@@ -543,11 +596,6 @@ def _subset_policyengine_linear_constraints(
             )
         )
     return tuple(subset)
-
-
-from microplex_us.policyengine.us import (
-    subset_policyengine_tables_by_households as _subset_policyengine_tables_by_households,
-)
 
 
 def _policyengine_target_geo_priority(target: TargetSpec) -> int:
@@ -4124,6 +4172,7 @@ class USMicroplexPipeline:
                 target_vars=list(target_vars),
                 n_estimators=self.config.donor_imputer_qrf_n_estimators,
                 nonnegative_vars=nonnegative_vars,
+                seed=self.config.random_seed,
             )
         zero_inflated_vars = (
             {
