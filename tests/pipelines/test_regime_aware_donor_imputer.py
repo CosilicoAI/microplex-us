@@ -36,6 +36,7 @@ import pytest
 
 pytest.importorskip("quantile_forest")
 pytest.importorskip("microimpute")
+pytest.importorskip("microimpute.models.zero_inflated")
 
 
 def _three_sign_frame_with_gap(
