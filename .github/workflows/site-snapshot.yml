@@ -41,6 +41,7 @@ jobs:
         run: |
           uv run --extra dev --with pydantic --with-editable ../microplex pytest -q \
             tests/test_package_imports.py \
+            tests/targets/test_supabase.py \
             tests/pipelines/test_check_site_snapshot.py \
             tests/pipelines/test_imputation_ablation.py \
             tests/pipelines/test_site_snapshot.py \

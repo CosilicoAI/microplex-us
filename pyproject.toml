@@ -15,6 +15,7 @@ requires-python = ">=3.13"
 dependencies = [
     "microplex[calibrate]",
     "duckdb>=1.2",
+    "requests>=2.31",
 ]
 
 [project.optional-dependencies]
