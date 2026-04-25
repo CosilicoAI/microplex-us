@@ -34,6 +34,8 @@ from microplex_us.policyengine.us import (
     infer_policyengine_us_variable_bindings,
     load_policyengine_us_entity_tables,
     materialize_policyengine_us_variables_safely,
+    policyengine_us_formula_variables_for_targets,
+    policyengine_us_variables_to_materialize,
 )
 
 POLICYENGINE_US_BENCHMARK_GROUP_FIELDS = (
@@ -363,20 +365,35 @@ def evaluate_policyengine_us_target_set(
     target_list = _normalize_target_list(targets)
     working_tables = tables
     bindings = infer_policyengine_us_variable_bindings(working_tables)
+    force_materialize_variables = policyengine_us_formula_variables_for_targets(
+        target_list,
+        simulation_cls=simulation_cls,
+        direct_override_variables=direct_override_variables,
+    )
+    variables_to_materialize = policyengine_us_variables_to_materialize(
+        target_list,
+        bindings,
+        force_materialize_variables=force_materialize_variables,
+    )
     materialization_result = materialize_policyengine_us_variables_safely(
         working_tables,
-        variables=tuple(
-            feature
-            for target in target_list
-            for feature in target.required_features
-            if feature not in bindings
-        ),
+        variables=tuple(sorted(variables_to_materialize)),
         period=period,
         dataset_year=dataset_year,
         simulation_cls=simulation_cls,
         direct_override_variables=direct_override_variables,
     )
     working_tables = materialization_result.tables
+    unmaterialized_forced_variables = (
+        force_materialize_variables
+        & variables_to_materialize
+        - set(materialization_result.bindings)
+    )
+    bindings = {
+        variable: binding
+        for variable, binding in bindings.items()
+        if variable not in unmaterialized_forced_variables
+    }
     bindings = {
         **bindings,
         **materialization_result.bindings,

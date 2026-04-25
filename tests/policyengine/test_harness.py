@@ -60,6 +60,7 @@ def _candidate_tables() -> PolicyEngineUSEntityTableBundle:
                 "marital_unit_id": [7000, 7000, 8000],
                 "age": [40.0, 10.0, 30.0],
                 "employment_income": [30_000.0, 0.0, 20_000.0],
+                "employment_income_before_lsr": [30_000.0, 0.0, 20_000.0],
             }
         ),
         tax_units=pd.DataFrame(
@@ -110,6 +111,7 @@ def _baseline_dataset(tmp_path: Path) -> Path:
                 "marital_unit_id": [7000, 7000, 8000],
                 "age": [40.0, 10.0, 30.0],
                 "employment_income": [30_000.0, 0.0, 20_000.0],
+                "employment_income_before_lsr": [30_000.0, 0.0, 20_000.0],
             }
         ),
         tax_units=pd.DataFrame(
@@ -142,7 +144,10 @@ def _baseline_dataset(tmp_path: Path) -> Path:
         tables,
         period=2024,
         household_variable_map={"state_fips": "state_fips", "snap": "snap"},
-        person_variable_map={"age": "age", "employment_income": "employment_income"},
+        person_variable_map={
+            "age": "age",
+            "employment_income_before_lsr": "employment_income_before_lsr",
+        },
         tax_unit_variable_map={"filing_status": "filing_status"},
     )
     dataset_path = tmp_path / "baseline.h5"
@@ -163,11 +168,11 @@ def test_evaluate_policyengine_us_harness_scores_candidate_against_baseline(tmp_
                     filters=(TargetFilter("state_fips", FilterOperator.EQ, 6),),
                 ),
                 TargetSpec(
-                    name="snap_total",
-                    entity=EntityType.HOUSEHOLD,
-                    value=250.0,
+                    name="employment_income_before_lsr_total",
+                    entity=EntityType.PERSON,
+                    value=80_000.0,
                     period=2024,
-                    measure="snap",
+                    measure="employment_income_before_lsr",
                     aggregation="sum",
                 ),
             ]
@@ -180,9 +185,9 @@ def test_evaluate_policyengine_us_harness_scores_candidate_against_baseline(tmp_
             query=TargetQuery(period=2024, names=("ca_households",)),
         ),
         PolicyEngineUSHarnessSlice(
-            name="snap",
+            name="employment_income_before_lsr",
             tags=("national", "programs"),
-            query=TargetQuery(period=2024, names=("snap_total",)),
+            query=TargetQuery(period=2024, names=("employment_income_before_lsr_total",)),
         ),
     ]
 
@@ -433,7 +438,7 @@ def test_evaluate_policyengine_us_harness_raises_on_strict_materialization_failu
             assert map_to is None
             raise RuntimeError("snap materialization unavailable")
 
-    with pytest.raises(PolicyEngineUSMaterializationError, match="baseline"):
+    with pytest.raises(PolicyEngineUSMaterializationError, match="candidate"):
         evaluate_policyengine_us_harness(
             _candidate_tables(),
             provider,
@@ -498,11 +503,11 @@ def test_evaluate_policyengine_us_harness_reuses_union_evaluation(tmp_path, monk
                     filters=(TargetFilter("state_fips", FilterOperator.EQ, 6),),
                 ),
                 TargetSpec(
-                    name="snap_total",
-                    entity=EntityType.HOUSEHOLD,
-                    value=250.0,
+                    name="employment_income_before_lsr_total",
+                    entity=EntityType.PERSON,
+                    value=80_000.0,
                     period=2024,
-                    measure="snap",
+                    measure="employment_income_before_lsr",
                     aggregation="sum",
                 ),
             ]
@@ -532,8 +537,8 @@ def test_evaluate_policyengine_us_harness_reuses_union_evaluation(tmp_path, monk
                 query=TargetQuery(period=2024, names=("ca_households",)),
             ),
             PolicyEngineUSHarnessSlice(
-                name="snap",
-                query=TargetQuery(period=2024, names=("snap_total",)),
+                name="employment_income_before_lsr",
+                query=TargetQuery(period=2024, names=("employment_income_before_lsr_total",)),
             ),
         ],
         baseline_dataset=_baseline_dataset(tmp_path),
@@ -542,8 +547,8 @@ def test_evaluate_policyengine_us_harness_reuses_union_evaluation(tmp_path, monk
 
     assert run.slice_win_rate == 1.0
     assert evaluate_calls == [
-        ("ca_households", "snap_total"),
-        ("ca_households", "snap_total"),
+        ("ca_households", "employment_income_before_lsr_total"),
+        ("ca_households", "employment_income_before_lsr_total"),
     ]
 
 

@@ -11,9 +11,9 @@ license = "MIT"
 authors = [
     { name = "Cosilico", email = "hello@cosilico.ai" }
 ]
-requires-python = ">=3.10"
+requires-python = ">=3.13"
 dependencies = [
-    "microplex",
+    "microplex[calibrate]",
     "duckdb>=1.2",
 ]
 

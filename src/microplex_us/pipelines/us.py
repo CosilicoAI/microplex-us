@@ -70,10 +70,16 @@ from microplex_us.policyengine.us import (
     compile_supported_policyengine_us_household_linear_constraints,
     filter_supported_policyengine_us_targets,
     infer_policyengine_us_variable_bindings,
+    load_us_pipeline_checkpoint,
     materialize_policyengine_us_variables_safely,
+    policyengine_us_formula_variables_for_targets,
     policyengine_us_variables_to_materialize,
     resolve_policyengine_excluded_export_variables,
+    save_us_pipeline_checkpoint,
     write_policyengine_us_time_period_dataset,
+)
+from microplex_us.policyengine.us import (
+    subset_policyengine_tables_by_households as _subset_policyengine_tables_by_households,
 )
 from microplex_us.variables import (
     PE_STYLE_PUF_IRS_DEMOGRAPHIC_PREDICTORS,
@@ -223,17 +229,28 @@ class ColumnwiseQRFDonorImputer:
                 column in self.zero_inflated_vars
                 and (y_values == 0).mean() >= self.zero_threshold
                 and (y_values == 0).sum() >= 10
-                and (y_values > 0).sum() >= 10
+                and (y_values != 0).sum() >= 10
             ):
+                # Gate trained as zero vs nonzero (both signs), not as
+                # zero-or-negative vs positive. The old `y > 0` label
+                # silently dropped every negative training row along
+                # with zeros, so the QRF below only ever saw positive
+                # rows and could never emit a negative prediction — the
+                # v7 bug that blanked the negative tail of capital
+                # gains, partnership income, farm income, etc. The
+                # `!= 0` label is the minimal fix; the full upgrade to
+                # `microimpute.ZeroInflatedImputer` (regime-aware
+                # tripartite routing with separate positive / negative
+                # QRFs) is tracked as a follow-up.
                 zero_model = RandomForestClassifier(
                     n_estimators=max(50, self.n_estimators // 2),
                     random_state=42,
                     n_jobs=-1,
                 )
-                zero_model.fit(x_values, (y_values > 0).astype(int))
+                zero_model.fit(x_values, (y_values != 0).astype(int))
                 self._zero_models[column] = zero_model
-                x_values = x_values[y_values > 0]
-                y_values = y_values[y_values > 0]
+                x_values = x_values[y_values != 0]
+                y_values = y_values[y_values != 0]
             if len(y_values) < 25:
                 continue
             model = RandomForestQuantileRegressor(
@@ -284,6 +301,173 @@ class ColumnwiseQRFDonorImputer:
                 values[target_rows] = draws
             synthetic[column] = values
         return synthetic
+
+
+class RegimeAwareDonorImputer:
+    """Donor imputer that wraps `microimpute.ZeroInflatedImputer` per column.
+
+    Each target is fit with an independent `ZeroInflatedImputer`, which
+    auto-detects one of seven regimes (THREE_SIGN / ZI_POSITIVE /
+    ZI_NEGATIVE / SIGN_ONLY / POSITIVE_ONLY / NEGATIVE_ONLY /
+    DEGENERATE_ZERO) from the training distribution and composes a
+    gate classifier + one or two base imputers as appropriate.
+
+    Key advantages over `ColumnwiseQRFDonorImputer`:
+
+    1. Negative values in training are preserved in predictions for
+       three-sign targets (capital gains, partnership/S-corp income,
+       farm income, rental income). The v7 `y > 0` bug is structurally
+       impossible under regime-aware routing.
+    2. Predictions on three-sign targets never land in the interior
+       band between ``max(train_neg)`` and ``min(train_pos)`` — the
+       tripartite gate routes to sign-specific base imputers that each
+       see only one sign of training data.
+
+    This class is a thin columnwise adapter: one `ZeroInflatedImputer`
+    is fit per target, using `microimpute.QRF` as the base. Fit and
+    generate work column-by-column so memory scales with the single
+    largest base imputer, not with the total target count.
+    """
+
+    def __init__(
+        self,
+        condition_vars: list[str],
+        target_vars: list[str],
+        n_estimators: int = 100,
+        nonnegative_vars: set[str] | None = None,
+        classifier_type: str = "hist_gb",
+        min_class_count: int = 10,
+        min_class_fraction: float = 0.01,
+        seed: int = 42,
+    ) -> None:
+        self.condition_vars = list(condition_vars)
+        self.target_vars = list(target_vars)
+        self.n_estimators = int(n_estimators)
+        self.nonnegative_vars = set(nonnegative_vars or ())
+        self.classifier_type = str(classifier_type)
+        self.min_class_count = int(min_class_count)
+        self.min_class_fraction = float(min_class_fraction)
+        self.seed = int(seed)
+        self._fitted: dict[str, Any] = {}
+        self._regimes: dict[str, str] = {}
+
+    def fit(
+        self,
+        data: pd.DataFrame,
+        *,
+        weight_col: str | None = "weight",
+        epochs: int | None = None,
+        batch_size: int | None = None,
+        learning_rate: float | None = None,
+        verbose: bool = False,
+    ) -> RegimeAwareDonorImputer:
+        del weight_col, epochs, batch_size, learning_rate, verbose
+
+        if importlib.util.find_spec("microimpute") is None:
+            raise ImportError(
+                "microimpute>=2.1 is required for donor_imputer_backend="
+                "'regime_aware'; install with `uv pip install microimpute`."
+            )
+        if importlib.util.find_spec("quantile_forest") is None:
+            raise ImportError(
+                "quantile-forest is required for the RegimeAwareDonorImputer "
+                "base QRF."
+            )
+
+        from microimpute.models.qrf import QRF
+        from microimpute.models.zero_inflated import ZeroInflatedImputer
+
+        self._fitted = {}
+        self._regimes = {}
+        for column in self.target_vars:
+            subset = data[self.condition_vars + [column]].dropna()
+            if len(subset) < 25:
+                continue
+            # base_imputer_kwargs={} because microimpute 2.x's
+            # ZeroInflatedImputer._fit_base_single already passes
+            # log_level="ERROR" to the base, and duplicating it here
+            # raises TypeError. Upstream fix tracked.
+            wrapper = ZeroInflatedImputer(
+                base_imputer_class=QRF,
+                base_imputer_kwargs={},
+                min_class_count=self.min_class_count,
+                min_class_fraction=self.min_class_fraction,
+                classifier_type=self.classifier_type,
+                seed=self.seed,
+            )
+            fitted = wrapper.fit(
+                subset,
+                predictors=list(self.condition_vars),
+                imputed_variables=[column],
+            )
+            self._fitted[column] = fitted
+            self._regimes[column] = wrapper.get_regime(column)
+        return self
+
+    def generate(
+        self,
+        conditions: pd.DataFrame,
+        seed: int | None = None,
+    ) -> pd.DataFrame:
+        synthetic = conditions.copy().reset_index(drop=True)
+        master_seed = self.seed if seed is None else int(seed)
+        master_rng = np.random.default_rng(master_seed)
+        for column in self.target_vars:
+            fitted = self._fitted.get(column)
+            if fitted is None:
+                synthetic[column] = np.nan
+                continue
+            column_seed = int(
+                master_rng.integers(0, np.iinfo(np.int32).max, dtype=np.int64)
+            )
+            self._reset_prediction_rngs(fitted, seed=column_seed)
+            preds = fitted.predict(synthetic[self.condition_vars])
+            values = preds[column].to_numpy(dtype=float)
+            if column in self.nonnegative_vars:
+                values = np.maximum(values, 0.0)
+            synthetic[column] = values
+        return synthetic
+
+    def _reset_prediction_rngs(
+        self,
+        obj: Any,
+        *,
+        seed: int,
+        visited: set[int] | None = None,
+    ) -> None:
+        if visited is None:
+            visited = set()
+        if obj is None or isinstance(obj, (str, bytes, int, float, bool)):
+            return
+        object_id = id(obj)
+        if object_id in visited:
+            return
+        visited.add(object_id)
+
+        if hasattr(obj, "_rng"):
+            obj._rng = np.random.default_rng(seed)
+        child_rng = np.random.default_rng(seed)
+
+        if isinstance(obj, dict):
+            children = list(obj.values())
+        elif isinstance(obj, (list, tuple, set)):
+            children = list(obj)
+        else:
+            children = []
+            for attr_name in ("models", "_per_variable", "_non_numeric_bundle"):
+                child = getattr(obj, attr_name, None)
+                if child is not None:
+                    children.append(child)
+
+        for child in children:
+            child_seed = int(
+                child_rng.integers(0, np.iinfo(np.int32).max, dtype=np.int64)
+            )
+            self._reset_prediction_rngs(
+                child,
+                seed=child_seed,
+                visited=visited,
+            )
 
 
 AGE_LABELS = ["0-17", "18-34", "35-54", "55-64", "65+"]
@@ -415,41 +599,6 @@ def _subset_policyengine_linear_constraints(
     return tuple(subset)
 
 
-def _subset_policyengine_tables_by_households(
-    tables: PolicyEngineUSEntityTableBundle,
-    household_ids: pd.Index,
-) -> PolicyEngineUSEntityTableBundle:
-    selected_ids = pd.Index(household_ids, name="household_id")
-    household_order = pd.Series(np.arange(len(selected_ids)), index=selected_ids)
-
-    households = tables.households.loc[
-        tables.households["household_id"].isin(selected_ids)
-    ].copy()
-    households = (
-        households.assign(
-            _household_order=households["household_id"].map(household_order)
-        )
-        .sort_values("_household_order")
-        .drop(columns="_household_order")
-        .reset_index(drop=True)
-    )
-
-    def _subset_related(table: pd.DataFrame | None) -> pd.DataFrame | None:
-        if table is None:
-            return None
-        subset = table.loc[table["household_id"].isin(selected_ids)].copy()
-        return subset.reset_index(drop=True)
-
-    return PolicyEngineUSEntityTableBundle(
-        households=households,
-        persons=_subset_related(tables.persons),
-        tax_units=_subset_related(tables.tax_units),
-        spm_units=_subset_related(tables.spm_units),
-        families=_subset_related(tables.families),
-        marital_units=_subset_related(tables.marital_units),
-    )
-
-
 def _policyengine_target_geo_priority(target: TargetSpec) -> int:
     geo_level = str(target.metadata.get("geo_level", "")).lower()
     return {
@@ -463,34 +612,97 @@ def _constraint_active_household_count(
     constraint: Any,
     *,
     epsilon: float = 1e-12,
+    metadata_lookup: dict[str, dict[str, Any]] | None = None,
 ) -> int:
+    """Count households with nonzero coefficient. Uses ``metadata_lookup`` when provided."""
+    if metadata_lookup is not None:
+        cached = metadata_lookup.get(getattr(constraint, "name", None))
+        if cached is not None and "active_households" in cached:
+            return int(cached["active_households"])
     coefficients = np.asarray(getattr(constraint, "coefficients", ()), dtype=float)
     if coefficients.size == 0:
         return 0
     return int(np.count_nonzero(np.abs(coefficients) > epsilon))
 
 
+def _precompute_constraint_metadata(
+    constraints: tuple[Any, ...],
+    *,
+    epsilon: float = 1e-12,
+) -> dict[str, dict[str, Any]]:
+    """Per-constraint {active_households, coefficient_mass} scalar metadata."""
+    metadata: dict[str, dict[str, Any]] = {}
+    for constraint in constraints:
+        name = getattr(constraint, "name", None)
+        if name is None:
+            continue
+        coefficients = np.asarray(
+            getattr(constraint, "coefficients", ()), dtype=float
+        )
+        if coefficients.size == 0:
+            metadata[name] = {
+                "active_households": 0,
+                "coefficient_mass": 0.0,
+            }
+            continue
+        metadata[name] = {
+            "active_households": int(
+                np.count_nonzero(np.abs(coefficients) > epsilon)
+            ),
+            "coefficient_mass": float(np.abs(coefficients).sum()),
+        }
+    return metadata
+
+
+def _strip_constraint_coefficients(
+    constraints: tuple[Any, ...],
+) -> tuple[LinearConstraint, ...]:
+    """Replace each constraint's coefficient array with a zero-length sentinel."""
+    return tuple(
+        LinearConstraint(
+            name=c.name, coefficients=np.zeros(0, dtype=float), target=float(c.target)
+        )
+        for c in constraints
+    )
+
+
 def _build_policyengine_constraint_records(
     targets: list[TargetSpec],
     constraints: tuple[Any, ...],
+    *,
+    metadata_lookup: dict[str, dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     records: list[dict[str, Any]] = []
     for target, constraint in zip(targets, constraints, strict=True):
         aggregation_name = str(
             getattr(getattr(target, "aggregation", None), "name", target.aggregation)
         ).upper()
+        name = getattr(constraint, "name", None)
+        cached = (
+            metadata_lookup.get(name)
+            if metadata_lookup is not None and name is not None
+            else None
+        )
+        if cached is not None and "coefficient_mass" in cached:
+            coefficient_mass = float(cached["coefficient_mass"])
+        else:
+            coefficient_mass = float(
+                np.abs(
+                    np.asarray(
+                        getattr(constraint, "coefficients", ()), dtype=float
+                    )
+                ).sum()
+            )
         records.append(
             {
                 "target": target,
                 "constraint": constraint,
-                "active_households": _constraint_active_household_count(constraint),
+                "active_households": _constraint_active_household_count(
+                    constraint, metadata_lookup=metadata_lookup
+                ),
                 "geo_priority": _policyengine_target_geo_priority(target),
                 "aggregation_priority": 0 if aggregation_name == "COUNT" else 1,
-                "coefficient_mass": float(
-                    np.abs(
-                        np.asarray(getattr(constraint, "coefficients", ()), dtype=float)
-                    ).sum()
-                ),
+                "coefficient_mass": coefficient_mass,
             }
         )
     return records
@@ -688,6 +900,7 @@ def _build_policyengine_calibration_target_ledger(
     household_count: int,
     min_active_households: int,
     materialization_failures: dict[str, str],
+    compiled_constraint_metadata: dict[str, dict[str, Any]] | None = None,
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     min_required_households = max(1, int(min_active_households))
     structurally_unsupported_names = {
@@ -748,7 +961,11 @@ def _build_policyengine_calibration_target_ledger(
             )
             classified_names.add(target.name)
 
-    for record in _build_policyengine_constraint_records(compiled_targets, compiled_constraints):
+    for record in _build_policyengine_constraint_records(
+        compiled_targets,
+        compiled_constraints,
+        metadata_lookup=compiled_constraint_metadata,
+    ):
         target = record["target"]
         classified_names.add(target.name)
         active_households = int(record["active_households"])
@@ -841,6 +1058,7 @@ def _select_policyengine_deferred_stage_constraints(
     max_constraints_per_household: float | None,
     top_family_count: int | None,
     top_geography_count: int | None,
+    compiled_constraint_metadata: dict[str, dict[str, Any]] | None = None,
 ) -> tuple[list[TargetSpec], tuple[LinearConstraint, ...], dict[str, Any]]:
     ledger_by_name = {
         str(entry["target_name"]): entry
@@ -872,7 +1090,11 @@ def _select_policyengine_deferred_stage_constraints(
     focus_eligible_count = 0
     min_required_households = max(1, int(min_active_households))
 
-    for record in _build_policyengine_constraint_records(compiled_targets, compiled_constraints):
+    for record in _build_policyengine_constraint_records(
+        compiled_targets,
+        compiled_constraints,
+        metadata_lookup=compiled_constraint_metadata,
+    ):
         target = record["target"]
         if target.name in selected_target_names:
             continue
@@ -1405,7 +1627,14 @@ class USMicroplexBuildConfig:
     n_synthetic: int = 100_000
     synthesis_backend: Literal["bootstrap", "synthesizer", "seed"] = "synthesizer"
     calibration_backend: Literal[
-        "entropy", "ipf", "chi2", "sparse", "hardconcrete", "pe_l0", "none"
+        "entropy",
+        "ipf",
+        "chi2",
+        "sparse",
+        "hardconcrete",
+        "pe_l0",
+        "microcalibrate",
+        "none",
     ] = "entropy"
     calibration_tol: float = 1e-6
     calibration_max_iter: int = 100
@@ -1431,7 +1660,7 @@ class USMicroplexBuildConfig:
     donor_imputer_learning_rate: float = 1e-3
     donor_imputer_n_layers: int = 2
     donor_imputer_hidden_dim: int = 32
-    donor_imputer_backend: Literal["maf", "qrf", "zi_qrf"] = "maf"
+    donor_imputer_backend: Literal["maf", "qrf", "zi_qrf", "regime_aware"] = "maf"
     donor_imputer_qrf_n_estimators: int = 100
     donor_imputer_qrf_zero_threshold: float = 0.05
     donor_imputer_condition_selection: Literal[
@@ -1506,6 +1735,36 @@ class USMicroplexBuildConfig:
     policyengine_oracle_relative_error_cap: float | None = 10.0
     policyengine_target_reform_id: int = 0
     policyengine_simulation_cls: Any | None = None
+    policyengine_materialize_batch_size: int | None = None
+    """Batch size for PolicyEngine variable materialization.
+
+    At 1.5M-household scale a single Microsimulation is 25–35 GB. With
+    a batch size of e.g. 100_000, the pipeline splits the entity tables
+    into chunks and runs one Microsimulation per chunk, reducing peak
+    memory to a few GB. ``None`` (default) keeps the legacy single-pass
+    behavior. Safe for per-household scalar variables (all our
+    calibration targets); unsafe for population-quantile-dependent
+    variables (see docstring on
+    :func:`materialize_policyengine_us_variables`).
+    """
+    pipeline_checkpoint_save_post_imputation_path: str | Path | None = None
+    """Write a post-imputation pipeline checkpoint to this directory.
+
+    Saved right after donor imputation + ``build_policyengine_entity_tables``
+    and before microsim materializes calibration target variables. The
+    ~11 h synthesis + imputation + PE-tables build can be skipped on a
+    rerun that loads from this checkpoint, leaving only microsim (~30
+    min) + calibration fit (~30 min) to redo.
+    """
+    pipeline_checkpoint_save_post_microsim_path: str | Path | None = None
+    """Write a post-microsim pipeline checkpoint to this directory.
+
+    Saved after ``_resolve_policyengine_calibration_targets`` has
+    materialized every calibration target variable onto the bundle, and
+    before the L0/microcalibrate fit loop. A rerun that loads from this
+    checkpoint skips microsim too, leaving only the ~30 min calibration
+    fit — useful for tuning calibration targets or backends.
+    """
 
     def __post_init__(self) -> None:
         if (
@@ -1830,6 +2089,18 @@ class USMicroplexPipeline:
                 households=int(len(synthetic_tables.households)),
                 persons=int(len(synthetic_tables.persons)),
             )
+            if self.config.pipeline_checkpoint_save_post_imputation_path is not None:
+                save_us_pipeline_checkpoint(
+                    synthetic_tables,
+                    self.config.pipeline_checkpoint_save_post_imputation_path,
+                    stage="post_imputation",
+                )
+                _emit_us_pipeline_progress(
+                    "US microplex build: post-imputation checkpoint saved",
+                    path=str(
+                        self.config.pipeline_checkpoint_save_post_imputation_path
+                    ),
+                )
             _emit_us_pipeline_progress(
                 "US microplex build: policyengine calibration start",
                 backend=self.config.calibration_backend,
@@ -2432,12 +2703,19 @@ class USMicroplexPipeline:
 
     def _build_weight_calibrator(
         self,
+        stage_index: int = 1,
     ) -> (
         Calibrator
         | SparseCalibrator
         | HardConcreteCalibrator
         | PolicyEngineL0Calibrator
     ):
+        # Stage 1 selects the sparse support via L0; stages 2+ only
+        # refine weights against additional targets. Re-applying the same
+        # L0 penalty on warm-started weights compounds sparsity and
+        # collapses the support set (v10 went 442k → 1.5k across stages).
+        sparsity_pass = stage_index <= 1
+        l0_penalty = 1e-4 if sparsity_pass else 0.0
         if self.config.calibration_backend in {"entropy", "ipf", "chi2"}:
             return Calibrator(
                 method=self.config.calibration_backend,
@@ -2452,7 +2730,7 @@ class USMicroplexPipeline:
             )
         if self.config.calibration_backend == "hardconcrete":
             return HardConcreteCalibrator(
-                lambda_l0=1e-4,
+                lambda_l0=l0_penalty,
                 epochs=max(self.config.calibration_max_iter, 500),
                 lr=0.1,
                 device=self.config.device,
@@ -2460,10 +2738,24 @@ class USMicroplexPipeline:
             )
         if self.config.calibration_backend == "pe_l0":
             return PolicyEngineL0Calibrator(
-                lambda_l0=1e-4,
+                lambda_l0=l0_penalty,
                 epochs=max(self.config.calibration_max_iter, 100),
                 device=self.config.device,
                 tol=self.config.calibration_tol,
+            )
+        if self.config.calibration_backend == "microcalibrate":
+            from microplex_us.calibration import (
+                MicrocalibrateAdapter,
+                MicrocalibrateAdapterConfig,
+            )
+
+            return MicrocalibrateAdapter(
+                MicrocalibrateAdapterConfig(
+                    epochs=max(self.config.calibration_max_iter, 32),
+                    learning_rate=1e-3,
+                    device=self.config.device,
+                    seed=self.config.random_seed,
+                )
             )
         raise ValueError(
             f"Unsupported calibration backend: {self.config.calibration_backend}"
@@ -2842,6 +3134,16 @@ class USMicroplexPipeline:
             provider=provider,
             target_period=target_period,
         )
+        if self.config.pipeline_checkpoint_save_post_microsim_path is not None:
+            save_us_pipeline_checkpoint(
+                tables,
+                self.config.pipeline_checkpoint_save_post_microsim_path,
+                stage="post_microsim",
+            )
+            _emit_us_pipeline_progress(
+                "US microplex build: post-microsim checkpoint saved",
+                path=str(self.config.pipeline_checkpoint_save_post_microsim_path),
+            )
         preselection_supported_targets = list(supported_targets)
         target_planning_household_count = len(tables.households)
         if not supported_targets:
@@ -2906,6 +3208,7 @@ class USMicroplexPipeline:
         def _apply_policyengine_constraint_stage(
             stage_tables: PolicyEngineUSEntityTableBundle,
             stage_constraints: tuple[LinearConstraint, ...],
+            stage_index: int = 1,
         ) -> tuple[PolicyEngineUSEntityTableBundle, pd.DataFrame, dict[str, Any]]:
             stage_input_household_weight_sum = float(
                 stage_tables.households["household_weight"].sum()
@@ -2915,7 +3218,7 @@ class USMicroplexPipeline:
                 calibrated_households = stage_tables.households.copy()
                 pre_rescale_household_weight_sum = stage_input_household_weight_sum
             else:
-                stage_calibrator = self._build_weight_calibrator()
+                stage_calibrator = self._build_weight_calibrator(stage_index=stage_index)
                 calibration_constraints = list(stage_constraints)
                 if self.config.policyengine_calibration_target_total_weight is not None:
                     n_hh = len(stage_tables.households)
@@ -3030,6 +3333,16 @@ class USMicroplexPipeline:
         }
         all_selected_targets = list(supported_targets)
         all_selected_constraints = list(constraints)
+        # Pre-compute the ledger-needed scalars once, while compiled_constraints'
+        # coefficient arrays are still live. Downstream calls (ledger +
+        # deferred-stage selection) read from this lookup instead of
+        # rescanning the ~4k × 1.5M float64 arrays three times. The
+        # repeated scans were allocating ~30 GB of transient
+        # ``np.abs(...)`` copies on top of the 48 GB baseline, a
+        # contributor to the v8 197 GB-compressed jetsam kill.
+        compiled_constraint_metadata = _precompute_constraint_metadata(
+            compiled_constraints
+        )
         updated_tables, calibrated_persons, final_stage_summary = (
             _apply_policyengine_constraint_stage(
                 tables,
@@ -3048,6 +3361,7 @@ class USMicroplexPipeline:
             household_count=target_planning_household_count,
             min_active_households=self.config.policyengine_calibration_min_active_households,
             materialization_failures=materialization_failures,
+            compiled_constraint_metadata=compiled_constraint_metadata,
         )
         oracle_loss, oracle_target_priority_lookup = (
             _evaluate_policyengine_target_fit_context(
@@ -3266,6 +3580,7 @@ class USMicroplexPipeline:
                         top_geography_count=(
                             self.config.policyengine_calibration_deferred_stage_top_geography_count
                         ),
+                        compiled_constraint_metadata=compiled_constraint_metadata,
                     )
                 )
                 if not stage_targets:
@@ -3285,6 +3600,7 @@ class USMicroplexPipeline:
                     _apply_policyengine_constraint_stage(
                         updated_tables,
                         stage_constraints,
+                        stage_index=stage_index,
                     )
                 )
                 candidate_selected_stage_by_name = dict(selected_stage_by_name)
@@ -3313,6 +3629,7 @@ class USMicroplexPipeline:
                             self.config.policyengine_calibration_min_active_households
                         ),
                         materialization_failures=materialization_failures,
+                        compiled_constraint_metadata=compiled_constraint_metadata,
                     )
                 )
                 candidate_oracle_loss, candidate_target_priority_lookup = (
@@ -3515,9 +3832,15 @@ class USMicroplexPipeline:
             period=target_period,
             for_calibration=True,
         ).targets
+        force_materialize_variables = policyengine_us_formula_variables_for_targets(
+            canonical_targets,
+            simulation_cls=self.config.policyengine_simulation_cls,
+            direct_override_variables=self.config.policyengine_direct_override_variables,
+        )
         missing_variables = policyengine_us_variables_to_materialize(
             canonical_targets,
             bindings,
+            force_materialize_variables=force_materialize_variables,
         )
         materialization_failures: dict[str, str] = {}
         materialized_variables: set[str] = set()
@@ -3528,8 +3851,20 @@ class USMicroplexPipeline:
                 period=target_period,
                 dataset_year=self.config.policyengine_dataset_year or target_period,
                 simulation_cls=self.config.policyengine_simulation_cls,
+                direct_override_variables=self.config.policyengine_direct_override_variables,
+                batch_size=self.config.policyengine_materialize_batch_size,
             )
             tables = materialization_result.tables
+            unmaterialized_forced_variables = (
+                force_materialize_variables
+                & missing_variables
+                - set(materialization_result.bindings)
+            )
+            bindings = {
+                variable: binding
+                for variable, binding in bindings.items()
+                if variable not in unmaterialized_forced_variables
+            }
             bindings = {
                 **bindings,
                 **materialization_result.bindings,
@@ -3840,15 +4175,6 @@ class USMicroplexPipeline:
             variable: variable_semantic_spec_for(variable).support_family
             for variable in target_vars
         }
-        zero_inflated_vars = (
-            {
-                variable
-                for variable, support_family in support_families.items()
-                if support_family is VariableSupportFamily.ZERO_INFLATED_POSITIVE
-            }
-            if backend == "zi_qrf"
-            else set()
-        )
         nonnegative_vars = {
             variable
             for variable, support_family in support_families.items()
@@ -3858,6 +4184,23 @@ class USMicroplexPipeline:
                 VariableSupportFamily.BOUNDED_SHARE,
             }
         }
+        if backend == "regime_aware":
+            return RegimeAwareDonorImputer(
+                condition_vars=condition_vars,
+                target_vars=list(target_vars),
+                n_estimators=self.config.donor_imputer_qrf_n_estimators,
+                nonnegative_vars=nonnegative_vars,
+                seed=self.config.random_seed,
+            )
+        zero_inflated_vars = (
+            {
+                variable
+                for variable, support_family in support_families.items()
+                if support_family is VariableSupportFamily.ZERO_INFLATED_POSITIVE
+            }
+            if backend == "zi_qrf"
+            else set()
+        )
         return ColumnwiseQRFDonorImputer(
             condition_vars=condition_vars,
             target_vars=list(target_vars),
@@ -6777,3 +7120,60 @@ def build_us_microplex(
     """Convenience wrapper for the US microplex pipeline."""
     pipeline = USMicroplexPipeline(config)
     return pipeline.build(persons, households)
+
+
+@dataclass
+class USMicroplexRecalibrateResult:
+    """Output of ``recalibrate_policyengine_us_from_checkpoint``.
+
+    Narrower than ``USMicroplexBuildResult`` because synthesis state is
+    unavailable when resuming: no ``seed_data``, no ``synthesizer``, no
+    source frames. Only calibration output is populated.
+    """
+
+    config: USMicroplexBuildConfig
+    loaded_stage: str
+    checkpoint_path: Path
+    policyengine_tables: PolicyEngineUSEntityTableBundle
+    calibrated_data: pd.DataFrame
+    calibration_summary: dict[str, Any]
+
+
+def recalibrate_policyengine_us_from_checkpoint(
+    config: USMicroplexBuildConfig,
+    checkpoint_path: str | Path,
+) -> USMicroplexRecalibrateResult:
+    """Load a saved pipeline checkpoint and rerun calibration against it.
+
+    Use for fast iteration on calibration config (backend, lambda
+    schedule, targets) without paying the ~11 h synthesis + donor
+    imputation cost that produced the bundle. Both
+    ``post_imputation`` and ``post_microsim`` checkpoints are
+    supported: the latter skips microsim too because
+    ``infer_policyengine_us_variable_bindings`` picks up the
+    materialized target vars as columns on the bundle, so
+    ``policyengine_us_variables_to_materialize`` returns an empty set
+    and ``_resolve_policyengine_calibration_targets`` short-circuits
+    past the materialization call.
+    """
+    checkpoint_path = Path(checkpoint_path)
+    bundle, metadata = load_us_pipeline_checkpoint(checkpoint_path)
+    stage = metadata.get("stage")
+    if stage not in {"post_imputation", "post_microsim"}:
+        raise ValueError(
+            f"Cannot resume from checkpoint stage {stage!r}; expected "
+            "'post_imputation' or 'post_microsim'."
+        )
+
+    pipeline = USMicroplexPipeline(config)
+    policyengine_tables, calibrated_data, calibration_summary = (
+        pipeline.calibrate_policyengine_tables(bundle)
+    )
+    return USMicroplexRecalibrateResult(
+        config=config,
+        loaded_stage=stage,
+        checkpoint_path=checkpoint_path,
+        policyengine_tables=policyengine_tables,
+        calibrated_data=calibrated_data,
+        calibration_summary=calibration_summary,
+    )

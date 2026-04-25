@@ -139,6 +139,106 @@ class PolicyEngineUSEntityTableBundle:
         raise KeyError(f"No table available for entity '{entity.value}'")
 
 
+_PIPELINE_CHECKPOINT_TABLES: tuple[str, ...] = (
+    "households",
+    "persons",
+    "tax_units",
+    "spm_units",
+    "families",
+    "marital_units",
+)
+
+_ALLOWED_CHECKPOINT_STAGES: frozenset[str] = frozenset({"post_imputation", "post_microsim"})
+
+
+def save_us_pipeline_checkpoint(
+    bundle: PolicyEngineUSEntityTableBundle,
+    path: str | Path,
+    *,
+    stage: Literal["post_imputation", "post_microsim"],
+) -> Path:
+    """Persist a pipeline-stage bundle to ``path`` as parquet + metadata.
+
+    Writes one parquet file per non-None entity table plus a
+    ``metadata.json`` index tagged with the pipeline ``stage``. Two
+    stages are supported:
+
+    * ``"post_imputation"`` — after donor imputation, before PE microsim
+      materializes target variables. Resuming from here reruns
+      microsim + calibration.
+    * ``"post_microsim"`` — after microsim materialization, before the
+      calibration fit loop. Resuming from here reruns only calibration.
+    """
+    import json
+    import shutil
+
+    if stage not in _ALLOWED_CHECKPOINT_STAGES:
+        raise ValueError(
+            f"stage must be one of {sorted(_ALLOWED_CHECKPOINT_STAGES)}; got {stage!r}"
+        )
+
+    checkpoint_dir = Path(path)
+    if checkpoint_dir.exists():
+        shutil.rmtree(checkpoint_dir)
+    checkpoint_dir.mkdir(parents=True)
+
+    metadata: dict[str, Any] = {"format_version": 1, "stage": stage}
+    for table_name in _PIPELINE_CHECKPOINT_TABLES:
+        frame = getattr(bundle, table_name)
+        if frame is None:
+            metadata[table_name] = None
+            continue
+        frame.to_parquet(checkpoint_dir / f"{table_name}.parquet", index=False)
+        metadata[table_name] = {
+            "rows": int(len(frame)),
+            "columns": list(frame.columns),
+        }
+
+    (checkpoint_dir / "metadata.json").write_text(json.dumps(metadata, indent=2))
+    return checkpoint_dir
+
+
+def load_us_pipeline_checkpoint(
+    path: str | Path,
+    *,
+    expected_stage: Literal["post_imputation", "post_microsim"] | None = None,
+) -> tuple[PolicyEngineUSEntityTableBundle, dict[str, Any]]:
+    """Load a pipeline-stage bundle previously saved by ``save_us_pipeline_checkpoint``.
+
+    Returns ``(bundle, metadata)`` so callers can inspect the saved
+    stage. If ``expected_stage`` is provided, a mismatch raises a clear
+    error — protects against running recalibration from a post-microsim
+    checkpoint when a post-imputation checkpoint was expected or vice
+    versa.
+    """
+    import json
+
+    checkpoint_dir = Path(path)
+    metadata_path = checkpoint_dir / "metadata.json"
+    if not metadata_path.exists():
+        raise FileNotFoundError(
+            f"US pipeline checkpoint not found at {checkpoint_dir}"
+        )
+    metadata = json.loads(metadata_path.read_text())
+
+    saved_stage = metadata.get("stage")
+    if expected_stage is not None and saved_stage != expected_stage:
+        raise ValueError(
+            f"Checkpoint at {checkpoint_dir} has stage {saved_stage!r}, "
+            f"expected {expected_stage!r}"
+        )
+
+    tables: dict[str, pd.DataFrame | None] = {}
+    for table_name in _PIPELINE_CHECKPOINT_TABLES:
+        if metadata.get(table_name) is None:
+            tables[table_name] = None
+            continue
+        tables[table_name] = pd.read_parquet(
+            checkpoint_dir / f"{table_name}.parquet"
+        )
+    return PolicyEngineUSEntityTableBundle(**tables), metadata
+
+
 @dataclass(frozen=True)
 class PolicyEngineUSVariableMaterializationResult:
     """Materialized PE variables plus any per-variable failures."""
@@ -186,7 +286,7 @@ SAFE_POLICYENGINE_US_EXPORT_VARIABLES: set[str] = {
     "other_medical_expenses",
     "over_the_counter_health_expenses",
     "self_employment_income_before_lsr",
-    "social_security_retirement",
+    "social_security_retirement_reported",
     "social_security_disability",
     "social_security_survivors",
     "social_security_dependents",
@@ -227,6 +327,7 @@ SAFE_POLICYENGINE_US_EXPORT_VARIABLES: set[str] = {
 
 POLICYENGINE_US_EXPORT_COLUMN_ALIASES: dict[str, str] = {
     "race": "cps_race",
+    "social_security_retirement": "social_security_retirement_reported",
 }
 
 POLICYENGINE_US_EXPORT_DEFAULTS: dict[str, Any] = {
@@ -1181,6 +1282,66 @@ def resolve_policyengine_excluded_export_variables(
     return excluded_variables
 
 
+def subset_policyengine_tables_by_households(
+    tables: PolicyEngineUSEntityTableBundle,
+    household_ids: np.ndarray | pd.Index,
+) -> PolicyEngineUSEntityTableBundle:
+    """Slice an entity bundle to a subset of household_ids, preserving order.
+
+    The returned bundle's ``households`` frame is reordered to match the
+    order of ``household_ids``; related entity tables retain their own
+    internal order but are filtered to only rows whose ``household_id``
+    is in the selection.
+    """
+    selected = pd.Index(household_ids, name="household_id")
+    order = pd.Series(np.arange(len(selected)), index=selected)
+
+    households = tables.households.loc[
+        tables.households["household_id"].isin(selected)
+    ].copy()
+    households = (
+        households.assign(_hh_order=households["household_id"].map(order))
+        .sort_values("_hh_order")
+        .drop(columns="_hh_order")
+        .reset_index(drop=True)
+    )
+
+    def _slice(df: pd.DataFrame | None) -> pd.DataFrame | None:
+        if df is None:
+            return None
+        return df.loc[df["household_id"].isin(selected)].reset_index(drop=True)
+
+    return PolicyEngineUSEntityTableBundle(
+        households=households,
+        persons=_slice(tables.persons),
+        tax_units=_slice(tables.tax_units),
+        spm_units=_slice(tables.spm_units),
+        families=_slice(tables.families),
+        marital_units=_slice(tables.marital_units),
+    )
+
+
+def _concat_bundles(
+    bundles: list[PolicyEngineUSEntityTableBundle],
+) -> PolicyEngineUSEntityTableBundle:
+    """Concatenate a list of entity bundles into one, preserving order."""
+
+    def _join(field: str) -> pd.DataFrame | None:
+        frames = [getattr(b, field) for b in bundles if getattr(b, field) is not None]
+        if not frames:
+            return None
+        return pd.concat(frames, ignore_index=True)
+
+    return PolicyEngineUSEntityTableBundle(
+        households=_join("households"),
+        persons=_join("persons"),
+        tax_units=_join("tax_units"),
+        spm_units=_join("spm_units"),
+        families=_join("families"),
+        marital_units=_join("marital_units"),
+    )
+
+
 def materialize_policyengine_us_variables(
     tables: PolicyEngineUSEntityTableBundle,
     *,
@@ -1191,8 +1352,49 @@ def materialize_policyengine_us_variables(
     microsimulation_kwargs: dict[str, Any] | None = None,
     temp_dir: str | Path | None = None,
     direct_override_variables: tuple[str, ...] = (),
+    batch_size: int | None = None,
 ) -> tuple[PolicyEngineUSEntityTableBundle, dict[str, PolicyEngineUSVariableBinding]]:
-    """Calculate PolicyEngine variables on a temporary export and attach them to tables."""
+    """Calculate PolicyEngine variables on a temporary export and attach them to tables.
+
+    Memory control: when ``batch_size`` is set, the function loops over
+    disjoint household chunks of that size, materializing variables on
+    each chunk (one temp h5 + one Microsimulation per chunk) and
+    concatenating results. Peak Microsimulation working set drops from
+    O(n_households) to O(batch_size) with no change in output — this is
+    additive for the per-household scalar variables we use as calibration
+    targets (employment income, EITC, CTC, federal income tax, etc.), and
+    the per-chunk Microsims are independent of each other.
+
+    Variables with cross-household semantics (national quantile
+    thresholds, poverty rates that depend on the full income
+    distribution) would be incorrect under batching and are not supported
+    when ``batch_size`` is not ``None``. Use ``batch_size=None`` for
+    those.
+    """
+    if batch_size is not None and batch_size > 0:
+        n_households = len(tables.households)
+        if n_households > batch_size:
+            chunk_bundles: list[PolicyEngineUSEntityTableBundle] = []
+            chunk_bindings: dict[str, PolicyEngineUSVariableBinding] = {}
+            household_ids = tables.households["household_id"].to_numpy()
+            for start in range(0, n_households, batch_size):
+                end = min(start + batch_size, n_households)
+                chunk_ids = household_ids[start:end]
+                chunk_tables = subset_policyengine_tables_by_households(tables, chunk_ids)
+                chunk_result, chunk_binding = materialize_policyengine_us_variables(
+                    chunk_tables,
+                    variables=variables,
+                    period=period,
+                    dataset_year=dataset_year,
+                    simulation_cls=simulation_cls,
+                    microsimulation_kwargs=microsimulation_kwargs,
+                    temp_dir=temp_dir,
+                    direct_override_variables=direct_override_variables,
+                    batch_size=None,
+                )
+                chunk_bundles.append(chunk_result)
+                chunk_bindings.update(chunk_binding)
+            return _concat_bundles(chunk_bundles), chunk_bindings
     requested_variables = tuple(dict.fromkeys(str(variable) for variable in variables))
     if not requested_variables:
         return tables, {}
@@ -1259,8 +1461,16 @@ def materialize_policyengine_us_variables_safely(
     microsimulation_kwargs: dict[str, Any] | None = None,
     temp_dir: str | Path | None = None,
     direct_override_variables: tuple[str, ...] = (),
+    batch_size: int | None = None,
 ) -> PolicyEngineUSVariableMaterializationResult:
-    """Materialize PE variables, degrading to per-variable failures when needed."""
+    """Materialize PE variables, degrading to per-variable failures when needed.
+
+    ``batch_size`` forwards to :func:`materialize_policyengine_us_variables`.
+    With a non-``None`` positive value, the full-dataset Microsimulation
+    (25–35 GB peak at 1.5M households) is replaced with N per-chunk
+    Microsims (each ~2–3 GB). Results are concatenated; output is
+    identical for per-household scalar variables.
+    """
     requested_variables = tuple(dict.fromkeys(str(variable) for variable in variables))
     if not requested_variables:
         return PolicyEngineUSVariableMaterializationResult(
@@ -1278,6 +1488,7 @@ def materialize_policyengine_us_variables_safely(
             microsimulation_kwargs=microsimulation_kwargs,
             temp_dir=temp_dir,
             direct_override_variables=direct_override_variables,
+            batch_size=batch_size,
         )
     except Exception:
         return _materialize_policyengine_us_variables_one_by_one(
@@ -1656,18 +1867,70 @@ def compile_supported_policyengine_us_household_linear_constraints(
     return supported_targets, unsupported_targets, tuple(constraints)
 
 
-def policyengine_us_variables_to_materialize(
-    targets: list[TargetSpec],
-    bindings: dict[str, PolicyEngineUSVariableBinding],
-) -> set[str]:
-    """Compute the missing features required to score the given targets."""
-    requested_variables = {
+def _policyengine_us_target_required_variables(targets: list[TargetSpec]) -> set[str]:
+    return {
         feature
         for target in targets
         for feature in target.required_features
     }
+
+
+def policyengine_us_formula_variables_for_targets(
+    targets: list[TargetSpec],
+    *,
+    simulation_cls: Any | None = None,
+    tax_benefit_system: Any | None = None,
+    direct_override_variables: tuple[str, ...] = (),
+) -> set[str]:
+    """Return target features that should be recalculated by PolicyEngine."""
+    required_variables = _policyengine_us_target_required_variables(targets)
+    if not required_variables:
+        return set()
+    if tax_benefit_system is None:
+        tax_benefit_system = _resolve_policyengine_us_tax_benefit_system(
+            simulation_cls
+        )
+    variables = getattr(tax_benefit_system, "variables", {})
+    direct_overrides = set(direct_override_variables)
+    formula_variables: set[str] = set()
+    for variable in required_variables:
+        if variable in direct_overrides:
+            continue
+        variable_metadata = variables.get(variable)
+        if variable_metadata is None:
+            continue
+        if _policyengine_us_variable_is_calculated(variable_metadata):
+            formula_variables.add(variable)
+    return formula_variables
+
+
+def _policyengine_us_variable_is_calculated(variable_metadata: Any) -> bool:
+    if getattr(variable_metadata, "formulas", {}):
+        return True
+    if getattr(variable_metadata, "adds", ()) or getattr(variable_metadata, "subtracts", ()):
+        return True
+    is_input_variable = getattr(variable_metadata, "is_input_variable", None)
+    if callable(is_input_variable):
+        try:
+            return not bool(is_input_variable())
+        except TypeError:
+            return False
+    return False
+
+
+def policyengine_us_variables_to_materialize(
+    targets: list[TargetSpec],
+    bindings: dict[str, PolicyEngineUSVariableBinding],
+    *,
+    force_materialize_variables: set[str] | tuple[str, ...] | None = None,
+) -> set[str]:
+    """Compute the missing features required to score the given targets."""
+    requested_variables = _policyengine_us_target_required_variables(targets)
+    force_variables = set(force_materialize_variables or ())
     return {
-        variable for variable in requested_variables if variable not in bindings
+        variable
+        for variable in requested_variables
+        if variable not in bindings or variable in force_variables
     }
 
 

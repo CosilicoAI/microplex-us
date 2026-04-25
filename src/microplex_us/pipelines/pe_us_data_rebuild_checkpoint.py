@@ -1999,6 +1999,17 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--n-synthetic", type=int, default=100_000)
     parser.add_argument("--random-seed", type=int, default=42)
     parser.add_argument("--donor-imputer-condition-selection")
+    parser.add_argument(
+        "--donor-imputer-backend",
+        choices=["maf", "qrf", "zi_qrf", "regime_aware"],
+        default=None,
+        help=(
+            "Donor imputer backend. `zi_qrf` activates the zero-inflated "
+            "QRF path that skips predict() on gate-predicted-zero rows, "
+            "which is a large wall-clock win on heavy-zero PUF tax "
+            "variables. See docs/next-run-plan.md."
+        ),
+    )
     parser.add_argument("--cps-source-year", type=int, default=2023)
     parser.add_argument("--puf-target-year", type=int)
     parser.add_argument("--puf-cps-reference-year", type=int)
@@ -2032,6 +2043,69 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--defer-native-audit", action="store_true")
     parser.add_argument("--defer-imputation-ablation", action="store_true")
     parser.add_argument("--require-policyengine-native-score", action="store_true")
+    parser.add_argument(
+        "--calibration-backend",
+        choices=[
+            "entropy",
+            "ipf",
+            "chi2",
+            "sparse",
+            "hardconcrete",
+            "pe_l0",
+            "microcalibrate",
+            "none",
+        ],
+        default=None,
+        help=(
+            "Weighting/calibration backend. Default is the config default "
+            "(entropy). Use `microcalibrate` for the identity-preserving "
+            "gradient-descent chi-squared backend that survived the v6 OOM."
+        ),
+    )
+    parser.add_argument(
+        "--calibration-max-iter",
+        type=int,
+        default=None,
+        help=(
+            "Max iterations / epochs for the calibration solver. Passed "
+            "through to USMicroplexBuildConfig.calibration_max_iter."
+        ),
+    )
+    parser.add_argument(
+        "--policyengine-materialize-batch-size",
+        type=int,
+        default=None,
+        help=(
+            "If set, splits PolicyEngine variable materialization into "
+            "household chunks of this size. At 1.5M-household scale a "
+            "single Microsimulation is 25-35 GB; batch_size=100_000 "
+            "drops peak to a few GB. Required for workstation runs; "
+            "unset (full-dataset) path targeted Modal GPU."
+        ),
+    )
+    parser.add_argument(
+        "--pipeline-checkpoint-save-post-imputation-path",
+        type=str,
+        default=None,
+        help=(
+            "If set, save a post-imputation pipeline checkpoint to this "
+            "directory (right after donor imputation + PE tables build, "
+            "before microsim). A rerun can resume from this checkpoint "
+            "to skip the ~11 h synthesis stage."
+        ),
+    )
+    parser.add_argument(
+        "--pipeline-checkpoint-save-post-microsim-path",
+        type=str,
+        default=None,
+        help=(
+            "If set, save a post-microsim pipeline checkpoint to this "
+            "directory (after target variables are materialized, before "
+            "the calibration fit loop). A rerun can resume from this "
+            "checkpoint to skip both synthesis and microsim, leaving "
+            "only the calibration fit."
+        ),
+    )
     args = parser.parse_args(argv)
 
     config_overrides = {
@@ -2041,6 +2115,24 @@ def main(argv: list[str] | None = None) -> None:
     if args.donor_imputer_condition_selection is not None:
         config_overrides["donor_imputer_condition_selection"] = (
             args.donor_imputer_condition_selection
+        )
+    if args.donor_imputer_backend is not None:
+        config_overrides["donor_imputer_backend"] = args.donor_imputer_backend
+    if args.calibration_backend is not None:
+        config_overrides["calibration_backend"] = args.calibration_backend
+    if args.calibration_max_iter is not None:
+        config_overrides["calibration_max_iter"] = int(args.calibration_max_iter)
+    if args.policyengine_materialize_batch_size is not None:
+        config_overrides["policyengine_materialize_batch_size"] = int(
+            args.policyengine_materialize_batch_size
+        )
+    if args.pipeline_checkpoint_save_post_imputation_path is not None:
+        config_overrides["pipeline_checkpoint_save_post_imputation_path"] = (
+            args.pipeline_checkpoint_save_post_imputation_path
+        )
+    if args.pipeline_checkpoint_save_post_microsim_path is not None:
+        config_overrides["pipeline_checkpoint_save_post_microsim_path"] = (
+            args.pipeline_checkpoint_save_post_microsim_path
         )
 
     result = run_policyengine_us_data_rebuild_checkpoint(

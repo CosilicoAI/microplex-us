@@ -142,6 +142,7 @@ def _sample_tables() -> PolicyEngineUSEntityTableBundle:
                 "marital_unit_id": [7000, 7000, 8000],
                 "age": [40.0, 10.0, 30.0],
                 "employment_income": [30_000.0, 0.0, 20_000.0],
+                "employment_income_before_lsr": [30_000.0, 0.0, 20_000.0],
             }
         ),
         tax_units=pd.DataFrame(
@@ -248,11 +249,11 @@ def test_evaluate_policyengine_us_target_set_scores_count_sum_and_mean():
                 filters=(TargetFilter("state_fips", FilterOperator.EQ, 6),),
             ),
             TargetSpec(
-                name="snap_total",
-                entity=EntityType.HOUSEHOLD,
-                value=250.0,
+                name="employment_income_before_lsr_total",
+                entity=EntityType.PERSON,
+                value=80_000.0,
                 period=2024,
-                measure="snap",
+                measure="employment_income_before_lsr",
                 aggregation="sum",
             ),
             TargetSpec(
@@ -275,7 +276,7 @@ def test_evaluate_policyengine_us_target_set_scores_count_sum_and_mean():
     actuals = {evaluation.target.name: evaluation.actual_value for evaluation in report.evaluations}
     assert actuals == {
         "ca_households": 2.0,
-        "snap_total": 250.0,
+        "employment_income_before_lsr_total": 80_000.0,
         "ca_mean_age": 25.0,
     }
 
@@ -386,6 +387,73 @@ def test_evaluate_policyengine_us_target_set_materializes_missing_variables(tmp_
     assert report.supported_target_count == 1
     assert report.evaluations[0].actual_value == 290.0
     assert report.materialization_failures == {}
+
+
+def test_evaluate_policyengine_us_target_set_materializes_add_based_variables(tmp_path):
+    tables = _sample_tables()
+
+    class FakeEntity:
+        def __init__(self, key: str):
+            self.key = key
+
+    class FakeVariable:
+        def __init__(
+            self,
+            entity: FakeEntity,
+            *,
+            adds: list[str] | None = None,
+            formulas: dict[str, object] | None = None,
+        ):
+            self.entity = entity
+            self.adds = adds or []
+            self.subtracts: list[str] = []
+            self.formulas = formulas or {}
+
+        def is_input_variable(self) -> bool:
+            return not self.formulas and not self.adds
+
+    class FakeTaxBenefitSystem:
+        variables = {
+            "employment_income": FakeVariable(
+                FakeEntity("person"),
+                adds=["employment_income_before_lsr"],
+            ),
+            "employment_income_before_lsr": FakeVariable(FakeEntity("person")),
+        }
+
+    class FakeSimulation:
+        tax_benefit_system = FakeTaxBenefitSystem()
+
+        def __init__(self, dataset, dataset_year=None, **kwargs):
+            assert Path(dataset).exists()
+            assert dataset_year == 2024
+            _ = kwargs
+
+        def calculate(self, variable, period=None, map_to=None):
+            assert variable == "employment_income"
+            assert period == 2024
+            assert map_to is None
+            return np.array([10.0, 20.0, 30.0])
+
+    report = evaluate_policyengine_us_target_set(
+        tables,
+        [
+            TargetSpec(
+                name="employment_income_total",
+                entity=EntityType.PERSON,
+                value=90.0,
+                period=2024,
+                measure="employment_income",
+                aggregation="sum",
+            )
+        ],
+        period=2024,
+        dataset_year=2024,
+        simulation_cls=FakeSimulation,
+    )
+
+    assert report.materialized_variables == ("employment_income",)
+    assert report.evaluations[0].actual_value == 90.0
 
 
 def test_evaluate_policyengine_us_target_set_skips_failed_materializations(tmp_path):
@@ -725,26 +793,41 @@ def test_evaluate_policyengine_us_target_set_batches_supported_constraint_compil
 
 
 def test_compare_policyengine_us_target_query_to_baseline(tmp_path):
-    provider_db = tmp_path / "policy_data.db"
-    _create_snap_targets_db(provider_db)
-    provider = PolicyEngineUSDBTargetProvider(provider_db)
+    class EmploymentIncomeProvider:
+        def load_target_set(self, query=None):
+            _ = query
+            return [
+                TargetSpec(
+                    name="employment_income_before_lsr_total",
+                    entity=EntityType.PERSON,
+                    value=80_000.0,
+                    period=2024,
+                    measure="employment_income_before_lsr",
+                    aggregation="sum",
+                )
+            ]
+
+    provider = EmploymentIncomeProvider()
 
     baseline_tables = _sample_tables()
     baseline_arrays = build_policyengine_us_time_period_arrays(
         baseline_tables,
         period=2024,
-        household_variable_map={"state_fips": "state_fips", "snap": "snap"},
-        person_variable_map={"age": "age"},
+        household_variable_map={"state_fips": "state_fips"},
+        person_variable_map={
+            "age": "age",
+            "employment_income_before_lsr": "employment_income_before_lsr",
+        },
     )
     baseline_path = tmp_path / "enhanced_cps_2024.h5"
     write_policyengine_us_time_period_dataset(baseline_arrays, baseline_path)
 
     base_candidate = _sample_tables()
     candidate_tables = PolicyEngineUSEntityTableBundle(
-        households=base_candidate.households.assign(
-            snap=np.array([80.0, 50.0])
+        households=base_candidate.households,
+        persons=base_candidate.persons.assign(
+            employment_income_before_lsr=np.array([20_000.0, 0.0, 20_000.0])
         ),
-        persons=base_candidate.persons,
         tax_units=base_candidate.tax_units,
         spm_units=base_candidate.spm_units,
         families=base_candidate.families,
@@ -754,7 +837,10 @@ def test_compare_policyengine_us_target_query_to_baseline(tmp_path):
     report = compare_policyengine_us_target_query_to_baseline(
         candidate_tables,
         provider,
-        TargetQuery(period=2024, provider_filters={"variables": ["snap"]}),
+        TargetQuery(
+            period=2024,
+            provider_filters={"variables": ["employment_income_before_lsr"]},
+        ),
         baseline_dataset=baseline_path,
         candidate_label="microplex",
         baseline_label="enhanced_cps",
@@ -764,9 +850,9 @@ def test_compare_policyengine_us_target_query_to_baseline(tmp_path):
     assert report.candidate.label == "microplex"
     assert report.baseline is not None
     assert report.baseline.label == "enhanced_cps"
-    assert report.candidate.mean_abs_relative_error == pytest.approx(0.18)
+    assert report.candidate.mean_abs_relative_error == pytest.approx(0.25)
     assert report.baseline.mean_abs_relative_error == 0.0
-    assert report.mean_abs_relative_error_delta == pytest.approx(0.18)
+    assert report.mean_abs_relative_error_delta == pytest.approx(0.25)
 
 
 def test_policyengine_us_comparison_report_uses_common_target_intersection():
