@@ -5,10 +5,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+import pandas as pd
 import pytest
 from microplex.core import EntityType
 from microplex.targets import FilterOperator, TargetAggregation, TargetQuery
 
+from microplex_us.calibration_harness import CalibrationHarness
 from microplex_us.supabase_targets import (
     SUPABASE_SUPPORTED_BY_COLUMN_MAP_KEY,
     SUPABASE_TARGET_TYPE_KEY,
@@ -393,3 +395,52 @@ def test_load_target_set_filters_rows_with_core_query(
 
     assert [target.name for target in target_set.targets] == ["employment_income"]
     assert calls[0]["params"]["period"] == "eq.2024"
+
+
+def test_calibration_harness_can_use_supabase_target_provider(
+    provider: SupabaseTargetProvider,
+    request_queue,
+) -> None:
+    request_queue(
+        [
+            {
+                "id": "target-1",
+                "variable": "employment_income",
+                "value": 30,
+                "target_type": "amount",
+                "period": 2024,
+                "source": {"name": "IRS SOI", "institution": "IRS"},
+                "stratum": {"name": "National", "jurisdiction": "us"},
+            },
+            {
+                "id": "target-2",
+                "variable": "unknown_cash_income",
+                "value": 100,
+                "target_type": "amount",
+                "period": 2024,
+                "source": {"name": "Unknown", "institution": "Other"},
+                "stratum": {"name": "National", "jurisdiction": "us"},
+            },
+        ]
+    )
+    harness = CalibrationHarness(target_provider=provider)
+    frame = pd.DataFrame(
+        {
+            "employment_income": [10.0, 20.0],
+            "weight": [1.0, 1.0],
+        }
+    )
+
+    result = harness.run_experiment(
+        frame,
+        "supabase_income",
+        categories=[TargetCategory.INCOME],
+        only_available=True,
+        period=2024,
+        provider_filters={"include_unsupported": False},
+        entity=EntityType.PERSON,
+        verbose=False,
+    )
+
+    assert result.targets_used == ["employment_income"]
+    assert result.errors == {"employment_income": 0.0}

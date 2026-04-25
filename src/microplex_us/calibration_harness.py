@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Any
 
 import numpy as np
 import pandas as pd
@@ -11,6 +12,8 @@ from microplex.targets import (
     FilterOperator,
     TargetAggregation,
     TargetFilter,
+    TargetProvider,
+    TargetQuery,
     TargetSpec,
 )
 
@@ -19,7 +22,10 @@ from microplex_us.target_registry import (
     TargetLevel,
     TargetRegistry,
     get_registry,
+    target_available_in_cps,
     target_category,
+    target_group_name,
+    target_level,
     target_requires_imputation,
 )
 
@@ -59,9 +65,49 @@ class CalibrationResult:
 class CalibrationHarness:
     """Harness for calibration experiments over one entity frame at a time."""
 
-    def __init__(self, registry: TargetRegistry | None = None):
-        self.registry = registry or get_registry()
+    def __init__(
+        self,
+        registry: TargetRegistry | None = None,
+        *,
+        target_provider: TargetProvider | None = None,
+    ):
+        if target_provider is None:
+            self.registry = registry or get_registry()
+            self.target_provider = self.registry
+        else:
+            self.registry = registry
+            self.target_provider = target_provider
         self._results: dict[str, CalibrationResult] = {}
+
+    def select_targets(
+        self,
+        *,
+        categories: list[TargetCategory] | None = None,
+        levels: list[TargetLevel] | None = None,
+        groups: list[str] | None = None,
+        only_available: bool = False,
+        entity: EntityType | str | None = None,
+        period: int | str | None = None,
+        provider_filters: dict[str, Any] | None = None,
+    ) -> list[TargetSpec]:
+        """Select canonical targets from the configured provider."""
+        query = TargetQuery(
+            period=period,
+            entity=entity,
+            provider_filters=dict(provider_filters or {}),
+        )
+        targets = self.target_provider.load_target_set(query).targets
+        return [
+            target
+            for target in targets
+            if _matches_us_target_filters(
+                target,
+                categories=categories,
+                levels=levels,
+                groups=groups,
+                only_available=only_available,
+            )
+        ]
 
     def get_target_vector(
         self,
@@ -202,15 +248,19 @@ class CalibrationHarness:
         groups: list[str] | None = None,
         only_available: bool = False,
         entity: EntityType | str | None = None,
+        period: int | str | None = None,
+        provider_filters: dict[str, Any] | None = None,
         **calibrate_kwargs,
     ) -> CalibrationResult:
         """Run a calibration experiment over a filtered target subset."""
-        selected = self.registry.select_targets(
+        selected = self.select_targets(
             categories=categories,
             levels=levels,
             groups=groups,
             only_available=only_available,
             entity=entity,
+            period=period,
+            provider_filters=provider_filters,
         )
         selected = [
             target
@@ -262,7 +312,7 @@ class CalibrationHarness:
         print("TARGET COVERAGE ANALYSIS")
         print("=" * 70)
 
-        all_targets = self.registry.select_targets(entity=entity)
+        all_targets = self.select_targets(entity=entity)
         columns = set(df.columns)
 
         available: list[TargetSpec] = []
@@ -386,6 +436,25 @@ def _weight_stats(weights: np.ndarray) -> dict[str, float]:
         "max": float(np.max(weights)) if len(weights) else 0.0,
         "zero_count": int(np.sum(weights == 0)),
     }
+
+
+def _matches_us_target_filters(
+    target: TargetSpec,
+    *,
+    categories: list[TargetCategory] | None = None,
+    levels: list[TargetLevel] | None = None,
+    groups: list[str] | None = None,
+    only_available: bool = False,
+) -> bool:
+    if categories and target_category(target) not in categories:
+        return False
+    if levels and target_level(target) not in levels:
+        return False
+    if groups and target_group_name(target) not in groups:
+        return False
+    if only_available and not target_available_in_cps(target):
+        return False
+    return True
 
 
 def _build_constraint_row(df: pd.DataFrame, spec: TargetSpec) -> np.ndarray:
