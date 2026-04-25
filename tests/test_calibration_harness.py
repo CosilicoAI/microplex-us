@@ -3,7 +3,13 @@
 import numpy as np
 import pandas as pd
 from microplex.core import EntityType
-from microplex.targets import TargetAggregation, TargetFilter, TargetSpec
+from microplex.targets import (
+    StaticTargetProvider,
+    TargetAggregation,
+    TargetFilter,
+    TargetSet,
+    TargetSpec,
+)
 
 from microplex_us.calibration_harness import CalibrationHarness
 from microplex_us.target_registry import (
@@ -101,3 +107,58 @@ class TestCalibrationHarness:
 
         assert result.targets_used == ["ca_people", "ca_income"]
         np.testing.assert_allclose(result.weights, np.ones(3))
+
+    def test_run_experiment_can_use_core_target_provider(self):
+        targets = _make_registry().get_all_targets() + [
+            TargetSpec(
+                name="future_income",
+                entity=EntityType.PERSON,
+                value=50.0,
+                period=2025,
+                measure="employment_income",
+                aggregation=TargetAggregation.SUM,
+                metadata={
+                    "us_category": "income",
+                    "us_level": "national",
+                    "us_group": "future",
+                    "available_in_cps": True,
+                    "requires_imputation": False,
+                },
+            )
+        ]
+        provider = StaticTargetProvider(TargetSet(targets))
+        harness = CalibrationHarness(target_provider=provider)
+        df = pd.DataFrame(
+            {
+                "state_fips": ["06", "06", "08"],
+                "employment_income": [10.0, 20.0, 5.0],
+                "weight": [1.0, 1.0, 1.0],
+            }
+        )
+
+        result = harness.run_experiment(
+            df,
+            "provider_people_only",
+            groups=["people"],
+            only_available=True,
+            period=2024,
+            entity=EntityType.PERSON,
+            verbose=False,
+        )
+
+        assert result.targets_used == ["ca_people", "ca_income"]
+
+    def test_print_target_coverage_can_use_core_target_provider(self, capsys):
+        provider = StaticTargetProvider(TargetSet(_make_registry().get_all_targets()))
+        harness = CalibrationHarness(target_provider=provider)
+        df = pd.DataFrame(
+            {
+                "state_fips": ["06", "06", "08"],
+                "employment_income": [10.0, 20.0, 5.0],
+                "weight": [1.0, 1.0, 1.0],
+            }
+        )
+
+        harness.print_target_coverage(df, entity=EntityType.PERSON)
+
+        assert "Available (2 targets)" in capsys.readouterr().out
