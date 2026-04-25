@@ -286,7 +286,7 @@ SAFE_POLICYENGINE_US_EXPORT_VARIABLES: set[str] = {
     "other_medical_expenses",
     "over_the_counter_health_expenses",
     "self_employment_income_before_lsr",
-    "social_security_retirement",
+    "social_security_retirement_reported",
     "social_security_disability",
     "social_security_survivors",
     "social_security_dependents",
@@ -327,6 +327,7 @@ SAFE_POLICYENGINE_US_EXPORT_VARIABLES: set[str] = {
 
 POLICYENGINE_US_EXPORT_COLUMN_ALIASES: dict[str, str] = {
     "race": "cps_race",
+    "social_security_retirement": "social_security_retirement_reported",
 }
 
 POLICYENGINE_US_EXPORT_DEFAULTS: dict[str, Any] = {
@@ -1866,18 +1867,70 @@ def compile_supported_policyengine_us_household_linear_constraints(
     return supported_targets, unsupported_targets, tuple(constraints)
 
 
-def policyengine_us_variables_to_materialize(
-    targets: list[TargetSpec],
-    bindings: dict[str, PolicyEngineUSVariableBinding],
-) -> set[str]:
-    """Compute the missing features required to score the given targets."""
-    requested_variables = {
+def _policyengine_us_target_required_variables(targets: list[TargetSpec]) -> set[str]:
+    return {
         feature
         for target in targets
         for feature in target.required_features
     }
+
+
+def policyengine_us_formula_variables_for_targets(
+    targets: list[TargetSpec],
+    *,
+    simulation_cls: Any | None = None,
+    tax_benefit_system: Any | None = None,
+    direct_override_variables: tuple[str, ...] = (),
+) -> set[str]:
+    """Return target features that should be recalculated by PolicyEngine."""
+    required_variables = _policyengine_us_target_required_variables(targets)
+    if not required_variables:
+        return set()
+    if tax_benefit_system is None:
+        tax_benefit_system = _resolve_policyengine_us_tax_benefit_system(
+            simulation_cls
+        )
+    variables = getattr(tax_benefit_system, "variables", {})
+    direct_overrides = set(direct_override_variables)
+    formula_variables: set[str] = set()
+    for variable in required_variables:
+        if variable in direct_overrides:
+            continue
+        variable_metadata = variables.get(variable)
+        if variable_metadata is None:
+            continue
+        if _policyengine_us_variable_is_calculated(variable_metadata):
+            formula_variables.add(variable)
+    return formula_variables
+
+
+def _policyengine_us_variable_is_calculated(variable_metadata: Any) -> bool:
+    if getattr(variable_metadata, "formulas", {}):
+        return True
+    if getattr(variable_metadata, "adds", ()) or getattr(variable_metadata, "subtracts", ()):
+        return True
+    is_input_variable = getattr(variable_metadata, "is_input_variable", None)
+    if callable(is_input_variable):
+        try:
+            return not bool(is_input_variable())
+        except TypeError:
+            return False
+    return False
+
+
+def policyengine_us_variables_to_materialize(
+    targets: list[TargetSpec],
+    bindings: dict[str, PolicyEngineUSVariableBinding],
+    *,
+    force_materialize_variables: set[str] | tuple[str, ...] | None = None,
+) -> set[str]:
+    """Compute the missing features required to score the given targets."""
+    requested_variables = _policyengine_us_target_required_variables(targets)
+    force_variables = set(force_materialize_variables or ())
     return {
-        variable for variable in requested_variables if variable not in bindings
+        variable
+        for variable in requested_variables
+        if variable not in bindings or variable in force_variables
     }
 
 

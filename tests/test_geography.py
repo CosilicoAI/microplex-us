@@ -40,6 +40,14 @@ def _sample_block_table() -> pd.DataFrame:
     )
 
 
+def test_core_block_geography_proxy_supports_isinstance() -> None:
+    from microplex.geography import BlockGeography as CoreBlockGeography
+
+    geography = BlockGeography.from_data(_sample_block_table())
+
+    assert isinstance(geography, CoreBlockGeography)
+
+
 class TestGEOIDConstants:
     def test_state_len(self) -> None:
         assert STATE_LEN == 2

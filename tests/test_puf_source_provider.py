@@ -706,6 +706,7 @@ def test_puf_source_provider_maps_policyengine_medical_and_alimony_inputs(tmp_pa
         puf_path=puf_path,
         demographics_path=demographics_path,
         target_year=2015,
+        social_security_share_model_loader=_mock_social_security_share_model_loader,
     )
     frame = provider.load_frame(SourceQuery(period=2015))
     persons = frame.tables[EntityType.PERSON]

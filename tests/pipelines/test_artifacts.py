@@ -176,19 +176,9 @@ def _create_policyengine_targets_db(path: Path) -> None:
             t.value,
             t.period,
             t.active,
-            CASE
-                WHEN t.variable = 'snap' THEN 'state'
-                ELSE 'district'
-            END AS geo_level,
-            CASE
-                WHEN t.variable = 'snap' THEN '06'
-                ELSE '0601'
-            END AS geographic_id,
-            CASE
-                WHEN t.variable = 'snap' THEN 'snap'
-                WHEN t.variable = 'household_count' THEN 'snap'
-                ELSE NULL
-            END AS domain_variable
+            'state' AS geo_level,
+            '06' AS geographic_id,
+            'household_count' AS domain_variable
         FROM targets AS t;
         """
     )
@@ -216,7 +206,6 @@ def _create_policyengine_targets_db(path: Path) -> None:
         """,
         [
             (1, "household_count", 2024, 1, 0, 3.0, 1, None, "test", "count"),
-            (2, "snap", 2024, 1, 0, 250.0, 1, None, "test", "snap"),
         ],
     )
     conn.commit()
@@ -604,12 +593,11 @@ class TestSaveUSMicroplexArtifacts:
             TargetSet(
                 [
                     TargetSpec(
-                        name="snap_total",
+                        name="household_count",
                         entity=EntityType.HOUSEHOLD,
-                        value=250.0,
+                        value=3.0,
                         period=2024,
-                        measure="snap",
-                        aggregation="sum",
+                        aggregation="count",
                     ),
                 ]
             )
@@ -622,9 +610,9 @@ class TestSaveUSMicroplexArtifacts:
             policyengine_baseline_dataset=baseline_dataset,
             policyengine_harness_slices=(
                 PolicyEngineUSHarnessSlice(
-                    name="snap",
-                    description="SNAP parity",
-                    query=TargetQuery(period=2024, names=("snap_total",)),
+                    name="household_count",
+                    description="Household count parity",
+                    query=TargetQuery(period=2024, names=("household_count",)),
                 ),
             ),
             policyengine_harness_metadata={"baseline_dataset": baseline_dataset.name},
@@ -838,7 +826,7 @@ class TestSaveUSMicroplexArtifacts:
                 policyengine_dataset_year=2024,
                 policyengine_targets_db=str(targets_db),
                 policyengine_baseline_dataset=str(baseline_dataset),
-                policyengine_target_variables=("snap", "household_count"),
+                policyengine_target_variables=("household_count",),
             ),
             seed_data=pd.DataFrame({"income": [10.0], "hh_weight": [1.0]}),
             synthetic_data=pd.DataFrame({"income": [10.0, 20.0], "weight": [1.0, 1.0]}),
@@ -921,10 +909,7 @@ class TestSaveUSMicroplexArtifacts:
         assert harness_payload["metadata"]["targets_db"] == "policyengine_targets.db"
         assert harness_payload["metadata"]["harness_suite"] == "policyengine_us_all_targets"
         assert harness_payload["metadata"]["harness_slice_names"] == ["all_targets"]
-        assert harness_payload["metadata"]["target_variables"] == [
-            "snap",
-            "household_count",
-        ]
+        assert harness_payload["metadata"]["target_variables"] == ["household_count"]
         assert harness_payload["metadata"]["policyengine_us_runtime_version"] is not None
         assert [slice_payload["name"] for slice_payload in harness_payload["slices"]] == [
             "all_targets",

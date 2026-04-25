@@ -72,6 +72,7 @@ from microplex_us.policyengine.us import (
     infer_policyengine_us_variable_bindings,
     load_us_pipeline_checkpoint,
     materialize_policyengine_us_variables_safely,
+    policyengine_us_formula_variables_for_targets,
     policyengine_us_variables_to_materialize,
     resolve_policyengine_excluded_export_variables,
     save_us_pipeline_checkpoint,
@@ -3831,9 +3832,15 @@ class USMicroplexPipeline:
             period=target_period,
             for_calibration=True,
         ).targets
+        force_materialize_variables = policyengine_us_formula_variables_for_targets(
+            canonical_targets,
+            simulation_cls=self.config.policyengine_simulation_cls,
+            direct_override_variables=self.config.policyengine_direct_override_variables,
+        )
         missing_variables = policyengine_us_variables_to_materialize(
             canonical_targets,
             bindings,
+            force_materialize_variables=force_materialize_variables,
         )
         materialization_failures: dict[str, str] = {}
         materialized_variables: set[str] = set()
@@ -3844,9 +3851,20 @@ class USMicroplexPipeline:
                 period=target_period,
                 dataset_year=self.config.policyengine_dataset_year or target_period,
                 simulation_cls=self.config.policyengine_simulation_cls,
+                direct_override_variables=self.config.policyengine_direct_override_variables,
                 batch_size=self.config.policyengine_materialize_batch_size,
             )
             tables = materialization_result.tables
+            unmaterialized_forced_variables = (
+                force_materialize_variables
+                & missing_variables
+                - set(materialization_result.bindings)
+            )
+            bindings = {
+                variable: binding
+                for variable, binding in bindings.items()
+                if variable not in unmaterialized_forced_variables
+            }
             bindings = {
                 **bindings,
                 **materialization_result.bindings,

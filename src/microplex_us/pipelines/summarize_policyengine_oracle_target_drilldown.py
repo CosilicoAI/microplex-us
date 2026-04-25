@@ -65,7 +65,7 @@ def summarize_us_policyengine_oracle_target_drilldown(
         _supported_targets,
         _constraints,
         _feasibility_filter_summary,
-        _materialized_variables,
+        calibration_materialized_variables,
         _materialization_failures,
     ) = pipeline._resolve_policyengine_calibration_targets(
         tables,
@@ -100,6 +100,8 @@ def summarize_us_policyengine_oracle_target_drilldown(
         str(variable)
         for variable in manifest.get("calibration", {}).get("materialized_variables", ())
     }
+    materialized_variables.update(str(variable) for variable in calibration_materialized_variables)
+    materialized_variables.update(str(variable) for variable in report.materialized_variables)
     ledger_by_name = {
         str(entry["target_name"]): dict(entry)
         for entry in target_ledger

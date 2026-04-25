@@ -39,6 +39,7 @@ from microplex_us.policyengine.us import (
     detect_policyengine_pseudo_inputs,
     materialize_policyengine_us_variables,
     materialize_policyengine_us_variables_safely,
+    policyengine_us_variables_to_materialize,
     project_frame_to_time_period_arrays,
     resolve_policyengine_excluded_export_variables,
     write_policyengine_us_time_period_dataset,
@@ -1370,6 +1371,34 @@ class TestPolicyEngineUSConstraintCompilation:
         np.testing.assert_allclose(constraints[0].coefficients, np.array([120.0, 0.0]))
         np.testing.assert_allclose(constraints[1].coefficients, np.array([1.0, 0.0]))
 
+    def test_variables_to_materialize_can_force_formula_outputs(self):
+        targets = [
+            TargetSpec(
+                name="ssi",
+                entity=EntityType.PERSON,
+                value=100.0,
+                period=2024,
+                measure="ssi",
+            )
+        ]
+        bindings = {
+            "ssi": PolicyEngineUSVariableBinding(
+                entity=EntityType.PERSON,
+                column="ssi",
+            ),
+            "employment_income": PolicyEngineUSVariableBinding(
+                entity=EntityType.PERSON,
+                column="employment_income",
+            ),
+        }
+
+        assert policyengine_us_variables_to_materialize(targets, bindings) == set()
+        assert policyengine_us_variables_to_materialize(
+            targets,
+            bindings,
+            force_materialize_variables={"ssi"},
+        ) == {"ssi"}
+
     def test_materialization_supports_nested_system_attribute(self, tmp_path):
         households = pd.DataFrame(
             {
@@ -2010,6 +2039,45 @@ class TestPolicyEngineUSProjection:
         assert export_maps["tax_unit"] == {"filing_status": "filing_status"}
         assert export_maps["spm_unit"] == {"snap": "snap"}
 
+    def test_build_policyengine_us_export_variable_maps_aliases_reported_social_security_retirement(self):
+        class FakeEntity:
+            def __init__(self, key):
+                self.key = key
+
+        class FakeVariable:
+            def __init__(self, entity):
+                self.entity = FakeEntity(entity)
+
+        class FakeSystem:
+            variables = {
+                "social_security_retirement_reported": FakeVariable("person"),
+            }
+
+        tables = PolicyEngineUSEntityTableBundle(
+            households=pd.DataFrame(
+                {
+                    "household_id": [10],
+                    "household_weight": [1.0],
+                }
+            ),
+            persons=pd.DataFrame(
+                {
+                    "person_id": [1],
+                    "household_id": [10],
+                    "social_security_retirement": [12_000.0],
+                }
+            ),
+        )
+
+        export_maps = build_policyengine_us_export_variable_maps(
+            tables,
+            tax_benefit_system=FakeSystem(),
+        )
+
+        assert export_maps["person"] == {
+            "social_security_retirement": "social_security_retirement_reported",
+        }
+
     def test_default_policyengine_us_export_surface_avoids_formula_aggregates(self):
         from policyengine_us import CountryTaxBenefitSystem
 
@@ -2034,6 +2102,8 @@ class TestPolicyEngineUSProjection:
         assert "farm_operations_income" in SAFE_POLICYENGINE_US_EXPORT_VARIABLES
         assert "farm_rent_income" in SAFE_POLICYENGINE_US_EXPORT_VARIABLES
         assert "health_savings_account_ald" in SAFE_POLICYENGINE_US_EXPORT_VARIABLES
+        assert "social_security_retirement" not in SAFE_POLICYENGINE_US_EXPORT_VARIABLES
+        assert "social_security_retirement_reported" in SAFE_POLICYENGINE_US_EXPORT_VARIABLES
         assert "non_sch_d_capital_gains" not in SAFE_POLICYENGINE_US_EXPORT_VARIABLES
         assert "receives_wic" in SAFE_POLICYENGINE_US_EXPORT_VARIABLES
         assert "ssn_card_type" in SAFE_POLICYENGINE_US_EXPORT_VARIABLES

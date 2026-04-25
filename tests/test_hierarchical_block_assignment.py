@@ -78,6 +78,26 @@ class TestBlockAssignment:
         assert synthesizer.geography_assignment.atomic_id_column == "cd_id"
         assert synthesizer._geography_assigner is not None
 
+    def test_cd_probabilities_allow_state_local_district_ids(self) -> None:
+        cd_probs = pd.DataFrame(
+            {
+                "state_fips": [6, 6, 36, 36],
+                "cd_id": [1, 2, 1, 2],
+                "prob": [0.6, 0.4, 0.5, 0.5],
+            }
+        )
+        households = pd.DataFrame({"state_fips": [6, 36]})
+        synthesizer = HierarchicalSynthesizer(
+            cd_probabilities=cd_probs,
+            random_state=123,
+        )
+
+        result = synthesizer._apply_geography_assignment(households)
+
+        assert "_microplex_cd_atomic_id" not in result.columns
+        assert result["state_fips"].tolist() == [6, 36]
+        assert result["cd_id"].isin([1, 2]).all()
+
     def test_block_probabilities_take_precedence(
         self,
         sample_block_probs: pd.DataFrame,

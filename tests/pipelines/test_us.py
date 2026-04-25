@@ -23,6 +23,7 @@ from microplex.core import (
 )
 from microplex.targets import TargetAggregation, TargetQuery, TargetSpec
 
+import microplex_us.pipelines.us as us_pipeline_module
 from microplex_us.pipelines.us import (
     USMicroplexBuildConfig,
     USMicroplexBuildResult,
@@ -4451,7 +4452,7 @@ class TestUSMicroplexPipeline:
         assert all(isinstance(target, TargetSpec) for target in targets.targets)
 
     def test_calibrate_policyengine_tables_from_db_with_simulated_variable(
-        self, persons, households, tmp_path
+        self, persons, households, tmp_path, monkeypatch
     ):
         db_path = tmp_path / "policyengine_targets.db"
         conn = sqlite3.connect(db_path)
@@ -4579,6 +4580,23 @@ class TestUSMicroplexPipeline:
                     return [100.0, 0.0, 0.0]
                 raise KeyError(variable)
 
+        captured_direct_overrides: list[tuple[str, ...]] = []
+        original_materialize = (
+            us_pipeline_module.materialize_policyengine_us_variables_safely
+        )
+
+        def spy_materialize(*args, **kwargs):
+            captured_direct_overrides.append(
+                tuple(kwargs.get("direct_override_variables", ()))
+            )
+            return original_materialize(*args, **kwargs)
+
+        monkeypatch.setattr(
+            us_pipeline_module,
+            "materialize_policyengine_us_variables_safely",
+            spy_materialize,
+        )
+
         config = USMicroplexBuildConfig(
             calibration_backend="entropy",
             policyengine_targets_db=str(db_path),
@@ -4586,6 +4604,7 @@ class TestUSMicroplexPipeline:
             policyengine_target_period=2024,
             policyengine_dataset_year=2024,
             policyengine_simulation_cls=FakeSimulation,
+            policyengine_direct_override_variables=("pre_tax_contributions",),
             policyengine_calibration_min_active_households=1,
         )
         pipeline = USMicroplexPipeline(config)
@@ -4593,12 +4612,14 @@ class TestUSMicroplexPipeline:
             columns={"hh_weight": "weight", "income": "employment_income"}
         )
         tables = pipeline.build_policyengine_entity_tables(seed)
+        tables.households["snap"] = 999.0
 
         calibrated_tables, calibrated_persons, summary = (
             pipeline.calibrate_policyengine_tables(tables)
         )
 
         assert summary["backend"] == "policyengine_db_entropy"
+        assert captured_direct_overrides == [("pre_tax_contributions",)]
         assert summary["n_constraints"] == 2
         assert summary["materialized_variables"] == ["snap"]
         assert summary["max_error"] < 1e-6
