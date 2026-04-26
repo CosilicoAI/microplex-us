@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import subprocess
 import sys
 from dataclasses import dataclass, field
@@ -22,6 +23,11 @@ _PE_NATIVE_SCORE_BASE_ENV_VARS: tuple[str, ...] = (
     "LANG",
     "LC_ALL",
     "TZ",
+)
+_EITC_AGI_CHILD_DOMAIN_VARIABLE = "adjusted_gross_income,eitc,eitc_child_count"
+_EITC_AGI_CHILD_LABEL = re.compile(
+    r"^nation/irs/eitc/(?P<metric>returns|amount)/"
+    r"c(?P<count_children>\d+)_(?P<agi_lower>[^_]+)_(?P<agi_upper>[^/]+)$"
 )
 
 _ENHANCED_CPS_BAD_TARGETS: tuple[str, ...] = (
@@ -536,36 +542,150 @@ def compute(dataset_path: str):
     }
 
 
+def classify_target_family(target_name: str) -> str:
+    parts = target_name.split("/")
+    if target_name.startswith("state/census/age/"):
+        return "state_age_distribution"
+    if target_name.startswith("state/census/population_by_state/"):
+        return "state_population"
+    if target_name.startswith("state/census/population_under_5_by_state/"):
+        return "state_population_under_5"
+    if target_name.startswith("nation/irs/aca_spending/"):
+        return "state_aca_spending"
+    if target_name.startswith("state/irs/aca_enrollment/"):
+        return "state_aca_enrollment"
+    if target_name.startswith("irs/medicaid_enrollment/"):
+        return "state_medicaid_enrollment"
+    if target_name.endswith("/snap-cost"):
+        return "state_snap_cost"
+    if target_name.endswith("/snap-hhs"):
+        return "state_snap_households"
+    if target_name.startswith("state/real_estate_taxes/"):
+        return "state_real_estate_taxes"
+    if len(parts) >= 3 and parts[0] == "state" and parts[2] == "adjusted_gross_income":
+        return "state_agi_distribution"
+    if target_name.startswith("nation/jct/"):
+        return "national_tax_expenditures"
+    if target_name.startswith("nation/net_worth/"):
+        return "national_net_worth"
+    if target_name.startswith("nation/ssa/"):
+        return "national_ssa"
+    if target_name.startswith("nation/census/population_by_age/"):
+        return "national_population_by_age"
+    if target_name == "nation/census/infants":
+        return "national_infants"
+    if target_name.startswith("nation/census/agi_in_spm_threshold_decile_"):
+        return "national_spm_threshold_agi"
+    if target_name.startswith("nation/census/count_in_spm_threshold_decile_"):
+        return "national_spm_threshold_count"
+    if target_name.startswith("nation/census/"):
+        return "national_census_other"
+    if target_name.startswith("nation/irs/"):
+        return "national_irs_other"
+    return "other"
+
+
+def target_scope(target_name: str) -> str:
+    if target_name.startswith("nation/"):
+        return "national"
+    if target_name.startswith("state/") or target_name.endswith("/snap-cost") or target_name.endswith("/snap-hhs"):
+        return "state"
+    return "other"
+
+
+def abs_pct_error(estimate: float, target: float) -> float:
+    return abs(estimate - target) / max(abs(target), 1.0) * 100.0
+
+
+def build_target_rows(from_payload, to_payload):
+    rows = []
+    for idx, name in enumerate(from_payload["target_names"]):
+        from_term = float(from_payload["weighted_terms"][idx])
+        to_term = float(to_payload["weighted_terms"][idx])
+        from_error = float(from_payload["rel_error"][idx])
+        to_error = float(to_payload["rel_error"][idx])
+        target_value = float(from_payload["targets"][idx])
+        from_estimate = float(from_payload["estimate"][idx])
+        to_estimate = float(to_payload["estimate"][idx])
+        if to_error < from_error:
+            winner = "to"
+        elif from_error < to_error:
+            winner = "from"
+        else:
+            winner = "tie"
+        rows.append(
+            {
+                "target_name": name,
+                "target_family": classify_target_family(name),
+                "target_scope": target_scope(name),
+                "winner": winner,
+                "weighted_term_delta": to_term - from_term,
+                "from_weighted_term": from_term,
+                "to_weighted_term": to_term,
+                "target_value": target_value,
+                "from_estimate": from_estimate,
+                "to_estimate": to_estimate,
+                "from_rel_error": from_error,
+                "to_rel_error": to_error,
+                "from_abs_pct_error": abs_pct_error(from_estimate, target_value),
+                "to_abs_pct_error": abs_pct_error(to_estimate, target_value),
+            }
+        )
+    return rows
+
+
+def summarize_target_rows(rows, *, group_field=None):
+    if group_field is None:
+        grouped = [("all", rows)]
+    else:
+        values = sorted({row[group_field] for row in rows})
+        grouped = [(value, [row for row in rows if row[group_field] == value]) for value in values]
+
+    summaries = []
+    for value, group_rows in grouped:
+        n_targets = len(group_rows)
+        from_wins = sum(1 for row in group_rows if row["winner"] == "from")
+        to_wins = sum(1 for row in group_rows if row["winner"] == "to")
+        ties = n_targets - from_wins - to_wins
+        from_loss = float(np.mean([row["from_weighted_term"] for row in group_rows]))
+        to_loss = float(np.mean([row["to_weighted_term"] for row in group_rows]))
+        summary = {
+            "n_targets": n_targets,
+            "from_wins": from_wins,
+            "to_wins": to_wins,
+            "ties": ties,
+            "from_win_rate": from_wins / n_targets if n_targets else None,
+            "to_win_rate": to_wins / n_targets if n_targets else None,
+            "from_loss": from_loss,
+            "to_loss": to_loss,
+            "loss_delta": to_loss - from_loss,
+            "mean_weighted_term_delta": float(
+                np.mean([row["weighted_term_delta"] for row in group_rows])
+            ),
+        }
+        if group_field is not None:
+            summary[group_field] = value
+        summaries.append(summary)
+    return summaries[0] if group_field is None else summaries
+
+
 from_payload = compute(FROM_DATASET)
 to_payload = compute(TO_DATASET)
 
 if from_payload["target_names"] != to_payload["target_names"]:
     raise ValueError("Datasets produced different target names after filtering")
 
-rows = []
-for idx, name in enumerate(from_payload["target_names"]):
-    from_term = float(from_payload["weighted_terms"][idx])
-    to_term = float(to_payload["weighted_terms"][idx])
-    rows.append(
-        {
-            "target_name": name,
-            "weighted_term_delta": to_term - from_term,
-            "from_weighted_term": from_term,
-            "to_weighted_term": to_term,
-            "target_value": float(from_payload["targets"][idx]),
-            "from_estimate": float(from_payload["estimate"][idx]),
-            "to_estimate": float(to_payload["estimate"][idx]),
-            "from_rel_error": float(from_payload["rel_error"][idx]),
-            "to_rel_error": float(to_payload["rel_error"][idx]),
-        }
-    )
-
+rows = build_target_rows(from_payload, to_payload)
 rows.sort(key=lambda row: row["weighted_term_delta"], reverse=True)
 payload = {
     "metric": "enhanced_cps_native_loss_target_delta",
     "period": PERIOD,
     "from_dataset": FROM_DATASET,
     "to_dataset": TO_DATASET,
+    "summary": summarize_target_rows(rows),
+    "family_summaries": summarize_target_rows(rows, group_field="target_family"),
+    "scope_summaries": summarize_target_rows(rows, group_field="target_scope"),
+    "targets": rows,
     "top_regressions": rows[:TOP_K],
     "top_improvements": list(reversed(rows[-TOP_K:])),
 }
@@ -653,6 +773,133 @@ def compute(dataset_path: str):
     }
 
 
+def classify_target_family(target_name: str) -> str:
+    parts = target_name.split("/")
+    if target_name.startswith("state/census/age/"):
+        return "state_age_distribution"
+    if target_name.startswith("state/census/population_by_state/"):
+        return "state_population"
+    if target_name.startswith("state/census/population_under_5_by_state/"):
+        return "state_population_under_5"
+    if target_name.startswith("nation/irs/aca_spending/"):
+        return "state_aca_spending"
+    if target_name.startswith("state/irs/aca_enrollment/"):
+        return "state_aca_enrollment"
+    if target_name.startswith("irs/medicaid_enrollment/"):
+        return "state_medicaid_enrollment"
+    if target_name.endswith("/snap-cost"):
+        return "state_snap_cost"
+    if target_name.endswith("/snap-hhs"):
+        return "state_snap_households"
+    if target_name.startswith("state/real_estate_taxes/"):
+        return "state_real_estate_taxes"
+    if len(parts) >= 3 and parts[0] == "state" and parts[2] == "adjusted_gross_income":
+        return "state_agi_distribution"
+    if target_name.startswith("nation/jct/"):
+        return "national_tax_expenditures"
+    if target_name.startswith("nation/net_worth/"):
+        return "national_net_worth"
+    if target_name.startswith("nation/ssa/"):
+        return "national_ssa"
+    if target_name.startswith("nation/census/population_by_age/"):
+        return "national_population_by_age"
+    if target_name == "nation/census/infants":
+        return "national_infants"
+    if target_name.startswith("nation/census/agi_in_spm_threshold_decile_"):
+        return "national_spm_threshold_agi"
+    if target_name.startswith("nation/census/count_in_spm_threshold_decile_"):
+        return "national_spm_threshold_count"
+    if target_name.startswith("nation/census/"):
+        return "national_census_other"
+    if target_name.startswith("nation/irs/"):
+        return "national_irs_other"
+    return "other"
+
+
+def target_scope(target_name: str) -> str:
+    if target_name.startswith("nation/"):
+        return "national"
+    if target_name.startswith("state/") or target_name.endswith("/snap-cost") or target_name.endswith("/snap-hhs"):
+        return "state"
+    return "other"
+
+
+def abs_pct_error(estimate: float, target: float) -> float:
+    return abs(estimate - target) / max(abs(target), 1.0) * 100.0
+
+
+def build_target_rows(from_payload, to_payload):
+    rows = []
+    for idx, name in enumerate(from_payload["target_names"]):
+        from_term = float(from_payload["weighted_terms"][idx])
+        to_term = float(to_payload["weighted_terms"][idx])
+        from_error = float(from_payload["rel_error"][idx])
+        to_error = float(to_payload["rel_error"][idx])
+        target_value = float(from_payload["targets"][idx])
+        from_estimate = float(from_payload["estimate"][idx])
+        to_estimate = float(to_payload["estimate"][idx])
+        if to_error < from_error:
+            winner = "to"
+        elif from_error < to_error:
+            winner = "from"
+        else:
+            winner = "tie"
+        rows.append(
+            {
+                "target_name": name,
+                "target_family": classify_target_family(name),
+                "target_scope": target_scope(name),
+                "winner": winner,
+                "weighted_term_delta": to_term - from_term,
+                "from_weighted_term": from_term,
+                "to_weighted_term": to_term,
+                "target_value": target_value,
+                "from_estimate": from_estimate,
+                "to_estimate": to_estimate,
+                "from_rel_error": from_error,
+                "to_rel_error": to_error,
+                "from_abs_pct_error": abs_pct_error(from_estimate, target_value),
+                "to_abs_pct_error": abs_pct_error(to_estimate, target_value),
+            }
+        )
+    return rows
+
+
+def summarize_target_rows(rows, *, group_field=None):
+    if group_field is None:
+        grouped = [("all", rows)]
+    else:
+        values = sorted({row[group_field] for row in rows})
+        grouped = [(value, [row for row in rows if row[group_field] == value]) for value in values]
+
+    summaries = []
+    for value, group_rows in grouped:
+        n_targets = len(group_rows)
+        from_wins = sum(1 for row in group_rows if row["winner"] == "from")
+        to_wins = sum(1 for row in group_rows if row["winner"] == "to")
+        ties = n_targets - from_wins - to_wins
+        from_loss = float(np.mean([row["from_weighted_term"] for row in group_rows]))
+        to_loss = float(np.mean([row["to_weighted_term"] for row in group_rows]))
+        summary = {
+            "n_targets": n_targets,
+            "from_wins": from_wins,
+            "to_wins": to_wins,
+            "ties": ties,
+            "from_win_rate": from_wins / n_targets if n_targets else None,
+            "to_win_rate": to_wins / n_targets if n_targets else None,
+            "from_loss": from_loss,
+            "to_loss": to_loss,
+            "loss_delta": to_loss - from_loss,
+            "mean_weighted_term_delta": float(
+                np.mean([row["weighted_term_delta"] for row in group_rows])
+            ),
+        }
+        if group_field is not None:
+            summary[group_field] = value
+        summaries.append(summary)
+    return summaries[0] if group_field is None else summaries
+
+
 baseline_payload = compute(BASELINE_DATASET)
 results = []
 for candidate_dataset in CANDIDATE_DATASETS:
@@ -660,24 +907,7 @@ for candidate_dataset in CANDIDATE_DATASETS:
     if baseline_payload["target_names"] != candidate_payload["target_names"]:
         raise ValueError("Datasets produced different target names after filtering")
 
-    rows = []
-    for idx, name in enumerate(baseline_payload["target_names"]):
-        from_term = float(baseline_payload["weighted_terms"][idx])
-        to_term = float(candidate_payload["weighted_terms"][idx])
-        rows.append(
-            {
-                "target_name": name,
-                "weighted_term_delta": to_term - from_term,
-                "from_weighted_term": from_term,
-                "to_weighted_term": to_term,
-                "target_value": float(baseline_payload["targets"][idx]),
-                "from_estimate": float(baseline_payload["estimate"][idx]),
-                "to_estimate": float(candidate_payload["estimate"][idx]),
-                "from_rel_error": float(baseline_payload["rel_error"][idx]),
-                "to_rel_error": float(candidate_payload["rel_error"][idx]),
-            }
-        )
-
+    rows = build_target_rows(baseline_payload, candidate_payload)
     rows.sort(key=lambda row: row["weighted_term_delta"], reverse=True)
     results.append(
         {
@@ -685,6 +915,10 @@ for candidate_dataset in CANDIDATE_DATASETS:
             "period": PERIOD,
             "from_dataset": BASELINE_DATASET,
             "to_dataset": candidate_dataset,
+            "summary": summarize_target_rows(rows),
+            "family_summaries": summarize_target_rows(rows, group_field="target_family"),
+            "scope_summaries": summarize_target_rows(rows, group_field="target_scope"),
+            "targets": rows,
             "top_regressions": rows[:TOP_K],
             "top_improvements": list(reversed(rows[-TOP_K:])),
         }
@@ -1796,6 +2030,298 @@ def compute_batch_us_pe_native_scores(
     return results
 
 
+@dataclass(frozen=True)
+class PENativeTargetLookupKey:
+    """Structured lookup key for a legacy PE-native target label."""
+
+    variable: str
+    count_children: int
+    agi_lower: float
+    agi_upper: float
+
+    def as_tuple(self) -> tuple[str, int, float, float]:
+        return (self.variable, self.count_children, self.agi_lower, self.agi_upper)
+
+    @staticmethod
+    def _json_safe_bound(value: float) -> float | str:
+        if value == float("inf"):
+            return "inf"
+        if value == float("-inf"):
+            return "-inf"
+        return value
+
+    def expected_constraints(self) -> list[dict[str, str | float | int]]:
+        if self.count_children < 3:
+            child_constraint: dict[str, str | float | int] = {
+                "variable": "eitc_child_count",
+                "operation": "==",
+                "value": self.count_children,
+            }
+        else:
+            child_constraint = {
+                "variable": "eitc_child_count",
+                "operation": ">",
+                "value": 2,
+            }
+        return [
+            {"variable": "tax_unit_is_filer", "operation": "==", "value": 1},
+            {"variable": "eitc", "operation": ">", "value": 0},
+            child_constraint,
+            {
+                "variable": "adjusted_gross_income",
+                "operation": ">=",
+                "value": self._json_safe_bound(self.agi_lower),
+            },
+            {
+                "variable": "adjusted_gross_income",
+                "operation": "<",
+                "value": self._json_safe_bound(self.agi_upper),
+            },
+        ]
+
+    def expected_target(self) -> dict[str, Any]:
+        return {
+            "variable": self.variable,
+            "geo_level": "national",
+            "geographic_id": "US",
+            "domain_variable": _EITC_AGI_CHILD_DOMAIN_VARIABLE,
+            "constraints": self.expected_constraints(),
+        }
+
+
+def _parse_pe_native_numeric_token(token: str) -> float:
+    if token == "-inf":
+        return float("-inf")
+    if token == "inf":
+        return float("inf")
+    multipliers = {
+        "bn": 1_000_000_000.0,
+        "m": 1_000_000.0,
+        "k": 1_000.0,
+    }
+    for suffix, multiplier in multipliers.items():
+        if token.endswith(suffix):
+            return float(token[: -len(suffix)]) * multiplier
+    return float(token)
+
+
+def parse_pe_native_target_lookup_key(
+    target_name: str,
+) -> PENativeTargetLookupKey | None:
+    """Parse PE-native labels that now have structured DB equivalents."""
+
+    match = _EITC_AGI_CHILD_LABEL.match(target_name)
+    if match is None:
+        return None
+    metric = match.group("metric")
+    variable = "tax_unit_count" if metric == "returns" else "eitc"
+    return PENativeTargetLookupKey(
+        variable=variable,
+        count_children=int(match.group("count_children")),
+        agi_lower=_parse_pe_native_numeric_token(match.group("agi_lower")),
+        agi_upper=_parse_pe_native_numeric_token(match.group("agi_upper")),
+    )
+
+
+def _constraint_value_as_float(value: str) -> float | None:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _target_lookup_key_from_policyengine_target(
+    target: Any,
+) -> tuple[str, int, float, float] | None:
+    if target.geo_level != "national":
+        return None
+    if target.variable not in {"eitc", "tax_unit_count"}:
+        return None
+    if target.domain_variable != _EITC_AGI_CHILD_DOMAIN_VARIABLE:
+        return None
+
+    agi_lower: float | None = None
+    agi_upper: float | None = None
+    count_children: int | None = None
+    has_eitc_positive_constraint = False
+
+    for constraint in target.constraints:
+        value = str(constraint.value)
+        numeric_value = _constraint_value_as_float(value)
+        if (
+            constraint.variable == "adjusted_gross_income"
+            and constraint.operation == ">="
+            and numeric_value is not None
+        ):
+            agi_lower = numeric_value
+        elif (
+            constraint.variable == "adjusted_gross_income"
+            and constraint.operation == "<"
+            and numeric_value is not None
+        ):
+            agi_upper = numeric_value
+        elif constraint.variable == "eitc" and constraint.operation == ">":
+            has_eitc_positive_constraint = numeric_value == 0
+        elif constraint.variable == "eitc_child_count" and numeric_value is not None:
+            if constraint.operation == "==":
+                count_children = int(numeric_value)
+            elif constraint.operation == ">" and numeric_value == 2:
+                count_children = 3
+            elif constraint.operation == ">=" and numeric_value == 3:
+                count_children = 3
+
+    if (
+        agi_lower is None
+        or agi_upper is None
+        or count_children is None
+        or not has_eitc_positive_constraint
+    ):
+        return None
+    return (target.variable, count_children, agi_lower, agi_upper)
+
+
+def _policyengine_target_payload(target: Any) -> dict[str, Any]:
+    return {
+        "target_id": target.target_id,
+        "variable": target.variable,
+        "period": target.period,
+        "value": target.value,
+        "source": target.source,
+        "notes": target.notes,
+        "geo_level": target.geo_level,
+        "geographic_id": target.geographic_id,
+        "domain_variable": target.domain_variable,
+        "constraints": [
+            {
+                "variable": constraint.variable,
+                "operation": constraint.operation,
+                "value": constraint.value,
+            }
+            for constraint in target.constraints
+        ],
+    }
+
+
+def _load_policyengine_target_match_index(
+    target_db_path: str | Path,
+    *,
+    period: int,
+) -> dict[tuple[str, int, float, float], list[dict[str, Any]]]:
+    from microplex_us.policyengine.us import PolicyEngineUSDBTargetProvider
+
+    provider = PolicyEngineUSDBTargetProvider(target_db_path, validate=False)
+    targets = provider.load_targets(
+        period=period,
+        variables=["eitc", "tax_unit_count"],
+        domain_variable_values=[_EITC_AGI_CHILD_DOMAIN_VARIABLE],
+        geo_levels=["national"],
+    )
+    matches: dict[tuple[str, int, float, float], list[dict[str, Any]]] = {}
+    for target in targets:
+        key = _target_lookup_key_from_policyengine_target(target)
+        if key is None:
+            continue
+        matches.setdefault(key, []).append(_policyengine_target_payload(target))
+    return matches
+
+
+def _default_policyengine_targets_db_path(
+    policyengine_us_data_repo: str | Path | None,
+) -> Path | None:
+    try:
+        repo = resolve_policyengine_us_data_repo_root(policyengine_us_data_repo)
+    except FileNotFoundError:
+        return None
+    path = repo / "policyengine_us_data" / "storage" / "calibration" / "policy_data.db"
+    return path if path.exists() else None
+
+
+def annotate_pe_native_target_db_matches(
+    payload: dict[str, Any],
+    *,
+    target_db_path: str | Path | None,
+    period: int,
+) -> dict[str, Any]:
+    """Attach structured PolicyEngine target DB matches to diagnostic rows."""
+
+    rows = list(payload.get("targets") or [])
+    resolved_db_path = Path(target_db_path).expanduser() if target_db_path else None
+    match_index: dict[tuple[str, int, float, float], list[dict[str, Any]]] = {}
+    target_db_error = None
+    if resolved_db_path is not None and resolved_db_path.exists():
+        try:
+            match_index = _load_policyengine_target_match_index(
+                resolved_db_path,
+                period=period,
+            )
+        except Exception as exc:  # pragma: no cover - defensive diagnostic path
+            target_db_error = str(exc)
+
+    counts = {
+        "matched": 0,
+        "legacy_only": 0,
+        "unparsed": 0,
+        "ambiguous": 0,
+        "db_unavailable": 0,
+    }
+    annotations_by_name: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        target_name = str(row.get("target_name", ""))
+        key = parse_pe_native_target_lookup_key(target_name)
+        if key is None:
+            annotation: dict[str, Any] = {"policyengine_target_match": "unparsed"}
+        elif resolved_db_path is None or not resolved_db_path.exists() or target_db_error:
+            annotation = {
+                "policyengine_target_match": "db_unavailable",
+                "policyengine_target_expected": key.expected_target(),
+            }
+        else:
+            matches = match_index.get(key.as_tuple(), [])
+            if len(matches) == 1:
+                match = matches[0]
+                annotation = {
+                    "policyengine_target_match": "matched",
+                    "policyengine_target_id": match["target_id"],
+                    "policyengine_target_variable": match["variable"],
+                    "policyengine_target_period": match["period"],
+                    "policyengine_target_value": match["value"],
+                    "policyengine_target_source": match["source"],
+                    "policyengine_target_domain_variable": match["domain_variable"],
+                    "policyengine_target_constraints": match["constraints"],
+                }
+            elif len(matches) > 1:
+                annotation = {
+                    "policyengine_target_match": "ambiguous",
+                    "policyengine_target_match_count": len(matches),
+                    "policyengine_target_matches": matches,
+                    "policyengine_target_expected": key.expected_target(),
+                }
+            else:
+                annotation = {
+                    "policyengine_target_match": "legacy_only",
+                    "policyengine_target_expected": key.expected_target(),
+                }
+        counts[annotation["policyengine_target_match"]] += 1
+        row.update(annotation)
+        annotations_by_name[target_name] = annotation
+
+    for list_name in ("top_improvements", "top_regressions"):
+        for row in payload.get(list_name) or []:
+            annotation = annotations_by_name.get(str(row.get("target_name", "")))
+            if annotation:
+                row.update(annotation)
+
+    parsed_total = counts["matched"] + counts["legacy_only"] + counts["ambiguous"]
+    payload["target_db_summary"] = {
+        "target_db_path": str(resolved_db_path) if resolved_db_path else None,
+        "target_db_error": target_db_error,
+        **counts,
+        "parsed_targets": parsed_total,
+        "match_rate": counts["matched"] / parsed_total if parsed_total else None,
+    }
+    return payload
+
+
 def compare_us_pe_native_target_deltas(
     *,
     from_dataset_path: str | Path,
@@ -2012,6 +2538,52 @@ def write_us_pe_native_scores(
     )
     destination = Path(output_path)
     destination.parent.mkdir(parents=True, exist_ok=True)
+    destination.write_text(
+        json.dumps(payload, indent=2, sort_keys=True, allow_nan=False)
+    )
+    return destination
+
+
+def write_us_pe_native_target_diagnostics(
+    output_path: str | Path,
+    *,
+    from_dataset_path: str | Path,
+    to_dataset_path: str | Path,
+    period: int = 2024,
+    top_k: int = 50,
+    from_label: str = "policyengine-us-data",
+    to_label: str = "microplex-us",
+    policyengine_us_data_repo: str | Path | None = None,
+    policyengine_us_data_python: str | Path | None = None,
+    policyengine_targets_db_path: str | Path | None = None,
+) -> Path:
+    """Write the full PE-native per-target diagnostic dataset to disk."""
+
+    payload = compare_us_pe_native_target_deltas(
+        from_dataset_path=from_dataset_path,
+        to_dataset_path=to_dataset_path,
+        period=period,
+        top_k=top_k,
+        policyengine_us_data_repo=policyengine_us_data_repo,
+        policyengine_us_data_python=policyengine_us_data_python,
+    )
+    payload["diagnostic_schema_version"] = 1
+    payload["dataset_labels"] = {
+        "from": from_label,
+        "to": to_label,
+    }
+    target_db_path = (
+        Path(policyengine_targets_db_path).expanduser()
+        if policyengine_targets_db_path is not None
+        else _default_policyengine_targets_db_path(policyengine_us_data_repo)
+    )
+    annotate_pe_native_target_db_matches(
+        payload,
+        target_db_path=target_db_path,
+        period=period,
+    )
+    destination = Path(output_path)
+    destination.parent.mkdir(parents=True, exist_ok=True)
     destination.write_text(json.dumps(payload, indent=2, sort_keys=True))
     return destination
 
@@ -2037,6 +2609,43 @@ def main(argv: list[str] | None = None) -> int:
         policyengine_us_data_repo=args.policyengine_us_data_repo,
     )
     print(json.dumps(score.to_dict(), indent=2, sort_keys=True))
+    return 0
+
+
+def main_target_diagnostics(argv: list[str] | None = None) -> int:
+    """CLI for full PE-native per-target diagnostics."""
+
+    parser = argparse.ArgumentParser(
+        description=(
+            "Write a full per-target PE-native diagnostic JSON comparing a "
+            "baseline dataset to a Microplex candidate."
+        )
+    )
+    parser.add_argument("--from-dataset", required=True)
+    parser.add_argument("--to-dataset", required=True)
+    parser.add_argument("--output-path", required=True)
+    parser.add_argument("--period", type=int, default=2024)
+    parser.add_argument("--top-k", type=int, default=50)
+    parser.add_argument("--from-label", default="policyengine-us-data")
+    parser.add_argument("--to-label", default="microplex-us")
+    parser.add_argument("--policyengine-us-data-python")
+    parser.add_argument("--policyengine-us-data-repo")
+    parser.add_argument("--policyengine-targets-db")
+    args = parser.parse_args(argv)
+
+    path = write_us_pe_native_target_diagnostics(
+        args.output_path,
+        from_dataset_path=args.from_dataset,
+        to_dataset_path=args.to_dataset,
+        period=args.period,
+        top_k=args.top_k,
+        from_label=args.from_label,
+        to_label=args.to_label,
+        policyengine_us_data_python=args.policyengine_us_data_python,
+        policyengine_us_data_repo=args.policyengine_us_data_repo,
+        policyengine_targets_db_path=args.policyengine_targets_db,
+    )
+    print(str(path))
     return 0
 
 

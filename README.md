@@ -15,6 +15,25 @@ built on top of the generic `microplex` engine.
 - [PE construction parity](./docs/pe-construction-parity.md)
 - [Superseding `policyengine-us-data`](./docs/superseding-policyengine-us-data.md)
 
+## Diagnostics dashboard
+
+The static dashboard in `dashboard/` loads the full PE-native per-target
+diagnostic JSON written by:
+
+```bash
+microplex-us-pe-native-target-diagnostics \
+  --from-dataset /path/to/enhanced_cps_2024.h5 \
+  --to-dataset /path/to/policyengine_us.h5 \
+  --policyengine-targets-db /path/to/policy_data.db \
+  --output-path artifacts/pe_native_target_diagnostics_current.json
+```
+
+The dashboard uses the exported Cosilico design tokens from
+`@cosilico/config/theme.css`; run `python scripts/sync_cosilico_theme.py --check`
+to verify the local browser-readable token copy is still synced.
+When a PolicyEngine target DB is available, the JSON annotates PE-native legacy
+labels with structured target IDs and flags legacy-only gaps.
+
 ## Current focus
 
 `microplex-us` is being built as a library-first US runtime with

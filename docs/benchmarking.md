@@ -68,8 +68,28 @@ Every serious saved run can write:
 - `policyengine_harness.json`
 - `run_registry.jsonl`
 - `run_index.duckdb`
+- `pe_native_target_diagnostics_current.json`
 
 These live under the selected artifact root.
+
+## Diagnostics dashboard
+
+The repo includes a static dashboard at `dashboard/` for inspecting the full
+PE-native target diagnostic dataset. It expects the JSON payload written by:
+
+```bash
+microplex-us-pe-native-target-diagnostics \
+  --from-dataset /path/to/enhanced_cps_2024.h5 \
+  --to-dataset /path/to/policyengine_us.h5 \
+  --policyengine-targets-db /path/to/policy_data.db \
+  --output-path artifacts/pe_native_target_diagnostics_current.json
+```
+
+The JSON includes full per-target rows, family summaries, scope summaries, top
+improvements, top regressions, and target DB match metadata when a structured
+PolicyEngine target DB is available. The dashboard loads that default artifact
+when served from the repo root, and can also load an arbitrary diagnostic JSON
+from disk.
 
 ## Inspecting runs
 

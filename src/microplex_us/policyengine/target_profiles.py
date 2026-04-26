@@ -35,6 +35,11 @@ PE_NATIVE_BROAD_TARGET_CELLS: tuple[PolicyEngineUSTargetCell, ...] = (
     PolicyEngineUSTargetCell("eitc", geo_level="national"),
     PolicyEngineUSTargetCell("eitc", geo_level="national", domain_variable="eitc_child_count"),
     PolicyEngineUSTargetCell(
+        "eitc",
+        geo_level="national",
+        domain_variable="adjusted_gross_income,eitc,eitc_child_count",
+    ),
+    PolicyEngineUSTargetCell(
         "health_insurance_premiums_without_medicare_part_b",
         geo_level="national",
     ),
@@ -115,6 +120,11 @@ PE_NATIVE_BROAD_TARGET_CELLS: tuple[PolicyEngineUSTargetCell, ...] = (
         "tax_unit_count",
         geo_level="national",
         domain_variable="eitc_child_count",
+    ),
+    PolicyEngineUSTargetCell(
+        "tax_unit_count",
+        geo_level="national",
+        domain_variable="adjusted_gross_income,eitc,eitc_child_count",
     ),
     PolicyEngineUSTargetCell("tax_unit_count", geo_level="national", domain_variable="income_tax"),
     PolicyEngineUSTargetCell(
